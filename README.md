@@ -48,7 +48,7 @@ config-set scope=plugins key=com.snow.novel-reader value={sourceDir: "D:/ai-work
    ```
 
    产物为 `dist/com.snow.novel-reader-<version>.zip`（`plugin.json` 位于 zip 根目录），脚本会输出 SHA-256。
-3. 在本仓库创建 GitHub Release（tag 建议语义化版本，如 `v1.0.0`），把该 zip 作为 Release 资产上传。
+3. 在本仓库创建 GitHub Release，把该 zip 作为 Release 资产上传。tag 用 `<插件目录>/v<版本>` 形式（如 `novel-reader/v1.0.0`），避免同一仓库内多个插件的 tag 冲突。
 4. 到索引仓库 [snow-plugin-store](https://github.com/MayDay-wpf/snow-plugin-store) 新增或更新 `app/plugins/com.snow.novel-reader.json`（一插件一文件，文件名等于插件 id），提交 PR：
 
    ```json
@@ -57,20 +57,24 @@ config-set scope=plugins key=com.snow.novel-reader value={sourceDir: "D:/ai-work
      "kind": "plugin",
      "name": { "default": "Novel Reader", "zh-CN": "小说阅读器", "zh-TW": "小說閱讀器" },
      "description": {
-       "default": "Floating TXT novel reader with adjustable opacity and position, wheel and hotkey paging, auto hide on mouse leave.",
-       "zh-CN": "悬浮 TXT 小说阅读器：可调透明度与显示位置，支持滚轮与快捷键翻页、鼠标移入显示移出隐藏。"
+       "default": "Floating TXT novel reader with adjustable opacity and position, wheel and hotkey paging, auto hide on mouse leave, chapter detection and auto scroll.",
+       "zh-CN": "悬浮 TXT 小说阅读器：可调透明度与显示位置，支持滚轮与快捷键翻页、鼠标移入显示移出隐藏，并带章节识别与自动滚动。"
      },
-     "repo": "https://github.com/<owner>/snow-plugins",
+     "author": "azhu949",
+     "repo": "https://github.com/azhu949/snow-plugins",
+     "homepage": "https://github.com/azhu949/snow-plugins/tree/main/snow-novel-reader",
      "version": "1.0.0",
-     "tag": "v1.0.0",
+     "tag": "novel-reader/v1.0.0",
      "asset": "com.snow.novel-reader-1.0.0.zip",
+     "downloadUrl": "https://github.com/azhu949/snow-plugins/releases/download/novel-reader%2Fv1.0.0/com.snow.novel-reader-1.0.0.zip",
      "sha256": "<pack.ps1 输出的 64 位十六进制哈希>",
-     "author": "<作者名>",
      "icon": "lucide:BookOpen",
      "privacy": [],
-     "tags": ["novel", "reader", "txt", "floating"]
+     "tags": ["novel", "reader", "txt", "floating", "小说", "阅读器"]
    }
    ```
+
+   注意：tag 含 `/` 时必须同时提供 `downloadUrl`（把 tag 中的 `/` 编码为 `%2F`）。客户端优先使用 `downloadUrl`，缺失时才按 `https://github.com/<owner>/<repo>/releases/download/<tag>/<asset>` 推导，而斜杠会让推导结果产生路径歧义。
 
    本地可用 `node app/scripts/validate-registry.mjs`（在 snow-plugin-store 仓库内）先自校验。
 5. CI 校验通过并合并后，客户端「插件市场」刷新即可安装或更新。

@@ -50,5 +50,6 @@ Write-Output ("压缩包    : {0}" -f $zipInfo.FullName)
 Write-Output ("体积      : {0} bytes" -f $zipInfo.Length)
 Write-Output ("SHA-256   : {0}" -f $hash)
 Write-Output ""
-Write-Output "下一步：在 GitHub 仓库创建 Release（tag 建议 v$version）并上传该 zip，"
+Write-Output "下一步：在 GitHub 仓库创建 Release（tag 建议 <插件目录>/v$version，如 $Plugin/v$version）并上传该 zip，"
 Write-Output "然后把 SHA-256 与资产文件名填入 snow-plugin-store 的 app/plugins/$id.json 索引条目并提 PR。"
+Write-Output "注意：tag 含 / 时，索引条目需同时提供 downloadUrl（tag 中的 / 编码为 %2F）。"
