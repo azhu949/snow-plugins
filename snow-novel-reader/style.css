@@ -1,0 +1,615 @@
+/* 小说阅读器插件样式：面板前缀 nr-，悬浮阅读窗前缀 snr-，避免影响应用界面 */
+
+/* ---------------- 面板 ---------------- */
+.nr-panel {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-primary, inherit);
+  /* 配色统一取宿主主题 token，随应用主题实时切换 */
+  --nr-sub: var(--text-tertiary, rgba(128, 134, 146, 0.95));
+  --nr-border: var(--border-color, rgba(128, 134, 146, 0.28));
+  --nr-hover: var(--bg-hover, rgba(128, 134, 146, 0.14));
+  --nr-accent: var(--accent-blue, #4f8cff);
+}
+
+.nr-panel *,
+.nr-panel *::before,
+.nr-panel *::after {
+  box-sizing: border-box;
+}
+
+.nr-head {
+  flex: none;
+  padding: 10px 12px 4px;
+}
+
+.nr-head-title {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.nr-head-sub {
+  margin-top: 3px;
+  font-size: 11px;
+  color: var(--nr-sub);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.nr-toolbar {
+  flex: none;
+  display: flex;
+  gap: 6px;
+  padding: 6px 12px 4px;
+}
+
+.nr-btn {
+  flex: 1;
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  padding: 6px 8px;
+  font-size: 12px;
+  border: 1px solid var(--nr-border);
+  border-radius: 7px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.nr-btn:hover {
+  background: var(--nr-hover);
+}
+
+.nr-btn.primary {
+  background: var(--accent-blue, #4f8cff);
+  border-color: transparent;
+  color: var(--on-solid, #ffffff);
+}
+
+.nr-btn.danger {
+  color: var(--accent-red, #e5484d);
+  border-color: rgba(229, 72, 77, 0.55);
+  border-color: color-mix(in srgb, var(--accent-red, #e5484d) 55%, transparent);
+}
+
+.nr-status {
+  flex: none;
+  min-height: 16px;
+  padding: 2px 12px 0;
+  font-size: 11px;
+  color: var(--nr-sub);
+}
+
+.nr-tabs {
+  flex: none;
+  display: flex;
+  gap: 2px;
+  padding: 6px 10px 0;
+  border-bottom: 1px solid var(--nr-border);
+}
+
+.nr-tab {
+  flex: 1;
+  min-width: 0;
+  height: 30px;
+  padding: 0 2px;
+  border: none;
+  background: transparent;
+  color: var(--nr-sub);
+  font-size: 12px;
+  line-height: 30px;
+  border-radius: 6px 6px 0 0;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.nr-tab.active {
+  color: inherit;
+  background: var(--bg-active, var(--nr-hover));
+  font-weight: 600;
+}
+
+.nr-view {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 8px 12px 14px;
+}
+
+.nr-hint {
+  margin: 0 0 8px;
+  font-size: 11px;
+  color: var(--nr-sub);
+}
+
+.nr-sec {
+  margin-bottom: 14px;
+}
+
+.nr-sec-title {
+  margin: 2px 0 6px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--nr-sub);
+}
+
+.nr-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 6px 0;
+}
+
+.nr-row-label {
+  flex: none;
+  width: 104px;
+  font-size: 12px;
+  color: var(--nr-sub);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.nr-row-ctl {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.nr-range {
+  flex: 1;
+  min-width: 0;
+  accent-color: var(--nr-accent);
+}
+
+.nr-val {
+  flex: none;
+  width: 48px;
+  text-align: right;
+  font-size: 11px;
+  color: var(--nr-sub);
+  font-variant-numeric: tabular-nums;
+}
+
+.nr-data-value {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.nr-select,
+.nr-input {
+  width: 100%;
+  padding: 4px 6px;
+  font-family: inherit;
+  font-size: 12px;
+  color: var(--text-primary, inherit);
+  background: transparent;
+  border: 1px solid var(--nr-border);
+  border-radius: 6px;
+  outline: none;
+}
+
+/* 原生下拉框：实色背景 + 主题文字色，展开的选项弹层才会跟随明暗主题
+   （参考 com.snow.session-track 的 .stk-select：透明背景会让弹层落到系统默认色） */
+.nr-select {
+  background: var(--bg-secondary, #f9fafb);
+}
+
+.nr-select option {
+  color: var(--text-primary, inherit);
+  background: var(--bg-secondary, #f9fafb);
+}
+
+.nr-select:focus-visible,
+.nr-input:focus-visible {
+  border-color: var(--accent-blue, #4f8cff);
+  box-shadow: 0 0 0 2px var(--focus-ring, rgba(17, 24, 39, 0.06));
+}
+
+.nr-input[type="number"] {
+  width: 84px;
+}
+
+.nr-seg {
+  flex: 1;
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--border-color, var(--nr-border));
+  border-radius: 7px;
+  background: var(--bg-tertiary, var(--nr-hover));
+}
+
+.nr-seg button {
+  flex: 1;
+  min-width: 0;
+  height: 22px;
+  padding: 0 2px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-tertiary, var(--nr-sub));
+  font-size: 11px;
+  line-height: 22px;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+
+.nr-seg button:hover {
+  color: var(--text-primary, inherit);
+}
+
+.nr-seg button.active {
+  background: var(--bg-primary, #ffffff);
+  color: var(--text-primary, inherit);
+  font-weight: 600;
+  box-shadow: 0 1px 2px var(--focus-ring, rgba(0, 0, 0, 0.2));
+}
+
+.nr-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.nr-check input {
+  accent-color: var(--nr-accent);
+}
+
+.nr-search {
+  margin: 0 0 8px;
+}
+
+.nr-search .nr-input {
+  background: var(--bg-secondary, #f9fafb);
+}
+
+.nr-list {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.nr-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 8px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.nr-item:hover {
+  background: var(--nr-hover);
+}
+
+.nr-item.active {
+  background: var(--accent-blue-bg, var(--nr-hover));
+}
+
+.nr-item-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.nr-item-name {
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.nr-item-sub {
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--nr-sub);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.nr-item-badge {
+  flex: none;
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--nr-hover);
+  color: var(--nr-sub);
+}
+
+.nr-icon-btn {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--nr-sub);
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.nr-icon-btn:hover {
+  background: var(--nr-hover);
+  color: inherit;
+}
+
+.nr-icon-btn.danger:hover {
+  color: var(--accent-red, #e5484d);
+}
+
+.nr-empty {
+  padding: 22px 8px;
+  text-align: center;
+  color: var(--nr-sub);
+  font-size: 12px;
+}
+
+.nr-icon-btn.active {
+  color: var(--accent-red, #e5484d);
+  background: var(--nr-hover);
+}
+
+.nr-keybtn {
+  flex: 1;
+  min-width: 0;
+  padding: 4px 8px;
+  font-family: inherit;
+  font-size: 11px;
+  color: inherit;
+  text-align: left;
+  background: transparent;
+  border: 1px dashed var(--nr-border);
+  border-radius: 6px;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.nr-keybtn:hover {
+  background: var(--nr-hover);
+}
+
+.nr-keybtn.recording {
+  border-style: solid;
+  border-color: var(--nr-accent);
+  color: var(--nr-accent);
+  background: var(--accent-blue-bg, var(--nr-hover));
+}
+
+.nr-file {
+  display: none;
+}
+
+/* ---------------- 悬浮阅读窗口 ---------------- */
+#snow-novel-reader-window.snr-win {
+  /* 跟随应用主题（auto）时，--snr-* 默认值直接取宿主主题 token；
+     选择固定阅读主题后由 JS 以内联样式覆盖这组默认值。 */
+  --snr-bg: var(--bg-primary, #ffffff);
+  --snr-text: var(--text-primary, #23262b);
+  --snr-sub: var(--text-tertiary, #7a8290);
+  --snr-border: var(--border-color, rgba(0, 0, 0, 0.12));
+  --snr-accent: var(--accent-blue, #4f8cff);
+  --snr-hover: var(--bg-hover, rgba(128, 134, 146, 0.18));
+  --snr-bar-bg: var(--bg-tertiary, rgba(128, 134, 146, 0.1));
+  position: fixed;
+  z-index: 2147483000;
+  display: flex;
+  flex-direction: column;
+  min-width: 220px;
+  min-height: 140px;
+  border-radius: 12px;
+  overflow: hidden;
+  background: var(--snr-bg, #ffffff);
+  color: var(--snr-text, #23262b);
+  border: 1px solid var(--snr-border, rgba(0, 0, 0, 0.12));
+  box-shadow: 0 14px 44px rgba(0, 0, 0, 0.28);
+  opacity: var(--snr-opacity, 1);
+  transition: opacity 0.2s ease;
+  font-family: var(--snr-font, system-ui, sans-serif);
+}
+
+#snow-novel-reader-window.snr-win.is-sleeping.mode-fade {
+  opacity: var(--snr-sleep-opacity, 0.06);
+}
+
+#snow-novel-reader-window.snr-win.is-sleeping.mode-hide {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.snr-bar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 30px;
+  padding: 0 6px 0 12px;
+  cursor: grab;
+  user-select: none;
+  background: var(--snr-bar-bg, rgba(128, 134, 146, 0.1));
+  border-bottom: 1px solid var(--snr-border, rgba(0, 0, 0, 0.12));
+}
+
+.snr-bar:active {
+  cursor: grabbing;
+}
+
+.snr-title {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.snr-percent {
+  flex: none;
+  font-size: 11px;
+  color: var(--snr-sub, #7a8290);
+  font-variant-numeric: tabular-nums;
+}
+
+.snr-actions {
+  flex: none;
+  display: flex;
+  gap: 2px;
+}
+
+.snr-btn {
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--snr-sub, #7a8290);
+  cursor: pointer;
+}
+
+.snr-btn:hover {
+  background: var(--snr-hover, rgba(128, 134, 146, 0.18));
+  color: var(--snr-text, #23262b);
+}
+
+.snr-btn.active {
+  color: var(--snr-accent, #4f8cff);
+}
+
+.snr-body {
+  flex: 1;
+  min-height: 0;
+  /* 垂直留白用 margin 而非 padding：不进滚动内容，行网格从内容顶部 0 开始，
+     与 JS 侧「视口恰好容纳整数行」的取整配合，翻页不会出现半截行 */
+  margin: 10px 0 18px;
+  padding: 0 18px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  /* 内容整体替换（翻段）时禁止浏览器滚动锚定自动调整滚动位置 */
+  overflow-anchor: none;
+}
+
+.snr-body::-webkit-scrollbar {
+  width: 8px;
+}
+
+.snr-body::-webkit-scrollbar-thumb {
+  background: rgba(128, 134, 146, 0.35);
+  border-radius: 4px;
+}
+
+.snr-body::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.snr-content {
+  word-break: break-word;
+}
+
+.snr-line {
+  white-space: pre-wrap;
+}
+
+.snr-line-empty {
+  height: var(--snr-lh-px, 1.9em);
+}
+
+.snr-content.indent .snr-line.snr-indent {
+  text-indent: 2em;
+}
+
+.snr-empty {
+  padding-top: 18px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--snr-sub, #7a8290);
+}
+
+.snr-foot {
+  flex: none;
+  height: 3px;
+  background: rgba(128, 134, 146, 0.18);
+}
+
+.snr-progress {
+  height: 100%;
+  width: 0;
+  background: var(--snr-accent, #4f8cff);
+  transition: width 0.15s linear;
+}
+
+.snr-resize {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 16px;
+  height: 16px;
+  cursor: nwse-resize;
+}
+
+.snr-resize::after {
+  content: "";
+  position: absolute;
+  right: 4px;
+  bottom: 4px;
+  width: 6px;
+  height: 6px;
+  border-right: 1.5px solid var(--snr-sub, #7a8290);
+  border-bottom: 1.5px solid var(--snr-sub, #7a8290);
+  opacity: 0.7;
+}
+
+/* 全隐模式下的唤醒圆点 */
+#snow-novel-reader-dot.snr-dot {
+  position: fixed;
+  z-index: 2147483001;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  color: var(--on-solid, #ffffff);
+  background: var(--accent-blue, #4f8cff);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.3);
+  opacity: 0.92;
+  cursor: pointer;
+  user-select: none;
+}
+
+#snow-novel-reader-dot.snr-dot:hover {
+  opacity: 1;
+}
+
+#snow-novel-reader-dot[hidden] {
+  display: none;
+}

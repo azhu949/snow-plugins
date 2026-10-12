@@ -1,0 +1,42 @@
+{
+  "id": "com.snow.novel-reader",
+  "name": {
+    "default": "Novel Reader",
+    "zh-CN": "小说阅读器",
+    "zh-TW": "小說閱讀器"
+  },
+  "description": {
+    "default": "Floating TXT novel reader: adjustable opacity and position, wheel and hotkey paging, auto hide on mouse leave, chapter detection and auto scroll.",
+    "zh-CN": "悬浮 TXT 小说阅读器：可调透明度与显示位置，支持滚轮与快捷键翻页、鼠标移入显示移出隐藏，并带章节识别与自动滚动。",
+    "zh-TW": "懸浮 TXT 小說閱讀器：可調不透明度與顯示位置，支援滾輪與快捷鍵翻頁，滑鼠移入顯示移出隱藏，並具備章節識別與自動捲動。"
+  },
+  "version": "1.0.0",
+  "author": "Snow App",
+  "license": "MIT",
+  "icon": "icon.svg",
+  "renderMode": "esm",
+  "entry": "index.js",
+  "panels": [
+    {
+      "id": "reader",
+      "title": {
+        "default": "Novel Reader",
+        "zh-CN": "小说阅读器",
+        "zh-TW": "小說閱讀器"
+      },
+      "icon": "lucide:BookOpen",
+      "widthHint": "360px"
+    }
+  ],
+  "locales": {
+    "zh-CN": "locales/zh-CN.json",
+    "zh-TW": "locales/zh-TW.json",
+    "en": "locales/en.json"
+  },
+  "styles": ["style.css"],
+  "privacy": {
+    "scopes": [],
+    "note": "只在本机保存你导入的 TXT 文本、阅读进度与阅读设置（浏览器 IndexedDB 与插件私有存储）；界面配色通过宿主主题变量自动跟随，不读取任何应用数据，不访问网络。"
+  },
+  "minAppVersion": ""
+}
