@@ -16,6 +16,8 @@
   "status.importFailed": "匯入失敗：{{error}}",
   "status.loadingBook": "正在讀取書籍…",
   "status.cleared": "已清空",
+  "status.panelFailed": "面板開啟失敗：{{error}}",
+  "status.panelUnavailable": "目前宿主版本不支援開啟外掛面板",
   "empty.books": "還沒有書籍，點擊「匯入 TXT」開始。",
   "empty.chapters": "未識別到章節，已按固定長度分段。",
   "empty.book": "這本書沒有文字內容。",

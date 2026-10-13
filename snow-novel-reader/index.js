@@ -9,6 +9,8 @@ const IDB_FALLBACK_PREFIX = "book-text-";
 const WIN_ID = "snow-novel-reader-window";
 const DOT_ID = "snow-novel-reader-dot";
 const SEGMENT_CHARS = 40000;
+// 面板 id 必须与 plugin.json 的 panels[0].id 保持一致（pluginsSelf.openPanel 的必填参数）
+const PANEL_ID = "reader";
 
 const DEFAULT_SETTINGS = {
   winVisible: false,
@@ -29,6 +31,33 @@ const DEFAULT_SETTINGS = {
   hotkeys: "hover",
   autoScroll: false,
   autoScrollSpeed: 40
+};
+
+// 设置项收敛规则表：键必须与 DEFAULT_SETTINGS 一一对应，sanitizeSettings 逐键按此收敛，
+// 并在末尾做双向差集校验；新增设置字段时忘记在此登记会被日志告警（而不是静默重置）。
+// kind：bool 布尔；num 数字（min/max 收敛）；oneOf 候选集（values 延迟求值，避免依赖声明顺序）；
+// nullableNum 数字或 null（如窗口坐标 x/y 的「未设置」语义）。
+// num 型键的 min/max 同时是界面滑杆的取值范围（带单位换算的项按 scale 换算：opacity/sleepOpacity 乘 100、lineHeight 乘 10）；
+// 滑杆必须直接引用本表，不得另写字面量。
+const SETTINGS_SPEC = {
+  winVisible: { kind: "bool" },
+  opacity: { kind: "num", min: 0.05, max: 1 },
+  sleepMode: { kind: "oneOf", values: () => ["always", "fade", "hide"] },
+  sleepOpacity: { kind: "num", min: 0.01, max: 1 },
+  sleepDelay: { kind: "num", min: 0, max: 10000 },
+  x: { kind: "nullableNum" },
+  y: { kind: "nullableNum" },
+  width: { kind: "num", min: 220, max: 1400 },
+  height: { kind: "num", min: 140, max: 1200 },
+  theme: { kind: "oneOf", values: () => ["auto"].concat(Object.keys(THEMES)) },
+  fontSize: { kind: "num", min: 11, max: 36 },
+  lineHeight: { kind: "num", min: 1.2, max: 3 },
+  font: { kind: "oneOf", values: () => Object.keys(FONT_STACKS) },
+  indent: { kind: "bool" },
+  wheelPaging: { kind: "bool" },
+  hotkeys: { kind: "oneOf", values: () => ["hover", "global", "off"] },
+  autoScroll: { kind: "bool" },
+  autoScrollSpeed: { kind: "num", min: 5, max: 400 }
 };
 
 // 可自定义键位的默认绑定：动作 id -> 键位标识数组（如 "Ctrl+ArrowRight"）
@@ -97,6 +126,8 @@ const FALLBACK = {
   "status.importFailed": "导入失败：{{error}}",
   "status.loadingBook": "正在读取书籍…",
   "status.cleared": "已清空",
+  "status.panelFailed": "面板打开失败：{{error}}",
+  "status.panelUnavailable": "当前宿主版本不支持打开插件面板",
   "empty.books": "还没有书籍，点击「导入 TXT」开始。",
   "empty.chapters": "未识别到章节，已按固定长度分段。",
   "empty.book": "这本书没有文字内容。",
@@ -281,12 +312,15 @@ export function mount(container, api) {
     segIndex: 0,
     lineOffsets: [],
     segStart: 0,
+    pendingLine: -1,
     sleeping: false,
     hover: false,
     dragging: false,
     lineHeightPx: 0
   };
   let disposed = false;
+  // 打开请求序号：自增即作废所有在途读取，保证只有最后一次 openBook 能落地
+  let openToken = 0;
   let panelTab = "books";
   let chapterQuery = "";
   let armedBookId = null;
@@ -429,11 +463,8 @@ export function mount(container, api) {
       const raw = await api.storage.getJson(STORE_STATE_KEY, null);
       if (!raw || typeof raw !== "object") return;
       if (raw.settings && typeof raw.settings === "object") {
-        for (const key of Object.keys(DEFAULT_SETTINGS)) {
-          if (Object.prototype.hasOwnProperty.call(raw.settings, key)) {
-            state.settings[key] = raw.settings[key];
-          }
-        }
+        const saved = sanitizeSettings(raw.settings);
+        for (const key of Object.keys(saved)) state.settings[key] = saved[key];
         state.settings.keyBindings = sanitizeKeyBindings(raw.settings.keyBindings);
       }
       if (Array.isArray(raw.books)) {
@@ -534,8 +565,11 @@ export function mount(container, api) {
       try {
         const all = await api.storage.all();
         if (all && typeof all === "object") {
-          for (const key of Object.keys(all)) {
-            if (key.indexOf(IDB_FALLBACK_PREFIX) === 0) await api.storage.remove(key);
+          // 受限并发删除回退键：减少清空时的串行等待，同时避免一次涌入过多 IPC
+          const keys = Object.keys(all).filter((key) => key.indexOf(IDB_FALLBACK_PREFIX) === 0);
+          const batchSize = 5;
+          for (let i = 0; i < keys.length; i += batchSize) {
+            await Promise.all(keys.slice(i, i + batchSize).map((key) => api.storage.remove(key)));
           }
         }
       } catch (err) {
@@ -545,6 +579,64 @@ export function mount(container, api) {
   };
 
   // ---------------- 文本处理 ----------------
+  // 粗略可读性评分：CJK 与全角标点、可打印 ASCII 加分，零字节、替换字符与控制字符扣分；
+  // 返回前 300 字符的每码点平均分，避免候选与对照文本长度不同时总分不可比
+  function readableScore(text) {
+    let value = 0;
+    const probe = String(text == null ? "" : text).slice(0, 300);
+    for (const ch of probe) {
+      const code = ch.codePointAt(0);
+      if (code === 0 || code === 0xfffd) value -= 4;
+      else if (code < 32 && code !== 9 && code !== 10 && code !== 13) value -= 4;
+      else if (code >= 0x4e00 && code <= 0x9fff) value += 2;
+      else if (code >= 0x20 && code <= 0x7e) value += 1;
+      else if (code >= 0x3000 && code <= 0x303f) value += 1;
+      else if (code >= 0xff00 && code <= 0xffef) value += 1;
+      else if (code >= 0x2000 && code <= 0x206f) value += 0;
+      else value -= 1;
+    }
+    // 分母按码点计数，与 for-of 的迭代口径一致（代理对只算一个字符）
+    const units = Array.from(probe).length;
+    return units ? value / units : 0;
+  }
+
+  // 按 16 位单元统计结构特征：CJK 及中文标点命中数、两侧字节同为可打印 ASCII 的单元数。
+  // 真 UTF-16 中文以汉字为主（CJK 命中率高、ASCII 配对率低）；Latin-1 等单字节西文被
+  // 误当作 UTF-16 时字母会两两配成 ASCII 单元（ASCII 配对率显著偏高）。
+  function utf16UnitStats(u8, littleEndian) {
+    const limit = Math.min(u8.length, 4096);
+    let units = 0;
+    let cjk = 0;
+    let bothAscii = 0;
+    for (let i = 0; i + 1 < limit; i += 2) {
+      const lo = littleEndian ? u8[i] : u8[i + 1];
+      const hi = littleEndian ? u8[i + 1] : u8[i];
+      const code = lo | (hi << 8);
+      units += 1;
+      if (code >= 0x4e00 && code <= 0x9fff) cjk += 1;
+      else if (code >= 0x3000 && code <= 0x303f) cjk += 1;
+      else if (code >= 0xff00 && code <= 0xffef) cjk += 1;
+      else if (code >= 0x2000 && code <= 0x206f) cjk += 1;
+      if (lo >= 0x20 && lo <= 0x7e && hi >= 0x20 && hi <= 0x7e) bothAscii += 1;
+    }
+    return { units: units, cjk: cjk, bothAscii: bothAscii };
+  }
+
+  // 纯中文的 UTF-16 正文几乎没有零字节，零字节探测不会触发；按两种字节序试解码，
+  // 只有结构特征可信（CJK 命中率 >= 0.5 且 ASCII 配对率 <= 0.6）时才返回候选，
+  // 否则返回 null 继续原有 GB18030 -> GBK -> UTF-8 回退链，避免把单字节西文误判为 UTF-16。
+  function decodeUtf16Candidate(u8) {
+    const le = utf16UnitStats(u8, true);
+    const be = utf16UnitStats(u8, false);
+    const trusted = (stats) =>
+      stats.units > 0 && stats.cjk / stats.units >= 0.5 && stats.bothAscii / stats.units <= 0.6;
+    const leOk = trusted(le);
+    const beOk = trusted(be);
+    if (!leOk && !beOk) return null;
+    const useLe = leOk && (!beOk || le.cjk >= be.cjk);
+    return useLe ? new TextDecoder("utf-16le").decode(u8) : new TextDecoder("utf-16be").decode(u8);
+  }
+
   function decodeBuffer(buffer) {
     const u8 = new Uint8Array(buffer);
     if (u8.length >= 3 && u8[0] === 0xef && u8[1] === 0xbb && u8[2] === 0xbf) {
@@ -556,7 +648,8 @@ export function mount(container, api) {
     if (u8.length >= 2 && u8[0] === 0xfe && u8[1] === 0xff) {
       return new TextDecoder("utf-16be").decode(u8.subarray(2));
     }
-    // 无 BOM 的 UTF-16 探测（大量零字节）
+    // 无 BOM 的 UTF-16 探测（大量零字节）：UTF-16LE 下 ASCII 的零字节落在奇数索引，
+    // 故 oddZeros 更高时是 utf-16le，evenZeros 更高时是 utf-16be。
     const sample = Math.min(u8.length, 4096);
     if (sample >= 16) {
       let evenZeros = 0;
@@ -568,8 +661,8 @@ export function mount(container, api) {
       const half = sample / 2 / 8;
       if (evenZeros > half || oddZeros > half) {
         return oddZeros > evenZeros
-          ? new TextDecoder("utf-16be").decode(u8)
-          : new TextDecoder("utf-16le").decode(u8);
+          ? new TextDecoder("utf-16le").decode(u8)
+          : new TextDecoder("utf-16be").decode(u8);
       }
     }
     try {
@@ -577,11 +670,17 @@ export function mount(container, api) {
     } catch (err) {
       /* 不是合法 UTF-8 */
     }
+    // 不是合法 UTF-8：可能是 GB18030/GBK 文本，也可能是零字节过少、探测未触发的无 BOM UTF-16 正文
+    let gbText = null;
     try {
-      return new TextDecoder("gb18030", { fatal: true }).decode(u8);
+      gbText = new TextDecoder("gb18030", { fatal: true }).decode(u8);
     } catch (err) {
       /* 不是合法 GB18030 */
     }
+    const utf16Text = decodeUtf16Candidate(u8);
+    const useUtf16 = utf16Text !== null && (gbText === null || readableScore(utf16Text) > readableScore(gbText));
+    if (useUtf16) return utf16Text;
+    if (gbText !== null) return gbText;
     try {
       return new TextDecoder("gbk").decode(u8);
     } catch (err) {
@@ -655,16 +754,25 @@ export function mount(container, api) {
     return THEMES[key] || THEMES.light;
   }
 
+  // 基础行高：非法设置回退默认字号乘行高，避免 NaN 传播到所有滚动计算
+  function baseLineHeightPx() {
+    const size = Number(state.settings.fontSize);
+    const ratio = Number(state.settings.lineHeight);
+    const fallback = DEFAULT_SETTINGS.fontSize * DEFAULT_SETTINGS.lineHeight;
+    const base = isFinite(size) && isFinite(ratio) && size > 0 && ratio > 0 ? size * ratio : fallback;
+    return Math.max(8, base);
+  }
+
   // 实际行高：由 refreshBodyMetrics 调整为「视口高度 / 整数行数」，
   // 让每屏恰好容纳整数行，翻页永远停在行边界；未测量时退回设置值。
   function lineHeightPx() {
     const lh = runtime.lineHeightPx;
     if (typeof lh === "number" && lh > 0) return lh;
-    return state.settings.fontSize * state.settings.lineHeight;
+    return baseLineHeightPx();
   }
 
   function refreshBodyMetrics() {
-    const base = Math.max(8, state.settings.fontSize * state.settings.lineHeight);
+    const base = baseLineHeightPx();
     const view = bodyEl.clientHeight;
     if (view > 0) {
       const rows = Math.max(1, Math.floor(view / base));
@@ -672,6 +780,13 @@ export function mount(container, api) {
     } else {
       runtime.lineHeightPx = base;
     }
+  }
+
+  // 可滚动上限并按行高向下取整：scrollHeight 是行高的整数倍，取整后停位始终落在行边界
+  function gridMaxScrollTop() {
+    const lh = lineHeightPx();
+    const max = Math.max(0, bodyEl.scrollHeight - bodyEl.clientHeight);
+    return Math.floor(max / lh) * lh;
   }
 
   // 重新测量视口并应用行高；keepAnchor 时把滚动位置吸附到行边界
@@ -758,8 +873,11 @@ export function mount(container, api) {
     winEl.style.setProperty("--snr-font", FONT_STACKS[settings.font] || FONT_STACKS.default);
     // 先确定窗口尺寸（决定阅读区高度），再按视口高度取整齐行高
     applyPosition();
+    // 行高随字号 / 视口变化，旧像素值不再对应同一行：先按旧行高记录阅读行，重算后按新行高回位
+    const keepLine = runtime.lineHeightPx > 0 ? bodyEl.scrollTop / runtime.lineHeightPx : 0;
     contentEl.style.fontSize = settings.fontSize + "px";
-    applyLineMetrics(false);
+    applyLineMetrics(true);
+    if (keepLine > 0) bodyEl.scrollTop = Math.round(keepLine) * lineHeightPx();
     contentEl.classList.toggle("indent", !!settings.indent);
     autoBtn.innerHTML = svgIcon(settings.autoScroll ? "pause" : "play", 14);
     autoBtn.classList.toggle("active", !!settings.autoScroll);
@@ -810,6 +928,13 @@ export function mount(container, api) {
     runtime.sleeping = false;
     applyPosition();
     applyLineMetrics(true);
+    // 隐藏期间渲染的段落此时才拿到布局盒，按待落位行重新定位并写回进度；
+    // 隐藏期间视口高度可能变化导致行高改变，落位前收敛到可滚动上限，避免被浏览器截断到段尾
+    if (runtime.pendingLine >= 0) {
+      bodyEl.scrollTop = clamp(runtime.pendingLine * lineHeightPx(), 0, gridMaxScrollTop());
+      runtime.pendingLine = -1;
+      updateProgressUI();
+    }
     syncSleepClasses();
     if (runtime.hover) wake();
     else scheduleSleep();
@@ -817,6 +942,11 @@ export function mount(container, api) {
     refreshPanel();
   }
   function hideWindow(silent) {
+    // display:none 会让滚动容器丢失布局盒并把滚动位置归零，隐藏前把当前阅读行记入
+    // pendingLine，由 showWindow 统一落位，与「隐藏期间重新渲染」共用同一恢复路径。
+    // 仅在窗口确实可见时记录：boot 以隐藏状态启动时，openBook 已按存档进度写入有效
+    // pendingLine，此时 scrollTop 读回为 0，若照写会覆盖成 0 并丢掉该恢复点。
+    if (runtime.current && winVisible()) runtime.pendingLine = Math.round(bodyEl.scrollTop / lineHeightPx());
     state.settings.winVisible = false;
     winEl.style.display = "none";
     runtime.sleeping = false;
@@ -845,6 +975,7 @@ export function mount(container, api) {
     empty.textContent = message || (runtime.current ? tr("empty.book") : tr("empty.reader"));
     contentEl.appendChild(empty);
     runtime.lineOffsets = [];
+    runtime.pendingLine = -1;
     progressEl.style.width = "0%";
     percentEl.textContent = "";
     updateHeader();
@@ -902,6 +1033,9 @@ export function mount(container, api) {
     void contentEl.offsetHeight;
     bodyEl.scrollTop = lineIndex * lineHeightPx();
     bodyEl.scrollLeft = 0;
+    // 窗口隐藏（display: none）时元素不生成布局盒，scrollTop 赋值无效且读回恒为 0，
+    // 记下目标行待窗口可见后由 showWindow 落位，避免进度被反算成段落开头。
+    runtime.pendingLine = winVisible() ? -1 : lineIndex;
     updateHeader();
     updateProgressUI();
   }
@@ -918,6 +1052,10 @@ export function mount(container, api) {
     const cur = runtime.current;
     const meta = state.books.find((b) => b.id === state.currentBookId);
     if (!cur || !meta) return;
+    // 窗口未生成布局盒时 scrollTop 恒为 0，据此反算会污染已保存进度。
+    // 隐藏期的进度变化已由 renderSegment 记入 runtime.pendingLine，并由 showWindow 落位后统一落盘；
+    // 调用方不得绕过 renderSegment 直接改写 meta.progress，也不要依赖本函数在隐藏期落盘。
+    if (!winVisible()) return;
     const offset = currentOffset();
     const total = cur.text.length || 1;
     const percent = Math.round((offset / total) * 1000) / 10;
@@ -971,6 +1109,9 @@ export function mount(container, api) {
   // 这里在翻段后短暂把视口锁回段首，任何用户滚动输入都会立即释放。
   function lockSegmentAnchor() {
     cancelSnapAnim();
+    // 清除已排队但未触发的吸附，避免与锁定期的逐帧回写互相打架
+    if (timers.snap) clearTimeout(timers.snap);
+    timers.snap = 0;
     const lh = lineHeightPx();
     segmentAnchorTop = Math.round(bodyEl.scrollTop / lh) * lh;
     segmentAnchorUntil = Date.now() + 400;
@@ -988,12 +1129,13 @@ export function mount(container, api) {
   function enforceSegmentAnchor() {
     segmentAnchorRaf = 0;
     if (disposed || !segmentAnchorUntil || Date.now() > segmentAnchorUntil) {
+      const ended = !disposed && !!segmentAnchorUntil;
       segmentAnchorUntil = 0;
+      // 锁定结束时对齐一次，避免停在非行边界位置
+      if (ended) snapScrollToGrid();
       return;
     }
-    const lh = lineHeightPx();
-    const max = Math.max(0, bodyEl.scrollHeight - bodyEl.clientHeight);
-    const target = clamp(segmentAnchorTop, 0, Math.floor(max / lh) * lh);
+    const target = clamp(segmentAnchorTop, 0, gridMaxScrollTop());
     if (Math.abs(bodyEl.scrollTop - target) > 1) bodyEl.scrollTop = target;
     segmentAnchorRaf = requestAnimationFrame(enforceSegmentAnchor);
   }
@@ -1025,6 +1167,8 @@ export function mount(container, api) {
   // 滚动（触控板 / 滚动条）停止后把位置滑回行边界，避免顶行或底行只剩半截
   function snapScrollToGrid() {
     if (!runtime.current || state.settings.autoScroll) return;
+    // 翻段锁定期间由 enforceSegmentAnchor 独占滚动位置
+    if (segmentAnchorUntil && Date.now() <= segmentAnchorUntil) return;
     const lh = lineHeightPx();
     const max = Math.max(0, bodyEl.scrollHeight - bodyEl.clientHeight);
     const alignedMax = Math.floor(max / lh) * lh;
@@ -1033,6 +1177,8 @@ export function mount(container, api) {
   }
   function scheduleScrollSnap() {
     if (state.settings.autoScroll) return;
+    // 翻段锁定期间不安排吸附，锁定结束由 enforceSegmentAnchor 收尾对齐
+    if (segmentAnchorUntil && Date.now() <= segmentAnchorUntil) return;
     if (timers.snap) clearTimeout(timers.snap);
     timers.snap = setTimeout(() => {
       timers.snap = 0;
@@ -1111,6 +1257,14 @@ export function mount(container, api) {
         timers.autoRaf = 0;
         return;
       }
+      // 窗口隐藏（display: none）时滚动容器不生成布局盒，scrollHeight 与 clientHeight 均为 0，
+      // 「已到底」判定会每帧成立，导致逐段推进到末段并静默关闭开关；
+      // 隐藏期只续排下一帧，保留开关状态与计时基准，窗口恢复后继续推进。
+      if (!winVisible()) {
+        last = 0;
+        timers.autoRaf = requestAnimationFrame(step);
+        return;
+      }
       if (!last) last = ts;
       const dt = Math.min(80, ts - last);
       last = ts;
@@ -1153,12 +1307,13 @@ export function mount(container, api) {
     if (disposed || !bookId) return;
     const meta = state.books.find((b) => b.id === bookId);
     if (!meta) return;
+    const token = ++openToken;
     if (!runtime.current || runtime.current.id !== bookId) {
       // 换书时重置目录搜索词，避免沿用上一本书的关键字
       chapterQuery = "";
       setStatus(tr("status.loadingBook"));
       const text = await textStore.get(bookId);
-      if (disposed) return;
+      if (disposed || token !== openToken) return;
       if (typeof text !== "string" || text.length === 0) {
         setStatus(tr("empty.book"));
         return;
@@ -1186,6 +1341,8 @@ export function mount(container, api) {
 
   async function removeBook(bookId) {
     armedBookId = null;
+    // 作废在途打开请求，避免被删除的书在读取完成后又被打开
+    openToken += 1;
     const meta = state.books.find((b) => b.id === bookId);
     if (!meta) return;
     await textStore.remove(bookId);
@@ -1200,6 +1357,8 @@ export function mount(container, api) {
   }
 
   async function clearAllData() {
+    // 作废在途打开请求，避免清空后又被旧读取结果填回
+    openToken += 1;
     await textStore.clear();
     state.books = [];
     state.currentBookId = null;
@@ -1288,17 +1447,24 @@ export function mount(container, api) {
     input.max = String(options.max);
     input.step = String(options.step);
     // 出生即同步当前值：否则首次交互触发 syncControls 时手柄跳变（表现为“抖一下”）
-    input.value = String(options.get());
+    // lastWritten 记录本控件上次写入 input.value 的字符串，避免「写入后浏览器按 min/max/step 量化、读回不等、再次写入」的无效循环
+    let lastWritten = String(options.get());
+    input.value = lastWritten;
     const format = options.format || ((v) => String(v));
     const val = el("div", "nr-val", format(options.get()));
     input.addEventListener("input", () => {
       const value = Number(input.value);
+      lastWritten = input.value;
       val.textContent = format(value);
       options.onChange(value);
     });
     registerControl(() => {
       const current = options.get();
-      if (Number(input.value) !== current) input.value = String(current);
+      const next = String(current);
+      if (lastWritten !== next) {
+        input.value = next;
+        lastWritten = next;
+      }
       val.textContent = format(current);
     });
     return makeRow(label, [input, val]);
@@ -1495,7 +1661,6 @@ export function mount(container, api) {
   }
 
   function renderSettingsView() {
-    controlUpdaters.length = 0;
     const wrap = document.createDocumentFragment();
     const settings = state.settings;
 
@@ -1536,8 +1701,8 @@ export function mount(container, api) {
     );
     winSec.appendChild(
       makeSlider(tr("settings.sleepDelay"), {
-        min: 0,
-        max: 3000,
+        min: SETTINGS_SPEC.sleepDelay.min,
+        max: SETTINGS_SPEC.sleepDelay.max,
         step: 100,
         get: () => settings.sleepDelay,
         format: (v) => v + " ms",
@@ -1625,7 +1790,6 @@ export function mount(container, api) {
   }
 
   function renderKeysView() {
-    controlUpdaters.length = 0;
     const wrap = document.createDocumentFragment();
     const settings = state.settings;
     const actSec = el("div", "nr-sec");
@@ -1646,8 +1810,8 @@ export function mount(container, api) {
     actSec.appendChild(makeCheck(tr("settings.autoScroll"), () => settings.autoScroll, (v) => setAutoScroll(v)));
     actSec.appendChild(
       makeSlider(tr("settings.autoSpeed"), {
-        min: 5,
-        max: 240,
+        min: SETTINGS_SPEC.autoScrollSpeed.min,
+        max: SETTINGS_SPEC.autoScrollSpeed.max,
         step: 5,
         get: () => settings.autoScrollSpeed,
         format: (v) => v + " px/s",
@@ -1683,7 +1847,6 @@ export function mount(container, api) {
   }
 
   function renderDataView() {
-    controlUpdaters.length = 0;
     const wrap = document.createDocumentFragment();
     const dataSec = el("div", "nr-sec");
     dataSec.appendChild(el("div", "nr-sec-title", tr("settings.data")));
@@ -1719,6 +1882,8 @@ export function mount(container, api) {
   }
 
   function renderView() {
+    // 视图切换是控件登记的唯一生命周期边界：先清空旧闭包，再重建 DOM
+    controlUpdaters.length = 0;
     viewEl.replaceChildren();
     // 离开快捷键页时结束录制，避免按键被静默吞掉
     if (panelTab !== "keys") recordingKey = null;
@@ -1868,6 +2033,47 @@ export function mount(container, api) {
       const list = raw[action.id];
       if (!Array.isArray(list)) continue;
       result[action.id] = list.filter((id) => typeof id === "string" && id.length > 0 && id.length <= 40).slice(0, 6);
+    }
+    return result;
+  }
+
+  // 载入存储时按 SETTINGS_SPEC 逐键收敛类型与范围，非法值回退默认设置（与 sanitizeKeyBindings 对称）；
+  // 收敛规则与默认值同源（规则表 + DEFAULT_SETTINGS），新增设置字段只需登记一次。
+  // 双向差集校验：任一侧多出/缺少键都会告警，避免新增字段被静默重置且无迹可查。
+  function sanitizeSettings(raw) {
+    const result = Object.assign({}, DEFAULT_SETTINGS);
+    const defaults = Object.keys(DEFAULT_SETTINGS);
+    for (const key of defaults) {
+      if (!Object.prototype.hasOwnProperty.call(SETTINGS_SPEC, key)) log("settings spec missing key", key);
+    }
+    for (const key of Object.keys(SETTINGS_SPEC)) {
+      if (defaults.indexOf(key) === -1) log("settings spec unknown key", key);
+    }
+    // 默认值必须落在收敛区间内，否则载入时会被夹回边界，表现为设置改不动且重启回退；这里只告警不修正
+    for (const key of Object.keys(SETTINGS_SPEC)) {
+      const spec = SETTINGS_SPEC[key];
+      if (spec.kind !== "num") continue;
+      const def = DEFAULT_SETTINGS[key];
+      if (def < spec.min || def > spec.max) log("settings default out of range", key, def, spec.min, spec.max);
+    }
+    if (!raw || typeof raw !== "object") return result;
+    const num = (value, fallback, min, max) => {
+      // 只接受数字与非空数字字符串（隐式转换原本可用），null / 布尔 / 空串 / 对象等一律回退默认
+      const isNumeric = typeof value === "number" || (typeof value === "string" && value.trim() !== "");
+      const n = isNumeric ? Number(value) : NaN;
+      if (!isFinite(n)) return fallback;
+      return Math.min(Math.max(n, min), max);
+    };
+    const bool = (value, fallback) => (typeof value === "boolean" ? value : fallback);
+    const oneOf = (value, allowed, fallback) => (allowed.indexOf(value) === -1 ? fallback : value);
+    for (const key of Object.keys(SETTINGS_SPEC)) {
+      const spec = SETTINGS_SPEC[key];
+      const fallback = DEFAULT_SETTINGS[key];
+      const value = raw[key];
+      if (spec.kind === "bool") result[key] = bool(value, fallback);
+      else if (spec.kind === "num") result[key] = num(value, fallback, spec.min, spec.max);
+      else if (spec.kind === "oneOf") result[key] = oneOf(value, spec.values(), fallback);
+      else if (spec.kind === "nullableNum") result[key] = typeof value === "number" && isFinite(value) ? value : null;
     }
     return result;
   }
@@ -2099,9 +2305,25 @@ export function mount(container, api) {
 
   function openPluginPanel() {
     try {
-      if (api.write && typeof api.write.run === "function") {
-        const p = api.write.run("pluginsSelf.openPanel", {});
-        if (p && typeof p.catch === "function") p.catch(() => {});
+      if (!api.write || typeof api.write.run !== "function") {
+        log("open plugin panel skipped: api.write.run unavailable");
+        setStatus(tr("status.panelUnavailable"));
+        return;
+      }
+      const request = api.write.run("pluginsSelf.openPanel", { panelId: PANEL_ID });
+      // 宿主失败时以 resolve 返回 { ok: false, error }，catch 不会触发，必须读返回值判定
+      if (request && typeof request.then === "function") {
+        request
+          .then((result) => {
+            if (result && result.ok === false) {
+              log("open plugin panel failed", result.error);
+              setStatus(tr("status.panelFailed", { error: result.error || "" }));
+            }
+          })
+          .catch((err) => {
+            log("open plugin panel failed", err);
+            setStatus(tr("status.panelFailed", { error: (err && err.message) || String(err) }));
+          });
       }
     } catch (err) {
       log("open plugin panel failed", err);
@@ -2123,7 +2345,9 @@ export function mount(container, api) {
       renderEmpty();
     }
     if (state.settings.winVisible) showWindow();
-    else hideWindow(true);
+    // winVisible 为假时无需显式隐藏：winEl 创建即 display:none，且 winVisible 与 display
+    // 在 showWindow / hideWindow 中成对变更；此处原先的 hideWindow(true) 为幂等 no-op，
+    // 删除不改变任何可观察行为。
     if (state.settings.autoScroll) startAutoScroll();
   }
   boot().catch((err) => {

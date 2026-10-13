@@ -16,6 +16,8 @@
   "status.importFailed": "导入失败：{{error}}",
   "status.loadingBook": "正在读取书籍…",
   "status.cleared": "已清空",
+  "status.panelFailed": "面板打开失败：{{error}}",
+  "status.panelUnavailable": "当前宿主版本不支持打开插件面板",
   "empty.books": "还没有书籍，点击「导入 TXT」开始。",
   "empty.chapters": "未识别到章节，已按固定长度分段。",
   "empty.book": "这本书没有文字内容。",

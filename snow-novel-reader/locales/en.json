@@ -16,6 +16,8 @@
   "status.importFailed": "Import failed: {{error}}",
   "status.loadingBook": "Loading book…",
   "status.cleared": "Cleared",
+  "status.panelFailed": "Failed to open panel: {{error}}",
+  "status.panelUnavailable": "This host version does not support opening plugin panels",
   "empty.books": "No books yet. Click \"Import TXT\" to start.",
   "empty.chapters": "No chapters detected; the text is split into fixed-length segments.",
   "empty.book": "This book contains no text.",

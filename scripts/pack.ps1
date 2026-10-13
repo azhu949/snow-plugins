@@ -27,6 +27,11 @@ $version = [string]$manifest.version
 if (-not $id) { throw "plugin.json 缺少 id 字段" }
 if (-not $version) { $version = "1.0.0" }
 
+# tag 短名前缀：插件 id 的末段（com.snow.novel-reader 对应 novel-reader），与市场索引条目保持一致
+# 先过滤空段再取末段，避免 id 以点号结尾（如 a.）时得到空串
+$tagPrefix = $id.Split('.') | Where-Object { $_ -ne "" } | Select-Object -Last 1
+if (-not $tagPrefix) { throw "无法从插件 id 推导 tag 前缀：$id（id 末段为空）" }
+
 $distDir = Join-Path $repoRoot "dist"
 if (-not (Test-Path -LiteralPath $distDir)) {
   New-Item -ItemType Directory -Path $distDir -Force | Out-Null
@@ -50,6 +55,6 @@ Write-Output ("压缩包    : {0}" -f $zipInfo.FullName)
 Write-Output ("体积      : {0} bytes" -f $zipInfo.Length)
 Write-Output ("SHA-256   : {0}" -f $hash)
 Write-Output ""
-Write-Output "下一步：在 GitHub 仓库创建 Release（tag 建议 <插件目录>/v$version，如 $Plugin/v$version）并上传该 zip，"
+Write-Output "下一步：在 GitHub 仓库创建 Release（tag 建议 <插件 id 末段>/v$version，如 $tagPrefix/v$version）并上传该 zip，"
 Write-Output "然后把 SHA-256 与资产文件名填入 snow-plugin-store 的 app/plugins/$id.json 索引条目并提 PR。"
 Write-Output "注意：tag 含 / 时，索引条目需同时提供 downloadUrl（tag 中的 / 编码为 %2F）。"
