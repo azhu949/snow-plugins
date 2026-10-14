@@ -80,6 +80,11 @@
   border-color: color-mix(in srgb, var(--accent-red, #e5484d) 55%, transparent);
 }
 
+.nr-btn svg {
+  flex: none;
+}
+
+/* 状态栏：分级配色（info / success / error / loading）；error 与 loading 常驻并带关闭按钮 */
 .nr-status {
   flex: none;
   min-height: 16px;
@@ -88,27 +93,111 @@
   color: var(--nr-sub);
 }
 
+.nr-status:not(:empty) {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 22px;
+  padding-bottom: 2px;
+}
+
+.nr-status-icon {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  color: currentColor;
+}
+
+.nr-status-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.nr-status-close {
+  flex: none;
+  width: 18px;
+  height: 18px;
+}
+
+.nr-status-info {
+  color: var(--nr-sub);
+}
+
+.nr-status-success {
+  color: var(--accent-green-text, #166534);
+}
+
+.nr-status-error {
+  color: var(--accent-red-text, #991b1b);
+}
+
+.nr-status-loading {
+  color: var(--accent-blue-text, #1d4ed8);
+}
+
+/* 加载态图标持续旋转，明确「正在进行」而不是卡住 */
+.nr-status-loading .nr-status-icon svg {
+  animation: nr-spin 1s linear infinite;
+}
+
+@keyframes nr-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* 失败提示加一层淡底色，避免被误当作普通灰字提示 */
+.nr-status-error:not(:empty) {
+  background: var(--accent-red-bg, rgba(239, 68, 68, 0.12));
+  border-radius: 6px;
+  margin: 0 10px 2px;
+  padding: 3px 8px;
+}
+
+.nr-status-loading:not(:empty) {
+  background: var(--accent-blue-bg, rgba(59, 130, 246, 0.12));
+  border-radius: 6px;
+  margin: 0 10px 2px;
+  padding: 3px 8px;
+}
+
 .nr-tabs {
   flex: none;
   display: flex;
-  gap: 2px;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 4px;
   padding: 6px 10px 0;
   border-bottom: 1px solid var(--nr-border);
 }
 
+/* 多排换行下按钮按内容自适应宽度，图标与文字同行居中 */
 .nr-tab {
-  flex: 1;
+  flex: 0 0 auto;
   min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
   height: 30px;
-  padding: 0 2px;
+  padding: 0 8px;
   border: none;
   background: transparent;
   color: var(--nr-sub);
   font-size: 12px;
-  line-height: 30px;
   border-radius: 6px 6px 0 0;
   cursor: pointer;
   white-space: nowrap;
+}
+
+.nr-tab svg {
+  flex: none;
+}
+
+.nr-tab-text {
   overflow: hidden;
   text-overflow: ellipsis;
 }
@@ -130,6 +219,12 @@
   margin: 0 0 8px;
   font-size: 11px;
   color: var(--nr-sub);
+}
+
+/* 二次确认提示：与危险按钮同色，明确「这次点击会删掉什么」 */
+.nr-hint.nr-warn {
+  color: var(--accent-red-text, #991b1b);
+  white-space: normal;
 }
 
 .nr-sec {
@@ -369,9 +464,15 @@
   font-size: 12px;
 }
 
+/* 二次确认的红色危险态 */
 .nr-icon-btn.active {
   color: var(--accent-red, #e5484d);
   background: var(--nr-hover);
+}
+
+/* 启用态（如「书源已启用」的电源图标）：与红色危险态语义不同，互不覆盖 */
+.nr-icon-btn.on {
+  color: var(--accent-blue, #4f8cff);
 }
 
 .nr-keybtn {
@@ -404,6 +505,107 @@
 
 .nr-file {
   display: none;
+}
+
+/* 书源页：粘贴框与警告文案 */
+.nr-textarea {
+  width: 100%;
+  min-height: 62px;
+  padding: 6px 8px;
+  font-family: inherit;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-primary, inherit);
+  background: var(--bg-secondary, #f9fafb);
+  border: 1px solid var(--nr-border);
+  border-radius: 6px;
+  outline: none;
+  resize: vertical;
+}
+
+.nr-textarea:focus-visible {
+  border-color: var(--accent-blue, #4f8cff);
+  box-shadow: 0 0 0 2px var(--focus-ring, rgba(17, 24, 39, 0.06));
+}
+
+.nr-item-sub.nr-warn {
+  color: var(--accent-red, #e5484d);
+  white-space: normal;
+}
+
+/* ---------------- 弹窗（书源导入等） ---------------- */
+.nr-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+}
+
+/* 必须显式声明：否则上面的 display: flex 会盖掉 HTML 的 hidden 属性，弹窗关不掉 */
+.nr-modal[hidden] {
+  display: none;
+}
+
+.nr-modal-mask {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.42);
+}
+
+.nr-modal-card {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  max-width: 460px;
+  max-height: 100%;
+  overflow: hidden;
+  background: var(--bg-primary, #ffffff);
+  border: 1px solid var(--nr-border);
+  border-radius: 10px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.28);
+}
+
+.nr-modal-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--nr-border);
+}
+
+.nr-modal-title {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.nr-modal-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  overflow: auto;
+}
+
+.nr-modal-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+/* 弹窗内的粘贴框比面板内更高，便于查看/编辑导入内容 */
+.nr-modal-body .nr-textarea {
+  min-height: 120px;
 }
 
 /* ---------------- 悬浮阅读窗口 ---------------- */

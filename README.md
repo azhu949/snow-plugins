@@ -6,7 +6,14 @@ Snow App 插件集合仓库。每个子目录是一个独立插件（该目录�
 
 | 插件 | ID | 版本 | 说明 |
 | ---- | -- | ---- | ---- |
-| 小说阅读器 | `com.snow.novel-reader` | 1.0.1 | 悬浮 TXT 小说阅读器：可调透明度与显示位置，支持滚轮与快捷键翻页、鼠标移入显示移出隐藏，并带章节识别与自动滚动 |
+| 小说阅读器 | `com.snow.novel-reader` | 1.1.0 | 悬浮 TXT 小说阅读器（可调透明度与显示位置、滚轮与快捷键翻页、章节识别与自动滚动）+ legado 书源导入、多源并发搜索与在线追书 |
+
+### 小说阅读器：功能范围
+
+- 本地阅读：导入 TXT（可多选）、书架与目录、阅读进度、悬浮阅读窗（透明度 / 位置 / 字号 / 行高，配色跟随宿主主题）。
+- 在线追书：导入 **legado 格式**书源（只支持 legado，不做其它阅读器格式适配；一次可导入多个源）、多源并发搜索、详情与目录分页抓取、章节正文缓存。
+- 隐私：不内置任何书源、不后台联网；只有你主动点「搜索」或打开在线章节时，才会通过宿主网络通道访问书源里指定的站点。
+- 「数据」页的「清空全部数据」会一并清掉书源与章节缓存（阅读设置与快捷键保留），二次确认时会列出清除范围。
 
 ## 目录结构
 
@@ -14,13 +21,15 @@ Snow App 插件集合仓库。每个子目录是一个独立插件（该目录�
 snow-plugins/
   snow-novel-reader/          插件源码目录（打包根）
     plugin.json               插件清单（id / version / panels / locales / styles / privacy）
-    index.js                  入口（export function mount(container, api) 返回清理函数）
-    style.css                 面板与悬浮窗口样式
+    index.js                  入口（默认导出 React 面板组件；兼容 export function mount(container, api)）
+    style.css                 面板与悬浮阅读窗样式
     locales/                  zh-CN / zh-TW / en 语言包
     icon.svg                  插件图标
+  sources/                    本地 legado 书源合集（已加入 .gitignore，见 sources/README.md）
   scripts/
     pack.ps1                  打包脚本：生成可发布的 zip 并输出 SHA-256
   dist/                       打包产物（已加入 .gitignore）
+  .snow/                      本地测试与开发脚本（已加入 .gitignore）
 ```
 
 ## 本地开发与调试
