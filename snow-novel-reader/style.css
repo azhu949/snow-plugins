@@ -683,7 +683,17 @@
 .snr-actions {
   flex: none;
   display: flex;
+  align-items: center;
   gap: 2px;
+}
+
+/* 章节导航与窗口操作之间的分组分隔线 */
+.snr-sep {
+  flex: none;
+  width: 1px;
+  height: 14px;
+  margin: 0 3px;
+  background: var(--snr-border, rgba(0, 0, 0, 0.12));
 }
 
 .snr-btn {

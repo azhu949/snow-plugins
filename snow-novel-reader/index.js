@@ -239,6 +239,8 @@ const FALLBACK = {
   "source.empty": "还没有书源。导入「阅读」书源 JSON 后即可搜索在线阅读。",
   "source.importOk": "已导入 {{count}} 个书源",
   "source.importDup": "（跳过 {{count}} 个重复）",
+  "source.importUpdated": "（更新 {{count}} 个已有书源）",
+  "source.importOverwrite": "覆盖同地址的已有书源（保留启用状态）",
   "source.importFail": "导入失败：{{error}}",
   "source.importParseError": "不是合法的 JSON 文本",
   "source.importEmpty": "没有解析到有效书源（需要 bookSourceUrl 字段）",
@@ -255,13 +257,14 @@ const FALLBACK = {
   "source.searchEmpty": "没有搜到结果，试试其它关键词或书源。",
   "source.searchNoSource": "还没有可用的书源。请先到「书源」页导入并启用书源。",
   "source.searchFailed": "搜索失败：{{error}}",
+  "source.searchStreaming": "已找到 {{found}} 条 · 已完成 {{done}}/{{total}} 个书源",
   "source.addToShelf": "加入书架",
   "source.addedOpen": "已加入书架，正在打开…",
   "source.addFailed": "加入失败：{{error}}",
   "source.loadingToc": "正在加载目录…",
   "source.loadingContent": "正在加载正文…",
   "source.chapterCount": "{{count}} 章",
-  "source.encodingWarn": "该站响应声明为 {{charset}} 编码，当前宿主只回传 UTF-8 文本，可能出现乱码（见 snow-app#198）。",
+  "source.encodingWarn": "该站声明 {{charset}} 编码，但宿主未回传原始字节，正文按 UTF-8 解读可能出现乱码（把宿主更新到最新版本即可修复）。",
   "source.deleteConfirm": "再次点击「删除」确认移除该源",
   "source.offlineBook": "在线",
   "source.tocFailed": "目录加载失败：{{error}}",
@@ -307,14 +310,17 @@ const THEMES = {
 };
 
 // 悬浮阅读窗是挂在 document.body 上的独立命令式 DOM（不经过 React），
-// 无法渲染 api.ui.icon 返回的 React 组件，因此这里只内联它用到的 5 个图标几何。
+// 无法渲染 api.ui.icon 返回的 React 组件，因此这里只内联它用到的图标几何。
 // 数据取自 lucide-react 1.28.0（宿主 pnpm-lock.yaml 实际解析版本），与 api.ui.icon 同源。
 const WINDOW_ICONS = {
   play: '<path d="M5 5a2 2 0 0 1 3.008-1.728l11.997 6.998a2 2 0 0 1 .003 3.458l-12 7A2 2 0 0 1 5 19z"/>',
   pause: '<rect x="14" y="3" width="5" height="18" rx="1"/><rect x="5" y="3" width="5" height="18" rx="1"/>',
   panel: '<rect width="18" height="18" x="3" y="3" rx="2"/><path d="M15 3v18"/>',
   close: '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
-  book: '<path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H19a1 1 0 0 1 1 1v18a1 1 0 0 1-1 1H6.5a1 1 0 0 1 0-5H20"/>'
+  book: '<path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H19a1 1 0 0 1 1 1v18a1 1 0 0 1-1 1H6.5a1 1 0 0 1 0-5H20"/>',
+  // chevron-left / chevron-right：顶部栏的上一章 / 下一章入口
+  chevronLeft: '<path d="m15 18-6-6 6-6"/>',
+  chevronRight: '<path d="m9 18 6-6-6-6"/>'
 };
 
 function svgIcon(name, size) {
@@ -783,18 +789,28 @@ function splitSourceUrl(raw) {
   return { url: text, options: null };
 }
 
-// ---------------- 净化：##正则##替换（循环）与 ###（仅首个匹配） ----------------
+// ---------------- 净化：##正则##替换（循环）与 ###（正则之OnlyOne：取首个匹配段替换后返回） ----------------
 // 净化防护：参净化文本超过该长度直接跳过。第三方书源的净化正则是任意字符串，
 // 灾难性回溯会在渲染线程同步跑满 CPU，只能靠限制输入规模兜底。
 const PURIFY_TEXT_MAX = 200000;
 const PURIFY_REGEX_CACHE_MAX = 200;
 // 编译结果按 pattern+flags 复用：同一条规则会对多个提取结果反复净化，避免重复编译。
-// 只用于 String.prototype.replace（replace 会自行重置 lastIndex），不要用于 test / exec，
-// 否则 g 标志的 lastIndex 状态会在多次调用之间互相污染。
+// 使用场景：字符串 replace / 无 g 正则的 exec（OnlyOne 取首个匹配，不维护 lastIndex）。
+// 不要对带 g 的正则调用 test / exec，否则 g 标志的 lastIndex 状态会在多次调用之间互相污染。
 const purifyRegexCache = new Map();
 // 超长跳过只上报一次；模块层没有日志通道，由 createEngine 把 api.log 注入进来。
 let purifySkipLog = null;
 let purifySkipReported = false;
+// 扩展伪类（:contains/:matches 等）与属性正则 [key~=re] 的同类防护：参与判定的文本/
+// 属性值超长直接判不匹配，单个 querySegment 候选集超限停止扫描并保留已命中项，
+// 避免恶意书源在渲染线程拖满 CPU（与 PURIFY_TEXT_MAX 同一「宁跳过不冻结」约定）。
+const PSEUDO_TEXT_MAX = 200000;
+const PSEUDO_CANDIDATE_MAX = 10000;
+// 三类超限各自的限次门闩：只上报一次，防同一劣质书源把日志刷成瀑布。
+let pseudoSkipLog = null;
+let pseudoTextSkipReported = false;
+let pseudoAttrSkipReported = false;
+let pseudoCandidateSkipReported = false;
 
 function applyPurify(text, rule) {
   const raw = String(rule == null ? "" : rule);
@@ -828,6 +844,14 @@ function applyPurify(text, rule) {
     purifyRegexCache.set(cacheKey, regex);
   }
   try {
+    if (onlyFirst) {
+      // legado「正则之OnlyOne」（##match##replace###）：取第一个匹配段，只返回该段替换后的结果。
+      // 等价 legado replaceRegex()：matcher.group(0).replaceFirst(regex, replacement)。
+      // 社区源用它从节点 HTML 里「抠」URL / 属性值；若返回整串替换结果会残留 HTML 残渣。
+      const match = regex.exec(source);
+      if (!match) return "";
+      return match[0].replace(regex, replacement);
+    }
     return source.replace(regex, replacement);
   } catch (err) {
     return text;
@@ -878,6 +902,18 @@ function isExtractMode(segment) {
   const text = String(segment || "").trim();
   if (!text || text.indexOf(".") !== -1 || text.indexOf("[") !== -1) return false;
   return Object.prototype.hasOwnProperty.call(RULE_EXTRACT_MODES, text);
+}
+
+// 末段属性名兜底：legado 的 Default 模式里，链末段除特殊模式（text/html/...）外一律按
+// 「属性名」处理（element.attr(name)），真实书源依赖它取自定义属性（如 ReadNovelFull 的
+// {{@@#rating@data-novel-id}}）。这里只把「不像选择器」的纯标识符归为属性名：
+// class./tag./id. 简写、带索引、组合选择器、伪类等仍维持选择器语义。
+function isAttributeNameSegment(segment) {
+  const text = String(segment || "").trim();
+  if (!text) return false;
+  if (isExtractMode(text) || text === "children") return false;
+  if (/[.\[\]#>:\s(]/.test(text)) return false;
+  return true;
 }
 
 // 块级标签：提取文本时在其前面补换行，避免 <p> / <br> 分隔的正文粘成一整行
@@ -943,42 +979,468 @@ function extractFromNode(node, mode) {
   return "";
 }
 
-// ---------------- CSS 选择器（含 legado 常用的 :eq(n) 扩展） ----------------
+// ---------------- CSS 选择器（含 legado / jsoup 扩展伪类） ----------------
+// legado 把 @css: 与 Default 的选择器直接交给 jsoup，因此这里按 jsoup 求值器语义
+// 补上宿主原生不支持的扩展伪类（对应 jsoup 1.x Evaluator，与真实 legado 行为一致）：
+//   :eq(n) / :gt(n) / :lt(n)      元素在父节点中的元素序号（0 基，jsoup elementSiblingIndex）
+//   :contains(t) / :containsOwn(t)  元素文本（含/不含后代）小写包含，空白归一
+//   :matches(re) / :matchesOwn(re)  元素文本（含/不含后代）正则 find（部分匹配）
+// :has / :not / :is / :nth-child 等由宿主原生 querySelectorAll 处理。
+// 组合器（空格 / > / + / ~）按段求值；顶层逗号分组按并集合并并保持文档顺序。
+// 规模护栏：参与判定的文本/属性值超过 PSEUDO_TEXT_MAX、或单段候选集超过
+// PSEUDO_CANDIDATE_MAX 时直接判不匹配/停止扫描（各限次上报），防渲染线程被拖满。
+const INDEX_PSEUDO_RE = /:(?:eq|gt|lt|contains|containsOwn|matches|matchesOwn)\s*\(/;
+const TAKEOVER_PSEUDO = { eq: 1, gt: 1, lt: 1, contains: 1, containsOwn: 1, matches: 1, matchesOwn: 1 };
+// jsoup 的属性正则选择器 [key~=regex]：jsoup 语义是对属性值跑正则 find，
+// 而 CSS 标准把 ~= 当「空白分词字面匹配」，宿主原生实现会静默失配，因此同样接管。
+const ATTR_REGEX_RE = /\[[^\]]*~=/;
+
+function compileJsRegex(source) {
+  if (!source) return null;
+  try {
+    return new RegExp(source);
+  } catch (err) {
+    return null;
+  }
+}
+
+// jsoup Element#elementSiblingIndex：元素在父节点元素子列表中的序号（无父节点为 0）
+function nodeSiblingIndex(el) {
+  const parent = el && el.parentNode;
+  if (!parent || !parent.children) return 0;
+  const kids = parent.children;
+  for (let i = 0; i < kids.length; i += 1) if (kids[i] === el) return i;
+  return 0;
+}
+
+// 元素自身的直接文本（不含后代），对应 jsoup Element#ownText 的简化形态
+function ownTextOfNode(el) {
+  let out = "";
+  const children = el.childNodes || [];
+  for (let i = 0; i < children.length; i += 1) {
+    if (children[i].nodeType === 3) out += children[i].data || "";
+  }
+  return out;
+}
+
+// jsoup 的 :contains 匹配前会把两侧文本归一化空白并转小写（ContainsText evaluator）
+function normalizePseudoText(text) {
+  return String(text == null ? "" : text)
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+// 顶层逗号分组：引号 / 括号 / 方括号内的逗号不参与切分（td:eq(0),td:eq(5)）
+function splitCssGroups(text) {
+  const out = [];
+  let buf = "";
+  let depth = 0;
+  let quote = "";
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text.charAt(i);
+    if (quote) {
+      buf += ch;
+      if (ch === quote) quote = "";
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      buf += ch;
+      continue;
+    }
+    if (ch === "(" || ch === "[") {
+      depth += 1;
+      buf += ch;
+      continue;
+    }
+    if (ch === ")" || ch === "]") {
+      depth = Math.max(0, depth - 1);
+      buf += ch;
+      continue;
+    }
+    if (ch === "," && depth === 0) {
+      out.push(buf);
+      buf = "";
+      continue;
+    }
+    buf += ch;
+  }
+  out.push(buf);
+  return out.map((item) => item.trim()).filter(Boolean);
+}
+
+// 组合器分段：把选择器切成 [{combinator, segment}]（空白 / > / + / ~，引号与括号内不拆）
+function splitCssSegments(text) {
+  const segments = [];
+  let buf = "";
+  let depth = 0;
+  let quote = "";
+  let pendingComb = "";
+  const flush = () => {
+    const seg = buf.trim();
+    if (seg) {
+      segments.push({ combinator: pendingComb, segment: seg });
+      pendingComb = "";
+    }
+    buf = "";
+  };
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text.charAt(i);
+    if (quote) {
+      buf += ch;
+      if (ch === quote) quote = "";
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      buf += ch;
+      continue;
+    }
+    if (ch === "(" || ch === "[") {
+      depth += 1;
+      buf += ch;
+      continue;
+    }
+    if (ch === ")" || ch === "]") {
+      depth = Math.max(0, depth - 1);
+      buf += ch;
+      continue;
+    }
+    if (depth === 0) {
+      if (ch === ">" || ch === "+" || ch === "~") {
+        flush();
+        pendingComb = ch;
+        continue;
+      }
+      if (ch === " " || ch === "\t" || ch === "\r" || ch === "\n") {
+        if (buf.trim()) {
+          flush();
+          if (!pendingComb) pendingComb = " ";
+        }
+        continue;
+      }
+    }
+    buf += ch;
+  }
+  flush();
+  return segments;
+}
+
+// 段尾伪类调用：li:eq(0) → { core: "li", cond: { name: "eq", num: 0 } }（引号内括号不参与深度计数）
+function matchTrailingPseudoCall(text) {
+  if (text.charAt(text.length - 1) !== ")") return null;
+  let depth = 0;
+  let openIdx = -1;
+  let quote = "";
+  for (let i = text.length - 1; i >= 0; i -= 1) {
+    const ch = text.charAt(i);
+    if (quote) {
+      if (ch === quote) quote = "";
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      continue;
+    }
+    if (ch === ")") depth += 1;
+    else if (ch === "(") {
+      depth -= 1;
+      if (depth === 0) {
+        openIdx = i;
+        break;
+      }
+    }
+  }
+  if (openIdx <= 0) return null;
+  const head = text.slice(0, openIdx);
+  const nameMatch = /:([A-Za-z][A-Za-z0-9-]*)$/.exec(head);
+  if (!nameMatch) return null;
+  const name = nameMatch[1];
+  if (!TAKEOVER_PSEUDO[name]) return null;
+  const arg = text.slice(openIdx + 1, text.length - 1).trim();
+  return { core: head.slice(0, head.length - nameMatch[0].length), cond: buildPseudoCond(name, arg) };
+}
+
+function buildPseudoCond(name, arg) {
+  if (name === "eq" || name === "gt" || name === "lt") {
+    const n = Number(arg);
+    return { name: name, num: arg !== "" && isFinite(n) ? n : NaN };
+  }
+  if (name === "matches" || name === "matchesOwn") {
+    return { name: name, arg: arg, regex: compileJsRegex(arg) };
+  }
+  return { name: name, arg: arg };
+}
+
+// 剥掉段尾的接管伪类链（可能多个，如 :gt(0):lt(5)）
+function splitTrailingConditions(segment) {
+  let core = String(segment || "").trim();
+  const conds = [];
+  while (core) {
+    const parsed = matchTrailingPseudoCall(core);
+    if (!parsed) break;
+    conds.unshift(parsed.cond);
+    core = parsed.core.trim();
+  }
+  return { core: core, conds: conds };
+}
+
+// 提取段内的 jsoup 属性正则条件 [key~=regex]（仅括号外，引号内不处理），返回 { core, conds }。
+// 剥离后核心为空的场景由调用方按「任意元素」处理（jsoup 里 [key~=re] 独立使用时匹配范围内
+// 所有含该属性且值命中正则的元素）。
+function extractAttrRegexConds(segment) {
+  const text = String(segment || "");
+  const conds = [];
+  let core = "";
+  let depth = 0;
+  let quote = "";
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text.charAt(i);
+    if (quote) {
+      core += ch;
+      if (ch === quote) quote = "";
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      core += ch;
+      continue;
+    }
+    if (ch === "(") {
+      depth += 1;
+      core += ch;
+      continue;
+    }
+    if (ch === ")") {
+      depth = Math.max(0, depth - 1);
+      core += ch;
+      continue;
+    }
+    if (ch === "[" && depth === 0) {
+      let innerQuote = "";
+      let close = -1;
+      for (let j = i + 1; j < text.length; j += 1) {
+        const inner = text.charAt(j);
+        if (innerQuote) {
+          if (inner === innerQuote) innerQuote = "";
+          continue;
+        }
+        if (inner === '"' || inner === "'") {
+          innerQuote = inner;
+          continue;
+        }
+        if (inner === "]") {
+          close = j;
+          break;
+        }
+      }
+      if (close === -1) {
+        core += ch;
+        continue;
+      }
+      const attrMatch = /^([^\s~=]+)\s*~=\s*([\s\S]+)$/.exec(text.slice(i + 1, close));
+      if (attrMatch) {
+        conds.push({ name: "attrRegex", key: attrMatch[1], arg: attrMatch[2], regex: compileJsRegex(attrMatch[2]) });
+        i = close;
+        continue;
+      }
+      core += text.slice(i, close + 1);
+      i = close;
+      continue;
+    }
+    core += ch;
+  }
+  return { core: core.trim(), conds: conds };
+}
+
+function conditionsMatch(el, conds) {
+  for (let c = 0; c < conds.length; c += 1) {
+    const cond = conds[c];
+    if (cond.name === "attrRegex") {
+      if (!cond.regex || !el.getAttribute || !el.hasAttribute || !el.hasAttribute(cond.key)) return false;
+      const attrValue = String(el.getAttribute(cond.key) || "");
+      // 属性值超长判不匹配：书源正则任意，灾难性回溯只能靠限制输入规模兜底（限次上报）
+      if (attrValue.length > PSEUDO_TEXT_MAX) {
+        if (!pseudoAttrSkipReported && typeof pseudoSkipLog === "function") {
+          pseudoAttrSkipReported = true;
+          pseudoSkipLog("pseudo cond skipped: attr value too long", attrValue.length, cond.key);
+        }
+        return false;
+      }
+      cond.regex.lastIndex = 0;
+      if (!cond.regex.test(attrValue)) return false;
+      continue;
+    }
+    if (cond.name === "eq" || cond.name === "gt" || cond.name === "lt") {
+      if (!isFinite(cond.num)) return false;
+      const idx = nodeSiblingIndex(el);
+      if (cond.name === "eq") {
+        if (idx !== cond.num) return false;
+      } else if (cond.name === "gt") {
+        if (!(idx > cond.num)) return false;
+      } else if (!(idx < cond.num)) return false;
+      continue;
+    }
+    const own = cond.name === "containsOwn" || cond.name === "matchesOwn";
+    const text = own ? ownTextOfNode(el) : el.textContent || "";
+    // 文本超长判不匹配（对齐 PURIFY_TEXT_MAX 约定）：超长输入多来自劣质书源命中大容器，
+    // 逐候选跑正则/归一化会在渲染线程成倍叠加（限次上报）
+    if (text.length > PSEUDO_TEXT_MAX) {
+      if (!pseudoTextSkipReported && typeof pseudoSkipLog === "function") {
+        pseudoTextSkipReported = true;
+        pseudoSkipLog("pseudo cond skipped: text too long", text.length, cond.name);
+      }
+      return false;
+    }
+    if (cond.name === "contains" || cond.name === "containsOwn") {
+      if (normalizePseudoText(text).indexOf(normalizePseudoText(cond.arg)) === -1) return false;
+    } else {
+      if (!cond.regex) return false;
+      cond.regex.lastIndex = 0;
+      if (!cond.regex.test(text)) return false;
+    }
+  }
+  return true;
+}
+
+function selectDescendants(base, core) {
+  if (!core) return toNodeArray(base.children);
+  try {
+    return toNodeArray(base.querySelectorAll(core));
+  } catch (err) {
+    return [];
+  }
+}
+
+function selectChildren(base, core) {
+  if (!core) return toNodeArray(base.children);
+  try {
+    return toNodeArray(base.querySelectorAll(":scope > " + core));
+  } catch (err) {
+    const out = [];
+    const kids = toNodeArray(base.children);
+    for (let i = 0; i < kids.length; i += 1) if (matchesSelectorText(kids[i], core)) out.push(kids[i]);
+    return out;
+  }
+}
+
+function matchesSelectorText(el, core) {
+  if (!core) return true;
+  try {
+    return typeof el.matches === "function" && el.matches(core);
+  } catch (err) {
+    return false;
+  }
+}
+
+function selectLateral(base, combinator, core) {
+  const out = [];
+  if (combinator === "+") {
+    const next = base.nextElementSibling;
+    if (next && matchesSelectorText(next, core)) out.push(next);
+    return out;
+  }
+  let sib = base.nextElementSibling;
+  while (sib) {
+    if (matchesSelectorText(sib, core)) out.push(sib);
+    sib = sib.nextElementSibling;
+  }
+  return out;
+}
+
+// 去重并恢复文档顺序（去重按引用，排序用 compareDocumentPosition）
+function dedupeDocOrder(list) {
+  const seen = new Set();
+  const out = [];
+  for (let i = 0; i < list.length; i += 1) {
+    const node = list[i];
+    if (!node || seen.has(node)) continue;
+    seen.add(node);
+    out.push(node);
+  }
+  if (out.length > 1 && typeof out[0].compareDocumentPosition === "function") {
+    try {
+      out.sort((a, b) => (a === b ? 0 : a.compareDocumentPosition(b) & 4 ? -1 : 1));
+    } catch (err) {
+      // 排序失败时保持插入顺序
+    }
+  }
+  return out;
+}
+
+function querySegment(bases, combinator, segment) {
+  const parsed = splitTrailingConditions(segment);
+  const attr = extractAttrRegexConds(parsed.core);
+  let core = attr.core;
+  // 核心被 [key~=re] 条件剥空时按「任意元素」处理；仅索引伪类且核心为空时
+  // 保持 legado 的 children 语义（阅读写法 .0 / !0）。
+  if (!core && attr.conds.length) core = "*";
+  const conds = parsed.conds.concat(attr.conds);
+  const out = [];
+  // 候选集规模护栏：跨 base 累计（含 [base].concat 并入的首元素 base），超限停止扫描
+  // 后续 base 并保留已命中项，防止全页通配在大文档上把逐元素 test 叠加成O(n^2)量级
+  // 的同步开销（限次上报）。
+  let candidateTotal = 0;
+  let candidatesTruncated = false;
+  for (let b = 0; b < bases.length && !candidatesTruncated; b += 1) {
+    const base = bases[b];
+    if (!base) continue;
+    let found;
+    if (combinator === ">") found = selectChildren(base, core);
+    else if (combinator === "+" || combinator === "~") found = selectLateral(base, combinator, core);
+    else {
+      found = selectDescendants(base, core);
+      // 首段（combinator 为空串）的 base 即查询起点，自身命中核心时并入候选首位（文档序由 dedupeDocOrder 统一恢复）：
+      // 对齐 cssQuery 原生分支声明的 jsoup「select 含节点自身」语义，与 fast path、tag/class 糖共同闭环；后代分隔（" "）不受影响。
+      if (combinator === "" && base.nodeType === 1 && matchesSelectorText(base, core)) found = [base].concat(found);
+    }
+    for (let f = 0; f < found.length; f += 1) {
+      candidateTotal += 1;
+      if (candidateTotal > PSEUDO_CANDIDATE_MAX) {
+        candidatesTruncated = true;
+        if (!pseudoCandidateSkipReported && typeof pseudoSkipLog === "function") {
+          pseudoCandidateSkipReported = true;
+          pseudoSkipLog("pseudo cond skipped: candidates too many", bases.length, candidateTotal, String(segment || "").slice(0, 80));
+        }
+        break;
+      }
+      if (conditionsMatch(found[f], conds)) out.push(found[f]);
+    }
+  }
+  return dedupeDocOrder(out);
+}
+
 function cssQuery(root, selector) {
   const text = String(selector || "").trim();
   if (!root || !text || typeof root.querySelectorAll !== "function") return [];
-  const eqIndex = text.indexOf(":eq(");
-  if (eqIndex === -1) {
+  // 无扩展伪类与属性正则时走原生查询（与历史行为完全一致）
+  if (!INDEX_PSEUDO_RE.test(text) && !ATTR_REGEX_RE.test(text)) {
     try {
-      return toNodeArray(root.querySelectorAll(text));
+      // jsoup select 含节点自身（Matched elements may include this element, or any of its descendents）；
+      // 浏览器 querySelectorAll 只查后代，元素根上补自身匹配。
+      const out = [];
+      if (root.nodeType === 1 && typeof root.matches === "function" && root.matches(text)) out.push(root);
+      const desc = root.querySelectorAll(text);
+      for (let i = 0; i < desc.length; i += 1) out.push(desc[i]);
+      return out;
     } catch (err) {
       return [];
     }
   }
-  const closeIndex = text.indexOf(")", eqIndex);
-  if (closeIndex === -1) return [];
-  const position = Number(text.slice(eqIndex + 4, closeIndex));
-  const head = text.slice(0, eqIndex).trim();
-  let tail = text.slice(closeIndex + 1);
-  let base;
-  try {
-    base = head ? toNodeArray(root.querySelectorAll(head)) : toNodeArray(root.children);
-  } catch (err) {
-    return [];
+  const groups = splitCssGroups(text);
+  const merged = [];
+  for (const group of groups) {
+    const segs = splitCssSegments(group);
+    if (!segs.length) continue;
+    let nodes = [root];
+    for (const seg of segs) {
+      nodes = querySegment(nodes, seg.combinator, seg.segment);
+      if (!nodes.length) break;
+    }
+    for (const node of nodes) merged.push(node);
   }
-  const picked = pickNodeIndex(base, position);
-  if (!picked.length) return [];
-  const isChild = /^\s*>/.test(tail);
-  tail = tail.replace(/^[\s>]+/, "").trim();
-  if (!tail) return picked;
-  const node = picked[0];
-  try {
-    // 尾段不含 :eq 时用 :scope > 精确匹配直接子元素
-    if (isChild && tail.indexOf(":eq(") === -1) return toNodeArray(node.querySelectorAll(":scope > " + tail));
-    return cssQuery(node, tail);
-  } catch (err) {
-    return [];
-  }
+  return dedupeDocOrder(merged);
 }
 
 // CSS 规则形如：选择器@提取（如 .name>a@href）；无 @ 时默认取 text
@@ -990,57 +1452,186 @@ function splitCssRule(body) {
 }
 
 // ---------------- Default(JSOUP) 规则段 ----------------
-// legado 的 Default 规则以标准 CSS 选择器为主（.bookbox / li.clearfix / div.x > a / a, b），
-// 另有一组简写糖：class.NAME[.INDEX] / tag.NAME[.INDEX] / id.NAME / text.KEYWORD / children[n]。
-// 尾随的 .数字 是索引后缀（.meta span.1 表示先取 .meta span 再取第 1 个，a.-2 表示倒数第 2 个），
-// 需要先剥离索引再交给 CSS，否则 .0 会被当成非法类名。
-function splitDefaultIndex(text) {
-  const match = /^(.*?)\.(-?\d+)$/.exec(text);
-  if (!match) return { selector: text, index: null };
-  return { selector: match[1].trim(), index: Number(match[2]) };
+// legado 的 Default 规则 = 「核心选择器 + 尾部索引」两层：
+//   核心：class/tag/id/text/children 简写（legado 写法糖），或标准 CSS（含 jsoup 扩展伪类）
+//   索引（legado ElementsSingle.findIndexSet 语义，作用于核心命中的元素列表）：
+//     - 阅读写法：a.0:1:2（选这些下标）/ a!0:1（排除），下标可为负（-1 为末尾）
+//     - 括号写法：a[0,2:4,-1] / a[!0:2]，支持区间 start:end:step，反向区间 [-1:0] 可整体倒序
+//   选择写法按书写顺序取元素（去重）；排除写法剔除对应下标后保持原序。
+function parseBracketIndex(inner) {
+  let text = String(inner == null ? "" : inner).trim();
+  if (!text) return null;
+  let mode = "select";
+  if (text.charAt(0) === "!") {
+    mode = "exclude";
+    text = text.slice(1).trim();
+  }
+  if (!text || !/^[\d\s:,-]+$/.test(text)) return null;
+  const items = [];
+  for (const piece of text.split(",")) {
+    const part = piece.trim();
+    if (!part) continue;
+    if (part.indexOf(":") === -1) {
+      if (!/^-?\d+$/.test(part)) return null;
+      items.push({ kind: "index", n: Number(part) });
+      continue;
+    }
+    const segs = part.split(":");
+    if (segs.length > 3) return null;
+    const nums = segs.map((seg) => {
+      const value = seg.trim();
+      if (value === "") return null;
+      return /^-?\d+$/.test(value) ? Number(value) : NaN;
+    });
+    if (nums.some((n) => n !== null && !isFinite(n))) return null;
+    if (nums.every((n) => n === null)) return null;
+    items.push({
+      kind: "range",
+      start: nums.length > 0 ? nums[0] : null,
+      end: nums.length > 1 ? nums[1] : null,
+      step: nums.length > 2 && nums[2] !== null ? nums[2] : 1
+    });
+  }
+  if (!items.length) return null;
+  return { mode: mode, items: items };
+}
+
+// 剥离规则尾部的索引（先括号写法，再阅读写法），返回 { body, index }
+function stripRuleIndex(raw) {
+  const text = String(raw == null ? "" : raw).trim();
+  if (!text) return { body: text, index: null };
+  if (text.charAt(text.length - 1) === "]") {
+    let depth = 0;
+    let open = -1;
+    for (let i = text.length - 1; i >= 0; i -= 1) {
+      const ch = text.charAt(i);
+      if (ch === "]") depth += 1;
+      else if (ch === "[") {
+        depth -= 1;
+        if (depth === 0) {
+          open = i;
+          break;
+        }
+      }
+    }
+    if (open !== -1) {
+      const parsedBracket = parseBracketIndex(text.slice(open + 1, text.length - 1));
+      if (parsedBracket) return { body: text.slice(0, open).trim(), index: parsedBracket };
+    }
+  }
+  const match = /^(.*?)([.!])(-?\d+(?::-?\d+)*)$/.exec(text);
+  if (match) {
+    const nums = match[3].split(":").map((item) => Number(item));
+    if (nums.length && nums.every((n) => isFinite(n))) {
+      return {
+        body: match[1].trim(),
+        index: { mode: match[2] === "!" ? "exclude" : "select", items: nums.map((n) => ({ kind: "index", n: n })) }
+      };
+    }
+  }
+  return { body: text, index: null };
+}
+
+// 展开索引项为下标集合（legado 语义：越界忽略，区间端点自动 clamp，步长不小于列表长度时只取起点）
+function expandRuleIndexItems(items, len) {
+  const set = new Set();
+  if (!len) return set;
+  for (const item of items) {
+    if (item.kind === "index") {
+      let n = item.n;
+      if (n < 0) n += len;
+      if (n >= 0 && n < len) set.add(n);
+      continue;
+    }
+    let start = item.start === null || item.start === undefined ? 0 : item.start;
+    if (start < 0) start += len;
+    let end = item.end === null || item.end === undefined ? len - 1 : item.end;
+    if (end < 0) end += len;
+    if ((start < 0 && end < 0) || (start >= len && end >= len)) continue;
+    if (start >= len) start = len - 1;
+    else if (start < 0) start = 0;
+    if (end >= len) end = len - 1;
+    else if (end < 0) end = 0;
+    const step = Math.abs(item.step || 1) || 1;
+    if (start === end || step >= len) {
+      set.add(start);
+      continue;
+    }
+    if (end > start) {
+      for (let i = start; i <= end; i += step) set.add(i);
+    } else {
+      for (let i = start; i >= end; i -= step) set.add(i);
+    }
+  }
+  return set;
+}
+
+function applyRuleIndex(list, index) {
+  if (!index) return list;
+  const set = expandRuleIndexItems(index.items, list.length);
+  if (index.mode === "exclude") return list.filter((_, i) => !set.has(i));
+  const out = [];
+  set.forEach((i) => out.push(list[i]));
+  return out;
+}
+
+// 核心选择器：空/children → 直接子元素；class/tag/id/text 糖；其余走 cssQuery
+function queryRuleCore(root, body) {
+  const text = String(body || "").trim();
+  if (!text || text === "children") return toNodeArray(root.children);
+  const sugar = /^(class|tag|id|text)\.([\s\S]+)$/.exec(text);
+  if (sugar) {
+    const type = sugar[1];
+    const name = sugar[2].split(".")[0];
+    try {
+      // jsoup 语义（getElementsByClass / getElementsByTag / getElementById）命中范围含节点自身；
+      // 浏览器对应 API 只查后代，这里补「自身优先」以对齐 legado（节点自身即目标时字段规则可命中）。
+      if (type === "class") {
+        const out = [];
+        // jsoup Element#hasClass 语义：class 属性整串相等（忽略大小写），或按空白拆分的某个完整
+        // 类名相等；命中范围含节点自身。多类名查询（如 "box chapter"）据此命中 class="box chapter"
+        // 的节点自身（浏览器 getElementsByClassName 只查后代、且不支持含空格的整串查询）。
+        if (root.getAttribute) {
+          const attr = String(root.getAttribute("class") || "");
+          const want = name.toLowerCase();
+          if (attr && attr.toLowerCase() === want) out.push(root);
+          else if (attr) {
+            const tokens = attr.split(/\s+/).filter(Boolean);
+            for (let t = 0; t < tokens.length; t += 1) {
+              if (tokens[t].toLowerCase() === want) { out.push(root); break; }
+            }
+          }
+        }
+        const found = root.getElementsByClassName ? root.getElementsByClassName(name) : [];
+        for (let i = 0; i < found.length; i += 1) out.push(found[i]);
+        return out;
+      }
+      if (type === "tag") {
+        const out = [];
+        if (root.tagName && String(root.tagName).toLowerCase() === String(name).toLowerCase()) out.push(root);
+        const found = root.getElementsByTagName(name);
+        for (let i = 0; i < found.length; i += 1) out.push(found[i]);
+        return out;
+      }
+      if (type === "id") {
+        if (root.id && root.id === name) return [root];
+        const found = root.querySelector ? root.querySelector("#" + name) : null;
+        return found ? [found] : [];
+      }
+      return toNodeArray(root.getElementsByTagName("*")).filter((el) => (el.textContent || "").indexOf(name) !== -1);
+    } catch (err) {
+      return [];
+    }
+  }
+  return cssQuery(root, text);
 }
 
 function defaultQuery(root, segment) {
   const text = String(segment || "").trim();
   if (!root || !text) return [];
-  const indexOnly = /^\.(-?\d+)$/.exec(text);
-  if (indexOnly) return pickNodeIndex(toNodeArray(root.children), Number(indexOnly[1]));
-  const childrenOnly = /^children(?:\[(-?\d+)\])?$/.exec(text);
-  if (childrenOnly) {
-    const list = toNodeArray(root.children);
-    return childrenOnly[1] === undefined ? list : pickNodeIndex(list, Number(childrenOnly[1]));
-  }
-  const sugar = /^(class|tag|id|text)\.([\s\S]+)$/.exec(text);
-  if (sugar) {
-    const type = sugar[1];
-    const parts = sugar[2].split(".");
-    const name = parts[0];
-    const position = parts.length > 1 ? parts[1] : "";
-    let list = [];
-    try {
-      if (type === "class") list = toNodeArray(root.getElementsByClassName ? root.getElementsByClassName(name) : []);
-      else if (type === "tag") list = toNodeArray(root.getElementsByTagName(name));
-      else if (type === "id") {
-        const found = root.querySelector ? root.querySelector("#" + name) : null;
-        list = found ? [found] : [];
-      } else {
-        list = toNodeArray(root.getElementsByTagName("*")).filter((el) => (el.textContent || "").indexOf(name) !== -1);
-      }
-    } catch (err) {
-      return [];
-    }
-    if (position === "") return list;
-    return pickNodeIndex(list, Number(position));
-  }
-  const split = splitDefaultIndex(text);
-  let list = [];
-  try {
-    list = toNodeArray(root.querySelectorAll(split.selector));
-  } catch (err) {
-    return [];
-  }
-  if (split.index === null) return list;
-  return pickNodeIndex(list, split.index);
+  const stripped = stripRuleIndex(text);
+  const list = queryRuleCore(root, stripped.body);
+  return applyRuleIndex(list, stripped.index);
 }
 
 // ---------------- XPath（浏览器原生 document.evaluate） ----------------
@@ -1187,11 +1778,83 @@ function stringifyRuleValue(value) {
   }
 }
 
+// 「独立净化」（无选择器 + 仅 ## 规则）的作用对象：元素节点取 outerHTML，文档级用响应原文
+function purifyBaseText(context) {
+  if (!context) return "";
+  const root = context.root;
+  if (root && root.nodeType === 1 && typeof root.outerHTML === "string") return root.outerHTML;
+  return typeof context.text === "string" ? context.text : "";
+}
+
+// ---------------- 字段级 {{}} 模板（legado AnalyzeRule Mode.Regex 分支） ----------------
+// legado 语义：`{{` 出现在首个 `##` 之前时，整条规则按「纯字符串模板」处理——段间文本原样
+// 保留，`{{}}` 段分流：规则段（@ / $. / $[ / // 开头）以当前上下文求值取首个非空结果；
+// 否则按表达式求值（可用 baseUrl / src / result 变量）。组装完成后的整段文本再套用尾部净化
+// （## 之后的净化段），最后 trim。御宅文屋 tocUrl 即此形态：
+//   {{baseUrl}}##.*\/(\d+)\/##https://m.yuzhaiwen.com/novel/list/$1/1.html
+// {{}} 段求值失败（表达式语法不支持 → evalRuleExpr 返回 undefined）时保留原文（fail-visible），
+// 便于用户定位不支持的表达式；未知变量名与 result 一样按空串替换（evalRuleExpr 对未定义标识符
+// 返回空串而非 undefined，不属 fail-visible），并非保留原文。
+function isTemplateRuleExpression(rawRule) {
+  const text = String(rawRule == null ? "" : rawRule);
+  const index = text.indexOf("##");
+  const head = index === -1 ? text : text.slice(0, index);
+  return head.indexOf("{{") !== -1;
+}
+
+// 模板段内容是否按嵌套规则求值：legado AnalyzeRule.isRule 的判定前缀
+function isFieldTemplateRule(code) {
+  const text = String(code == null ? "" : code).trim();
+  return (
+    text.charAt(0) === "@" ||
+    text.indexOf("$.") === 0 ||
+    text.indexOf("$[") === 0 ||
+    text.indexOf("//") === 0
+  );
+}
+
+function fillFieldTemplate(rawRule, context) {
+  const split = splitRulePurify(rawRule);
+  const vars = {
+    baseUrl: context && typeof context.baseUrl === "string" ? context.baseUrl : "",
+    src: context && typeof context.text === "string" ? context.text : "",
+    result: ""
+  };
+  const text = split.rule.replace(/\{\{([\s\S]*?)\}\}/g, (match, expr) => {
+    const code = String(expr).trim();
+    if (!code) return match;
+    if (isFieldTemplateRule(code)) {
+      for (const value of evalSingleRule(code, context)) {
+        const inner = String(value == null ? "" : value).trim();
+        if (inner) return inner;
+      }
+      return match;
+    }
+    const value = evalRuleExpr(code, vars);
+    if (value === undefined) return match;
+    return value === null ? "" : String(value);
+  });
+  const purified = split.purify ? applyPurify(text, split.purify) : text;
+  return String(purified == null ? "" : purified).trim();
+}
+
 // 单条规则（已剥离净化）→ 字符串数组
 function evalSingleRule(rawRule, context) {
+  if (isTemplateRuleExpression(rawRule)) {
+    const filled = fillFieldTemplate(rawRule, context);
+    return filled ? [filled] : [];
+  }
   const split = splitRulePurify(rawRule);
   const text = split.rule.trim();
-  if (!text) return [];
+  if (!text) {
+    // 无选择器：legado「正则之净化」独立使用等价于 all##...##（作用在「当前内容」上）；
+    // 「正则之OnlyOne」（### 结尾）由 applyPurify 取第一个匹配段返回
+    if (!split.purify) return [];
+    const base = purifyBaseText(context);
+    if (!base) return [];
+    const out = applyPurify(base, split.purify);
+    return out ? [out] : [];
+  }
   const kind = ruleSourceKind(text);
   let values = [];
 
@@ -1221,7 +1884,7 @@ function evalSingleRule(rawRule, context) {
         for (let i = 0; i < segments.length; i += 1) {
           const segment = segments[i];
           const isLast = i === segments.length - 1;
-          if (isLast && isExtractMode(segment)) {
+          if (isLast && (isExtractMode(segment) || isAttributeNameSegment(segment))) {
             for (const node of nodes) if (node) values.push(extractFromNode(node, segment));
             nodes = [];
             break;
@@ -1268,6 +1931,8 @@ function splitRuleConnectors(rawRule) {
 }
 
 function evalRuleList(rawRule, context) {
+  // 模板形态不拆连接符：{{a || b}} 里的 || 属于段落表达式，拆开会让模板失去闭合
+  if (isTemplateRuleExpression(rawRule)) return evalSingleRule(rawRule, context);
   const parts = splitRuleConnectors(rawRule);
   if (parts.length === 1) return evalSingleRule(parts[0].value, context);
   let result = evalSingleRule(parts[0].value, context);
@@ -1430,15 +2095,53 @@ function parseBookSourcePayload(text) {
   return { sources: sources, error: sources.length ? "" : "empty" };
 }
 
-// 相对 URL 转绝对：以书源 bookSourceUrl 为基准
+// 按 bookSourceUrl（即 id）合并导入结果：overwrite 为真时，同地址的旧条目整体换用新规则，
+// 但保留旧条目的启用/停用状态与列表位置；为假时同地址一律跳过（旧版行为）。
+// 直接修改 existing 数组并返回计数；纯函数（放在模块顶层，测试切片可直接提取）。
+function mergeBookSources(existing, incoming, overwrite) {
+  // 字典必须无原型：id 来自 bookSourceUrl，取「constructor」「__proto__」这类原型成员名时，
+  // 字面量对象的 known[id] 会命中原型链成员而被误判为已存在，条目会被静默丢弃。
+  const known = Object.create(null);
+  for (const item of existing) known[item.id] = item;
+  let added = 0;
+  let updated = 0;
+  let skipped = 0;
+  for (const item of incoming) {
+    const old = known[item.id];
+    if (!old) {
+      known[item.id] = item;
+      existing.push(item);
+      added += 1;
+      continue;
+    }
+    if (overwrite === true) {
+      // 覆盖只换规则内容，不重置用户的启用选择，也不改变源在列表中的位置
+      item.enabled = old.enabled !== false;
+      item.order = old.order;
+      const pos = existing.indexOf(old);
+      if (pos !== -1) existing[pos] = item;
+      known[item.id] = item;
+      updated += 1;
+      continue;
+    }
+    skipped += 1;
+  }
+  return { added: added, updated: updated, skipped: skipped };
+}
+
+// 相对 URL 转绝对：标准 URL 解析（等价 legado NetworkUtils.getAbsoluteURL）。
+// 注意不能对基准强制补 "/"：当页面地址本身是文件路径（.../index.html）时，
+// 补斜杠会把相对地址拼进文件名的下一层，导致全链路 404。
 function resolveSourceUrl(base, path) {
   const text = String(path == null ? "" : path).trim();
   if (!text) return "";
   if (/^https?:\/\//i.test(text)) return text;
+  // legado 语义：javascript 伪链接不是可用地址，置空
+  if (/^javascript:/i.test(text)) return "";
   const root = String(base || "").trim();
   if (!root) return text;
   try {
-    return new URL(text, root.endsWith("/") ? root : root + "/").href;
+    return new URL(text, root).href;
   } catch (err) {
     return text;
   }
@@ -1501,6 +2204,227 @@ function fillOptionTemplates(options, vars) {
   return out;
 }
 
+// ---------------- POST 表单请求体编码（对齐 legado AnalyzeUrl.encodeParams） ----------------
+// legado 对 POST 请求：body 非 JSON/XML 且未显式声明 Content-Type 时，按 charset 对表单逐段做
+// URL 编码（Java URLEncoder 语义：空格 -> +，[A-Za-z0-9*-._] 保留，其余按目标 charset 的字节
+// 转大写 %XX），再以 application/x-www-form-urlencoded 发送；charset 未声明时默认 UTF-8，
+// 且先逐段检查是否已是合法编码形态（含 %XX 的段原样保留）。编码产物为纯 ASCII，
+// 宿主按 UTF-8 发送即可让 GBK 等传统编码站点收到正确的表单值（52书库、御宅文屋均依赖此语义）。
+// JSON/XML 形态的 body 不经过这条表单链：原样发送，未显式声明 Content-Type 时由
+// prepareSourceRequestBody 按形态补 application/json（{ 或 [ 开头）或 application/xml（< 开头）。
+const URLENCODER_SAFE_RE = /[A-Za-z0-9\-_.*]/;
+const CHARSET_ENCODE_TABLES = Object.create(null);
+let utf8EncoderSingleton = null;
+
+function isHexDigitChar(ch) {
+  return (ch >= "0" && ch <= "9") || (ch >= "a" && ch <= "f") || (ch >= "A" && ch <= "F");
+}
+
+// legado NetworkUtils.encodedForm：判断表单段是否已是合法编码形态（[A-Za-z0-9*-._] 与 %XX 之外视为未编码）
+function isEncodedFormSegment(text) {
+  const seg = String(text == null ? "" : text);
+  let i = 0;
+  while (i < seg.length) {
+    if (URLENCODER_SAFE_RE.test(seg[i])) {
+      i += 1;
+      continue;
+    }
+    if (seg[i] === "%" && i + 2 < seg.length && isHexDigitChar(seg[i + 1]) && isHexDigitChar(seg[i + 2])) {
+      i += 3;
+      continue;
+    }
+    return false;
+  }
+  return true;
+}
+
+// 懒构建「Unicode -> charset 字节」反查表：单字节编码逐字节反查，双字节编码按 lead/trail 配对反查。
+// 单字节编码（windows-1252 等）由「[0xE9, 0xE9] 解成两个字符」这一探针识别，表值为单元素 [byte]，
+// 避免把 lead 字节拼进表值（否则 é 会编成 %81%E9）；双字节编码按 lead/trail 交错的 380 字节整行批量解码，
+// 行内长度不匹配时退化为逐对解码并逐对判定写入，不再按行放弃，避免 shift_jis / euc-kr 这类含非法字节对
+// 的编码整表退化（shift_jis 会误回退 UTF-8，euc-kr 会把非 ASCII 全部编成 %3F）。
+// 失败（TextDecoder 不支持该名字）返回 null，调用方回退 UTF-8；首次遇到该编码的站点时构建一次并缓存。
+function charsetEncodeTable(charsetName) {
+  const name = String(charsetName || "").toLowerCase();
+  if (!name) return null;
+  if (CHARSET_ENCODE_TABLES[name] !== undefined) return CHARSET_ENCODE_TABLES[name];
+  let table = null;
+  try {
+    const decoder = new TextDecoder(name);
+    const map = new Map();
+    // 探针：单字节编码会把 [0xE9, 0xE9] 解成两个字符，双字节编码解成一个字符
+    const singleByte = decoder.decode(new Uint8Array([0xe9, 0xe9])).length !== 1;
+    if (singleByte) {
+      for (let byte = 0x80; byte <= 0xff; byte += 1) {
+        const ch = decoder.decode(new Uint8Array([byte]));
+        if (ch.length !== 1 || ch === "\ufffd") continue;
+        if (!map.has(ch)) map.set(ch, [byte]);
+      }
+    } else {
+      const row = new Uint8Array(380);
+      for (let lead = 0x81; lead <= 0xfe; lead += 1) {
+        const trails = [];
+        let pos = 0;
+        for (let trail = 0x40; trail <= 0xfe; trail += 1) {
+          if (trail === 0x7f) continue;
+          row[pos] = lead;
+          row[pos + 1] = trail;
+          trails.push(trail);
+          pos += 2;
+        }
+        const text = decoder.decode(row);
+        if (text.length !== trails.length) {
+          // 解码器在个别字节对上吞字节或拆成两个字符：退化为逐对解码，逐对判定后写入
+          for (const trail of trails) {
+            const ch = decoder.decode(new Uint8Array([lead, trail]));
+            if (ch.length !== 1 || ch === "\ufffd") continue;
+            if (!map.has(ch)) map.set(ch, [lead, trail]);
+          }
+          continue;
+        }
+        for (let i = 0; i < trails.length; i += 1) {
+          const ch = text[i];
+          if (ch === "\ufffd") continue;
+          if (!map.has(ch)) map.set(ch, [lead, trails[i]]);
+        }
+      }
+    }
+    const single = decoder.decode(new Uint8Array([0x80]));
+    if (single.length === 1 && single !== "\ufffd" && !map.has(single)) map.set(single, [0x80]);
+    table = map.size ? map : null;
+  } catch (err) {
+    table = null;
+  }
+  CHARSET_ENCODE_TABLES[name] = table;
+  return table;
+}
+
+function percentEncodeBytes(bytes) {
+  let out = "";
+  for (const b of bytes) {
+    out += "%" + b.toString(16).toUpperCase().padStart(2, "0");
+  }
+  return out;
+}
+
+function utf8BytesOfChar(ch) {
+  if (!utf8EncoderSingleton) utf8EncoderSingleton = new TextEncoder();
+  return utf8EncoderSingleton.encode(ch);
+}
+
+// Java URLEncoder.encode(segment, charset) 等价实现（按码点处理，代理对整体转换）
+function javaUrlEncodeSegment(segment, charsetName) {
+  const seg = String(segment == null ? "" : segment);
+  const name = String(charsetName || "").toLowerCase();
+  const isUtf8 = !name || name === "utf-8" || name === "utf8";
+  const table = isUtf8 ? null : charsetEncodeTable(name);
+  let out = "";
+  for (const ch of seg) {
+    const code = ch.codePointAt(0);
+    if (code < 0x80) {
+      if (URLENCODER_SAFE_RE.test(ch)) out += ch;
+      else if (ch === " ") out += "+";
+      else out += percentEncodeBytes([code]);
+      continue;
+    }
+    if (isUtf8) {
+      out += percentEncodeBytes(utf8BytesOfChar(ch));
+      continue;
+    }
+    const bytes = table ? table.get(ch) : null;
+    if (bytes) out += percentEncodeBytes(bytes);
+    else if (!table) out += percentEncodeBytes(utf8BytesOfChar(ch));
+    else out += "%3F"; // 目标 charset 无此字符：对齐 Java URLEncoder 的替换行为
+  }
+  return out;
+}
+
+// legado EncoderUtils.escape（charset 声明为 "escape" 时使用；现有书源极少使用，纯对齐保留）
+function escapeSegment(segment) {
+  const seg = String(segment == null ? "" : segment);
+  let out = "";
+  for (let i = 0; i < seg.length; i += 1) {
+    const code = seg.charCodeAt(i);
+    if ((code >= 48 && code <= 57) || (code >= 65 && code <= 90) || (code >= 97 && code <= 122)) {
+      out += seg[i];
+      continue;
+    }
+    const prefix = code < 16 ? "%0" : code < 256 ? "%" : "%u";
+    out += prefix + code.toString(16);
+  }
+  return out;
+}
+
+// legado AnalyzeUrl.encodeParams：按 & 与 = 拆段后逐段编码；
+// 未声明 charset 时先做「已编码」检查（不过度编码作者手写的现成编码串）
+function encodeFormParams(params, charsetName) {
+  const text = String(params == null ? "" : params);
+  const declared = typeof charsetName === "string" ? charsetName.trim().toLowerCase() : "";
+  const checkEncoded = !declared;
+  const escapeMode = declared === "escape";
+  const parts = [];
+  const len = text.length;
+  let pos = 0;
+  while (pos <= len) {
+    if (parts.length) parts.push("&");
+    let amp = text.indexOf("&", pos);
+    if (amp === -1) amp = len;
+    const eq = text.indexOf("=", pos);
+    let key;
+    let value;
+    if (eq === -1 || eq > amp) {
+      key = text.slice(pos, amp);
+      value = null;
+    } else {
+      key = text.slice(pos, eq);
+      value = text.slice(eq + 1, amp);
+    }
+    parts.push(encodeFormSegment(key));
+    if (value !== null) {
+      parts.push("=");
+      parts.push(encodeFormSegment(value));
+    }
+    pos = amp + 1;
+  }
+  return parts.join("");
+
+  function encodeFormSegment(segment) {
+    if (checkEncoded && isEncodedFormSegment(segment)) return segment;
+    if (escapeMode) return escapeSegment(segment);
+    return javaUrlEncodeSegment(segment, declared || "utf-8");
+  }
+}
+
+function hasHeaderIgnoreCase(headers, name) {
+  if (!headers || typeof headers !== "object") return false;
+  const needle = String(name).toLowerCase();
+  for (const key of Object.keys(headers)) {
+    if (key.toLowerCase() === needle) return true;
+  }
+  return false;
+}
+
+// POST 请求体预处理：JSON/XML 形态的 body 原样发送，未显式声明 Content-Type 时按形态补
+// application/json（{ 或 [ 开头）或 application/xml（< 开头）；其余 body 做表单编码并补
+// application/x-www-form-urlencoded。书源已显式声明 Content-Type 时一律不覆盖、不重复。
+// 与 legado 的差异：legado 对未声明 Content-Type 的 JSON/XML body 均走 postJson（application/json），
+// 这里 XML 补 application/xml 属有意增强，JSON 与 legado 一致。
+function prepareSourceRequestBody(body, charsetName, headers) {
+  const text = typeof body === "string" ? body : "";
+  if (!text.trim()) return text;
+  const trimmed = text.trim();
+  const isJsonBody = trimmed.startsWith("{") || trimmed.startsWith("[");
+  if (isJsonBody || trimmed.startsWith("<")) {
+    if (!hasHeaderIgnoreCase(headers, "content-type")) {
+      headers["Content-Type"] = isJsonBody ? "application/json" : "application/xml";
+    }
+    return text;
+  }
+  if (hasHeaderIgnoreCase(headers, "content-type")) return text;
+  headers["Content-Type"] = "application/x-www-form-urlencoded";
+  return encodeFormParams(text, charsetName);
+}
+
 // 组装一次请求：先按书源模板原文拆选项 -> 分别填充 URL 与选项字段 -> 拼绝对地址 -> 合并书源头
 // 顺序不能颠倒：{{key}} 一类的模板变量含用户输入（搜索框关键词），若先填充再拆选项，
 // 用户输入会被 splitSourceUrl 当成请求选项 JSON 解析，从而改写请求方法与请求头。
@@ -1513,18 +2437,176 @@ function buildSourceRequest(source, urlTemplate, vars) {
   const method = typeof options.method === "string" ? options.method.toUpperCase() : "GET";
   const url = resolveSourceUrl(source ? source.url : "", fillRuleTemplate(split.url, values));
   const headers = mergeSourceHeaders(buildDefaultSourceHeaders(url), source ? source.header : null, options.headers);
-  const body = typeof options.body === "string" ? options.body : "";
   const charset = typeof options.charset === "string" ? options.charset.toLowerCase() : "";
+  const bodyless = method === "GET" || method === "HEAD";
+  let body = bodyless || typeof options.body !== "string" ? "" : options.body;
+  if (!bodyless && body) body = prepareSourceRequestBody(body, charset, headers);
   return {
     url: url,
     method: method,
-    body: method === "GET" || method === "HEAD" ? "" : body,
+    body: body,
     headers: headers,
     charset: charset
   };
 }
 
-// 判断响应是否可能因非 UTF-8 编码而乱码（宿主当前只回传 UTF-8 解码后的文本）
+// ==================== 响应文本解码 ====================
+// 宿主 `net.fetch` 支持 responseType: "arraybuffer"：以原始字节（bodyBase64）回传，
+// 由插件自行解码，GBK / GB18030 / UTF-16 等编码的站点不再受宿主字符集猜测影响。
+// 下面这条解码链同时服务于在线书源响应与本地 TXT 导入（见 normalizeText(decodeBuffer(buffer))）。
+// 注意：这些函数处于 engine.test.js 的引擎段切片范围内，必须保持模块顶层定义。
+
+// 粗略可读性评分：CJK 与全角标点、可打印 ASCII 加分，零字节、替换字符与控制字符扣分；
+// 返回前 300 字符的每码点平均分，避免候选与对照文本长度不同时总分不可比
+function readableScore(text) {
+  let value = 0;
+  const probe = String(text == null ? "" : text).slice(0, 300);
+  for (const ch of probe) {
+    const code = ch.codePointAt(0);
+    if (code === 0 || code === 0xfffd) value -= 4;
+    else if (code < 32 && code !== 9 && code !== 10 && code !== 13) value -= 4;
+    else if (code >= 0x4e00 && code <= 0x9fff) value += 2;
+    else if (code >= 0x20 && code <= 0x7e) value += 1;
+    else if (code >= 0x3000 && code <= 0x303f) value += 1;
+    else if (code >= 0xff00 && code <= 0xffef) value += 1;
+    else if (code >= 0x2000 && code <= 0x206f) value += 0;
+    else value -= 1;
+  }
+  // 分母按码点计数，与 for-of 的迭代口径一致（代理对只算一个字符）
+  const units = Array.from(probe).length;
+  return units ? value / units : 0;
+}
+
+// 按 16 位单元统计结构特征：CJK 及中文标点命中数、两侧字节同为可打印 ASCII 的单元数。
+// 真 UTF-16 中文以汉字为主（CJK 命中率高、ASCII 配对率低）；Latin-1 等单字节西文被
+// 误当作 UTF-16 时字母会两两配成 ASCII 单元（ASCII 配对率显著偏高）。
+function utf16UnitStats(u8, littleEndian) {
+  const limit = Math.min(u8.length, 4096);
+  let units = 0;
+  let cjk = 0;
+  let bothAscii = 0;
+  for (let i = 0; i + 1 < limit; i += 2) {
+    const lo = littleEndian ? u8[i] : u8[i + 1];
+    const hi = littleEndian ? u8[i + 1] : u8[i];
+    const code = lo | (hi << 8);
+    units += 1;
+    if (code >= 0x4e00 && code <= 0x9fff) cjk += 1;
+    else if (code >= 0x3000 && code <= 0x303f) cjk += 1;
+    else if (code >= 0xff00 && code <= 0xffef) cjk += 1;
+    else if (code >= 0x2000 && code <= 0x206f) cjk += 1;
+    if (lo >= 0x20 && lo <= 0x7e && hi >= 0x20 && hi <= 0x7e) bothAscii += 1;
+  }
+  return { units: units, cjk: cjk, bothAscii: bothAscii };
+}
+
+// 纯中文的 UTF-16 正文几乎没有零字节，零字节探测不会触发；按两种字节序试解码，
+// 只有结构特征可信（CJK 命中率 >= 0.5 且 ASCII 配对率 <= 0.6）时才返回候选，
+// 否则返回 null 继续原有 GB18030 -> GBK -> UTF-8 回退链，避免把单字节西文误判为 UTF-16。
+function decodeUtf16Candidate(u8) {
+  const le = utf16UnitStats(u8, true);
+  const be = utf16UnitStats(u8, false);
+  const trusted = (stats) =>
+    stats.units > 0 && stats.cjk / stats.units >= 0.5 && stats.bothAscii / stats.units <= 0.6;
+  const leOk = trusted(le);
+  const beOk = trusted(be);
+  if (!leOk && !beOk) return null;
+  const useLe = leOk && (!beOk || le.cjk >= be.cjk);
+  return useLe ? new TextDecoder("utf-16le").decode(u8) : new TextDecoder("utf-16be").decode(u8);
+}
+
+// 解码原始字节：BOM（UTF-8 / UTF-16LE / UTF-16BE）-> 无 BOM UTF-16 零字节探测 ->
+// UTF-8（严格校验）-> GB18030（严格校验）与 UTF-16 结构判据择优 -> GBK -> UTF-8
+function decodeBuffer(buffer) {
+  const u8 = new Uint8Array(buffer);
+  if (u8.length >= 3 && u8[0] === 0xef && u8[1] === 0xbb && u8[2] === 0xbf) {
+    return new TextDecoder("utf-8").decode(u8.subarray(3));
+  }
+  if (u8.length >= 2 && u8[0] === 0xff && u8[1] === 0xfe) {
+    return new TextDecoder("utf-16le").decode(u8.subarray(2));
+  }
+  if (u8.length >= 2 && u8[0] === 0xfe && u8[1] === 0xff) {
+    return new TextDecoder("utf-16be").decode(u8.subarray(2));
+  }
+  // 无 BOM 的 UTF-16 探测（大量零字节）：UTF-16LE 下 ASCII 的零字节落在奇数索引，
+  // 故 oddZeros 更高时是 utf-16le，evenZeros 更高时是 utf-16be。
+  const sample = Math.min(u8.length, 4096);
+  if (sample >= 16) {
+    let evenZeros = 0;
+    let oddZeros = 0;
+    for (let i = 0; i + 1 < sample; i += 2) {
+      if (u8[i] === 0) evenZeros += 1;
+      if (u8[i + 1] === 0) oddZeros += 1;
+    }
+    const half = sample / 2 / 8;
+    if (evenZeros > half || oddZeros > half) {
+      return oddZeros > evenZeros
+        ? new TextDecoder("utf-16le").decode(u8)
+        : new TextDecoder("utf-16be").decode(u8);
+    }
+  }
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(u8);
+  } catch (err) {
+    /* 不是合法 UTF-8 */
+  }
+  // 严格 UTF-8 仅因个别非法字节（站点侧编码瑕疵）失败时，页面主体仍是 UTF-8：宽松解码只会
+  // 留下极少量替换符，此时优先返回宽松 UTF-8，避免被 GB18030/GBK 兜底整页切错编码（整章乱码）。
+  // 判据用「替换符占非 ASCII 字符的比例」：真 GB 文本在宽松 UTF-8 下会成片出替换符，比例极高，不会被误选。
+  const looseUtf8 = new TextDecoder("utf-8").decode(u8);
+  let looseRepl = 0;
+  let looseNonAscii = 0;
+  for (const ch of looseUtf8) {
+    const code = ch.codePointAt(0);
+    if (code === 0xfffd) looseRepl += 1;
+    if (code > 0x7f) looseNonAscii += 1;
+  }
+  if (looseRepl > 0 && looseRepl / Math.max(1, looseNonAscii) <= 0.05) {
+    return looseUtf8;
+  }
+  // 不是合法 UTF-8：可能是 GB18030/GBK 文本，也可能是零字节过少、探测未触发的无 BOM UTF-16 正文
+  let gbText = null;
+  try {
+    gbText = new TextDecoder("gb18030", { fatal: true }).decode(u8);
+  } catch (err) {
+    /* 不是合法 GB18030 */
+  }
+  const utf16Text = decodeUtf16Candidate(u8);
+  const useUtf16 = utf16Text !== null && (gbText === null || readableScore(utf16Text) > readableScore(gbText));
+  if (useUtf16) return utf16Text;
+  if (gbText !== null) return gbText;
+  try {
+    return new TextDecoder("gbk").decode(u8);
+  } catch (err) {
+    return new TextDecoder("utf-8").decode(u8);
+  }
+}
+
+// base64 -> 原始字节：宿主以 bodyBase64 回传的原文在这里转回字节。
+// 环境缺少 atob 或内容非法时返回 null，调用方回退到 UTF-8 文本通道。
+function base64ToBytes(base64) {
+  const raw = String(base64 == null ? "" : base64).trim();
+  if (!raw) return null;
+  if (typeof atob !== "function") return null;
+  try {
+    const binary = atob(raw);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+    return bytes;
+  } catch (err) {
+    return null;
+  }
+}
+
+// 统一换行并去掉 BOM 残留
+function normalizeText(text) {
+  return String(text == null ? "" : text)
+    .replace(/^\uFEFF/, "")
+    .replace(/\r\n?/g, "\n");
+}
+
+// 判断响应是否可能因非 UTF-8 编码而乱码。
+// 仅服务于旧宿主的回退路径（宿主未回传原始字节、只给 UTF-8 解码文本时）；
+// 新宿主走 bodyBase64 原始字节通道，由 decodeBuffer 本地解码，不再调用本函数。
 function detectEncodingRisk(charset, headers) {
   let declared = String(charset || "").toLowerCase();
   if (!declared && headers) {
@@ -1538,6 +2620,9 @@ function detectEncodingRisk(charset, headers) {
 }
 
 // 发起书源请求；返回 { ok, text, status, headers, error, encodingRisk }
+// 优先走宿主「原始字节」通道（responseType: "arraybuffer"）：拿到 bodyBase64 后本地解码，
+// 任意声明编码的站点都能还原原文，此时 encodingRisk 恒为空；
+// 旧宿主忽略该选项、只回 UTF-8 文本（或 base64 非法）时退回文本通道，并保留编码风险提示。
 async function sourceFetch(api, source, request, timeoutMs) {
   const result = {
     ok: false,
@@ -1557,7 +2642,8 @@ async function sourceFetch(api, source, request, timeoutMs) {
       method: request.method || "GET",
       headers: request.headers && Object.keys(request.headers).length ? request.headers : undefined,
       body: request.body || undefined,
-      timeoutMs: timeoutMs || SOURCE_FETCH_TIMEOUT_MS
+      timeoutMs: timeoutMs || SOURCE_FETCH_TIMEOUT_MS,
+      responseType: "arraybuffer"
     });
   } catch (err) {
     result.error = (err && err.message) || String(err);
@@ -1569,7 +2655,6 @@ async function sourceFetch(api, source, request, timeoutMs) {
   }
   result.status = Number(response.status) || 0;
   result.headers = response.headers && typeof response.headers === "object" ? response.headers : {};
-  result.encodingRisk = detectEncodingRisk(request.charset, result.headers);
   if (response.error) {
     result.error = String(response.error);
     return result;
@@ -1579,15 +2664,24 @@ async function sourceFetch(api, source, request, timeoutMs) {
     return result;
   }
   result.ok = true;
+  // 新宿主：原始字节 -> 本地解码链恢复原文。bodyBase64 与 body 同时存在时 body 为空串，以 bodyBase64 为准。
+  const bytes = typeof response.bodyBase64 === "string" ? base64ToBytes(response.bodyBase64) : null;
+  if (bytes) {
+    result.text = normalizeText(decodeBuffer(bytes));
+    return result;
+  }
+  // 旧宿主回退：只有宿主按 UTF-8 解码后的文本，声明非 UTF-8 时保留乱码风险提示
   result.text = typeof response.body === "string" ? response.body : "";
+  result.encodingRisk = detectEncodingRisk(request.charset, result.headers);
   return result;
 }
 
 // ==================== 书源：业务动作 ====================
 // 解析响应文本：JSON 走 JSONPath，其余按 HTML 建 DOM
-function buildSourceContext(text, contentType) {
+function buildSourceContext(text, contentType, baseUrl) {
   const raw = String(text == null ? "" : text);
-  const context = { text: raw, doc: null, root: null, json: null };
+  // baseUrl：当前响应/文档的地址，供字段规则模板 {{baseUrl}} 使用（legado setContent 的 baseUrl）
+  const context = { text: raw, doc: null, root: null, json: null, baseUrl: typeof baseUrl === "string" ? baseUrl : "" };
   const trimmed = raw.trim();
   const looksJson = /^[[{]/.test(trimmed);
   if (looksJson) {
@@ -1612,62 +2706,173 @@ function buildSourceContext(text, contentType) {
   return context;
 }
 
-// 搜索结果解析：bookList 取列表，字段规则相对每个书籍节点求值
+// ---------------- 列表规则解析：顶层连接符与 ! 排除索引 ----------------
+// legado 的 bookList / chapterList 除 @ 链外还有两类整条规则级语法：
+//   1) 顶层连接符：A||B 先取 A、为空时取 B；A&&B 合并；A%%B 交替拼接
+//   2) ! 排除索引：选择器末尾 !0:1:2 / !-1 表示剔除命中结果的指定下标（负数从末尾数）
+// 切分连接符要感知引号与 [属性选择器] 方括号，避免把 [href$="a||b"] 这类选择器切坏。
+function splitTopBranches(raw) {
+  const text = String(raw == null ? "" : raw);
+  const segs = [];
+  const conns = [];
+  let buf = "";
+  let depth = 0;
+  let quote = "";
+  let pendingConn = "";
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text.charAt(i);
+    if (quote) {
+      buf += ch;
+      if (ch === quote) quote = "";
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      buf += ch;
+      continue;
+    }
+    if (ch === "[") {
+      depth += 1;
+      buf += ch;
+      continue;
+    }
+    if (ch === "]") {
+      depth = Math.max(0, depth - 1);
+      buf += ch;
+      continue;
+    }
+    const two = text.slice(i, i + 2);
+    if (depth === 0 && (two === "||" || two === "&&" || two === "%%")) {
+      segs.push(buf);
+      conns.push(pendingConn);
+      pendingConn = two;
+      buf = "";
+      i += 1;
+      continue;
+    }
+    buf += ch;
+  }
+  segs.push(buf);
+  conns.push(pendingConn);
+  return { segs: segs, conns: conns };
+}
+
+// 列表规则与普通字段共用同一套尾部索引语义（阅读写法 . / ! 与括号写法 []），
+// 由 defaultQuery（stripRuleIndex + applyRuleIndex）统一实现；保留旧函数名作为兼容别名。
+function splitExcludeIndex(text) {
+  const split = stripRuleIndex(text);
+  if (!split.index || split.index.mode !== "exclude") {
+    return { selector: String(text == null ? "" : text).trim(), exclude: null };
+  }
+  const exclude = [];
+  for (const item of split.index.items) {
+    if (item.kind === "index") exclude.push(item.n);
+  }
+  return { selector: split.body, exclude: exclude.length ? exclude : null };
+}
+
+function defaultQueryEx(root, segment) {
+  return defaultQuery(root, segment);
+}
+
+// 单个分支的节点解析（@ 链式，遇提取段截止）；context 已含 doc/root 时直接复用
+function listNodesSingleEx(rawRule, context, useExcl) {
+  const text = String(rawRule == null ? "" : rawRule).trim();
+  if (!text) return [];
+  const kind = ruleSourceKind(text);
+  if (kind === "json") {
+    if (context.json === null || context.json === undefined) return [];
+    return jsonPathQuery(context.json, text);
+  }
+  const root = ruleRoot(context);
+  if (!root) return [];
+  if (kind === "css") {
+    const css = splitCssRule(text.slice("@css:".length));
+    return cssQuery(root, css.selector);
+  }
+  if (kind === "xpath") {
+    const body = text.indexOf("@XPath:") === 0 ? text.slice("@XPath:".length) : text;
+    return xpathQuery(root, body);
+  }
+  const segments = text.split("@").map((item) => item.trim()).filter(Boolean);
+  let current = [root];
+  for (const segment of segments) {
+    if (isExtractMode(segment)) break;
+    const next = [];
+    for (const node of current) {
+      if (!node) continue;
+      const found = useExcl ? defaultQueryEx(node, segment) : defaultQuery(node, segment);
+      for (const f of found) next.push(f);
+    }
+    current = next;
+    if (!current.length) break;
+  }
+  return current;
+}
+
+// 整条列表规则：先切顶层分支，逐分支求值并按连接符合并
+function listNodesFixed(rawRule, context, useBranch, useExcl) {
+  if (!useBranch) return listNodesSingleEx(rawRule, context, useExcl);
+  const parts = splitTopBranches(rawRule);
+  if (parts.segs.length === 1) return listNodesSingleEx(parts.segs[0], context, useExcl);
+  let result = listNodesSingleEx(parts.segs[0], context, useExcl);
+  for (let i = 1; i < parts.segs.length; i += 1) {
+    const conn = parts.conns[i];
+    const list = listNodesSingleEx(parts.segs[i], context, useExcl);
+    if (conn === "&&") {
+      result = result.concat(list);
+    } else if (conn === "||") {
+      if (!result.length) result = list.slice();
+    } else if (conn === "%%") {
+      const merged = [];
+      const max = Math.max(result.length, list.length);
+      for (let j = 0; j < max; j += 1) {
+        if (j < result.length) merged.push(result[j]);
+        if (j < list.length) merged.push(list[j]);
+      }
+      result = merged;
+    } else {
+      result = result.concat(list);
+    }
+  }
+  return result;
+}
+
+// 搜索结果解析：bookList 取列表，字段规则相对每个书籍节点求值。
+// 输出过滤对齐 legado BookList.getSearchItem：书名为空即丢弃该项；详情地址为空回退当前页地址；
+// 并按「书名 + 地址 + 作者」去重（legado 侧用 LinkedHashSet 去重）。
 function parseSearchResult(source, context, baseUrl) {
   const rule = source.ruleSearch || {};
   const out = [];
   if (!rule.bookList) return out;
-  const listRoot = buildSourceContext(context.text);
+  const listRoot = buildSourceContext(context.text, "", context.baseUrl);
   listRoot.json = context.json;
-  const bookListRule = rule.bookList;
-  // bookList 本身可能是 DOM 规则或 JSONPath
-  let nodes = [];
-  const kind = ruleSourceKind(bookListRule);
-  if (kind === "json") {
-    if (context.json === null || context.json === undefined) return out;
-    nodes = jsonPathQuery(context.json, bookListRule);
-  } else {
-    const root = ruleRoot(listRoot);
-    if (!root) return out;
-    if (kind === "css") {
-      const css = splitCssRule(bookListRule.slice("@css:".length));
-      nodes = cssQuery(root, css.selector);
-    } else if (kind === "xpath") {
-      const body = bookListRule.indexOf("@XPath:") === 0 ? bookListRule.slice("@XPath:".length) : bookListRule;
-      nodes = xpathQuery(root, body);
-    } else {
-      const segments = bookListRule.split("@").map((item) => item.trim()).filter(Boolean);
-      let current = [root];
-      for (const segment of segments) {
-        if (isExtractMode(segment)) break;
-        const next = [];
-        for (const node of current) {
-          if (!node) continue;
-          for (const found of defaultQuery(node, segment)) next.push(found);
-        }
-        current = next;
-        if (!current.length) break;
-      }
-      nodes = current;
-    }
-  }
+  const nodes = listNodesFixed(rule.bookList, listRoot, true, true);
+  const fallbackUrl = baseUrl || source.url || "";
+  const seen = new Set();
   for (const node of nodes) {
     const isDomNode = node && typeof node === "object" && typeof node.nodeType === "number";
     const itemContext = isDomNode
-      ? { text: context.text, doc: listRoot.doc || null, root: node, json: null }
-      : { text: context.text, doc: null, root: null, json: node };
+      ? { text: context.text, doc: listRoot.doc || null, root: node, json: null, baseUrl: context.baseUrl || "" }
+      : { text: context.text, doc: null, root: null, json: node, baseUrl: context.baseUrl || "" };
     if (!isDomNode && itemContext.json === null) continue;
+    const name = ruleString(rule.name, itemContext);
+    if (!name) continue;
     const item = {
-      name: ruleString(rule.name, itemContext),
+      name: name,
       author: ruleString(rule.author, itemContext),
       kind: ruleString(rule.kind, itemContext),
       wordCount: ruleString(rule.wordCount, itemContext),
       lastChapter: ruleString(rule.lastChapter, itemContext),
       intro: ruleString(rule.intro, itemContext),
-      coverUrl: resolveSourceUrl(baseUrl || source.url, ruleString(rule.coverUrl, itemContext)),
-      bookUrl: resolveSourceUrl(baseUrl || source.url, ruleString(rule.bookUrl, itemContext))
+      coverUrl: resolveSourceUrl(fallbackUrl, ruleString(rule.coverUrl, itemContext)),
+      bookUrl: resolveSourceUrl(fallbackUrl, ruleString(rule.bookUrl, itemContext))
     };
-    if (item.name || item.bookUrl) out.push(item);
+    if (!item.bookUrl) item.bookUrl = fallbackUrl;
+    const key = item.name + "\u0001" + item.bookUrl + "\u0001" + item.author;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(item);
   }
   return out;
 }
@@ -1683,43 +2888,14 @@ function parseTocResult(source, context, baseUrl) {
     reversed = true;
     rawRule = rawRule.slice(1);
   }
-  const listContext = buildSourceContext(context.text);
+  const listContext = buildSourceContext(context.text, "", context.baseUrl);
   listContext.json = context.json;
-  const kind = ruleSourceKind(rawRule);
-  let nodes = [];
-  if (kind === "json") {
-    if (context.json === null || context.json === undefined) return out;
-    nodes = jsonPathQuery(context.json, rawRule);
-  } else {
-    const root = ruleRoot(listContext);
-    if (!root) return out;
-    if (kind === "css") {
-      const css = splitCssRule(rawRule.slice("@css:".length));
-      nodes = cssQuery(root, css.selector);
-    } else if (kind === "xpath") {
-      const body = rawRule.indexOf("@XPath:") === 0 ? rawRule.slice("@XPath:".length) : rawRule;
-      nodes = xpathQuery(root, body);
-    } else {
-      const segments = rawRule.split("@").map((item) => item.trim()).filter(Boolean);
-      let current = [root];
-      for (const segment of segments) {
-        if (isExtractMode(segment)) break;
-        const next = [];
-        for (const node of current) {
-          if (!node) continue;
-          for (const found of defaultQuery(node, segment)) next.push(found);
-        }
-        current = next;
-        if (!current.length) break;
-      }
-      nodes = current;
-    }
-  }
+  const nodes = listNodesFixed(rawRule, listContext, true, true);
   for (const node of nodes) {
     const isDomNode = node && typeof node === "object" && typeof node.nodeType === "number";
     const itemContext = isDomNode
-      ? { text: context.text, doc: listContext.doc || null, root: node, json: null }
-      : { text: context.text, doc: null, root: null, json: node };
+      ? { text: context.text, doc: listContext.doc || null, root: node, json: null, baseUrl: context.baseUrl || "" }
+      : { text: context.text, doc: null, root: null, json: node, baseUrl: context.baseUrl || "" };
     if (!isDomNode && itemContext.json === null) continue;
     const title = ruleString(rule.chapterName, itemContext);
     const href = ruleString(rule.chapterUrl, itemContext);
@@ -1830,6 +3006,8 @@ function createEngine(api) {
   };
   // 把日志通道交给模块层的净化防护，用于上报「正文超长、已跳过净化」。
   purifySkipLog = log;
+  // 同一通道交给扩展伪类/属性正则护栏，用于上报超长输入与候选超限（各只报一次）。
+  pseudoSkipLog = log;
 
   // ---------------- 字形转换（简繁） ----------------
   // 把「展示用文本」转到目标字形：auto 跟随宿主界面语言（英文等不处理）。
@@ -1884,6 +3062,9 @@ function createEngine(api) {
   const chapterCache = new Map();
   // 书源导入弹窗的粘贴草稿：面板由 React 重绘，草稿必须另存才不会丢
   let sourceDraft = "";
+  // 导入时覆盖同地址的已有书源（默认开启）：覆盖只换规则，保留原启用/停用状态与列表位置；
+  // 关闭后与旧版行为一致，同地址一律跳过
+  let importOverwrite = true;
   let disposed = false;
   // 读档是否已落地：loadState() 成功读取后置真。stop() 的写回以此为准，
   // 否则「挂起的读档 -> stop -> start」（StrictMode 双挂载）会在读档完成前把空 state 写回存储，
@@ -1950,6 +3131,12 @@ function createEngine(api) {
       '<div class="snr-title"></div>' +
       '<div class="snr-percent"></div>' +
       '<div class="snr-actions">' +
+      // 上一章 / 下一章：与快捷键（默认 Ctrl+ArrowLeft / Ctrl+ArrowRight）走同一条路径，
+      // 没有快捷键入口时也能直接点。本地书或目录为空时点击给出提示，与快捷键行为一致。
+      '<button class="snr-btn" type="button" data-act="prevChapter" title="' + escapeAttr(tr("keys.prevChapter")) + '">' + svgIcon("chevronLeft", 14) + "</button>" +
+      '<button class="snr-btn" type="button" data-act="nextChapter" title="' + escapeAttr(tr("keys.nextChapter")) + '">' + svgIcon("chevronRight", 14) + "</button>" +
+      // 分隔线：区分「章节导航」与「窗口操作」两组按钮
+      '<span class="snr-sep"></span>' +
       '<button class="snr-btn" type="button" data-act="autoscroll" title="' + escapeAttr(tr("settings.autoScroll")) + '">' + svgIcon("play", 14) + "</button>" +
       '<button class="snr-btn" type="button" data-act="panel" title="' + escapeAttr(tr("tab.settings")) + '">' + svgIcon("panel", 14) + "</button>" +
       '<button class="snr-btn" type="button" data-act="close" title="' + escapeAttr(tr("win.hide")) + '">' + svgIcon("close", 14) + "</button>" +
@@ -2000,6 +3187,8 @@ function createEngine(api) {
       if (!button) return;
       const act = button.dataset.act;
       if (act === "autoscroll") setAutoScroll(!state.settings.autoScroll);
+      else if (act === "prevChapter") prevSegment();
+      else if (act === "nextChapter") nextSegment();
       else if (act === "panel") openPluginPanel();
       else if (act === "close") hideWindow();
     });
@@ -2271,121 +3460,8 @@ function createEngine(api) {
     }
   };
 
-  // ---------------- 文本处理 ----------------
-  // 粗略可读性评分：CJK 与全角标点、可打印 ASCII 加分，零字节、替换字符与控制字符扣分；
-  // 返回前 300 字符的每码点平均分，避免候选与对照文本长度不同时总分不可比
-  function readableScore(text) {
-    let value = 0;
-    const probe = String(text == null ? "" : text).slice(0, 300);
-    for (const ch of probe) {
-      const code = ch.codePointAt(0);
-      if (code === 0 || code === 0xfffd) value -= 4;
-      else if (code < 32 && code !== 9 && code !== 10 && code !== 13) value -= 4;
-      else if (code >= 0x4e00 && code <= 0x9fff) value += 2;
-      else if (code >= 0x20 && code <= 0x7e) value += 1;
-      else if (code >= 0x3000 && code <= 0x303f) value += 1;
-      else if (code >= 0xff00 && code <= 0xffef) value += 1;
-      else if (code >= 0x2000 && code <= 0x206f) value += 0;
-      else value -= 1;
-    }
-    // 分母按码点计数，与 for-of 的迭代口径一致（代理对只算一个字符）
-    const units = Array.from(probe).length;
-    return units ? value / units : 0;
-  }
-
-  // 按 16 位单元统计结构特征：CJK 及中文标点命中数、两侧字节同为可打印 ASCII 的单元数。
-  // 真 UTF-16 中文以汉字为主（CJK 命中率高、ASCII 配对率低）；Latin-1 等单字节西文被
-  // 误当作 UTF-16 时字母会两两配成 ASCII 单元（ASCII 配对率显著偏高）。
-  function utf16UnitStats(u8, littleEndian) {
-    const limit = Math.min(u8.length, 4096);
-    let units = 0;
-    let cjk = 0;
-    let bothAscii = 0;
-    for (let i = 0; i + 1 < limit; i += 2) {
-      const lo = littleEndian ? u8[i] : u8[i + 1];
-      const hi = littleEndian ? u8[i + 1] : u8[i];
-      const code = lo | (hi << 8);
-      units += 1;
-      if (code >= 0x4e00 && code <= 0x9fff) cjk += 1;
-      else if (code >= 0x3000 && code <= 0x303f) cjk += 1;
-      else if (code >= 0xff00 && code <= 0xffef) cjk += 1;
-      else if (code >= 0x2000 && code <= 0x206f) cjk += 1;
-      if (lo >= 0x20 && lo <= 0x7e && hi >= 0x20 && hi <= 0x7e) bothAscii += 1;
-    }
-    return { units: units, cjk: cjk, bothAscii: bothAscii };
-  }
-
-  // 纯中文的 UTF-16 正文几乎没有零字节，零字节探测不会触发；按两种字节序试解码，
-  // 只有结构特征可信（CJK 命中率 >= 0.5 且 ASCII 配对率 <= 0.6）时才返回候选，
-  // 否则返回 null 继续原有 GB18030 -> GBK -> UTF-8 回退链，避免把单字节西文误判为 UTF-16。
-  function decodeUtf16Candidate(u8) {
-    const le = utf16UnitStats(u8, true);
-    const be = utf16UnitStats(u8, false);
-    const trusted = (stats) =>
-      stats.units > 0 && stats.cjk / stats.units >= 0.5 && stats.bothAscii / stats.units <= 0.6;
-    const leOk = trusted(le);
-    const beOk = trusted(be);
-    if (!leOk && !beOk) return null;
-    const useLe = leOk && (!beOk || le.cjk >= be.cjk);
-    return useLe ? new TextDecoder("utf-16le").decode(u8) : new TextDecoder("utf-16be").decode(u8);
-  }
-
-  function decodeBuffer(buffer) {
-    const u8 = new Uint8Array(buffer);
-    if (u8.length >= 3 && u8[0] === 0xef && u8[1] === 0xbb && u8[2] === 0xbf) {
-      return new TextDecoder("utf-8").decode(u8.subarray(3));
-    }
-    if (u8.length >= 2 && u8[0] === 0xff && u8[1] === 0xfe) {
-      return new TextDecoder("utf-16le").decode(u8.subarray(2));
-    }
-    if (u8.length >= 2 && u8[0] === 0xfe && u8[1] === 0xff) {
-      return new TextDecoder("utf-16be").decode(u8.subarray(2));
-    }
-    // 无 BOM 的 UTF-16 探测（大量零字节）：UTF-16LE 下 ASCII 的零字节落在奇数索引，
-    // 故 oddZeros 更高时是 utf-16le，evenZeros 更高时是 utf-16be。
-    const sample = Math.min(u8.length, 4096);
-    if (sample >= 16) {
-      let evenZeros = 0;
-      let oddZeros = 0;
-      for (let i = 0; i + 1 < sample; i += 2) {
-        if (u8[i] === 0) evenZeros += 1;
-        if (u8[i + 1] === 0) oddZeros += 1;
-      }
-      const half = sample / 2 / 8;
-      if (evenZeros > half || oddZeros > half) {
-        return oddZeros > evenZeros
-          ? new TextDecoder("utf-16le").decode(u8)
-          : new TextDecoder("utf-16be").decode(u8);
-      }
-    }
-    try {
-      return new TextDecoder("utf-8", { fatal: true }).decode(u8);
-    } catch (err) {
-      /* 不是合法 UTF-8 */
-    }
-    // 不是合法 UTF-8：可能是 GB18030/GBK 文本，也可能是零字节过少、探测未触发的无 BOM UTF-16 正文
-    let gbText = null;
-    try {
-      gbText = new TextDecoder("gb18030", { fatal: true }).decode(u8);
-    } catch (err) {
-      /* 不是合法 GB18030 */
-    }
-    const utf16Text = decodeUtf16Candidate(u8);
-    const useUtf16 = utf16Text !== null && (gbText === null || readableScore(utf16Text) > readableScore(gbText));
-    if (useUtf16) return utf16Text;
-    if (gbText !== null) return gbText;
-    try {
-      return new TextDecoder("gbk").decode(u8);
-    } catch (err) {
-      return new TextDecoder("utf-8").decode(u8);
-    }
-  }
-
-  function normalizeText(text) {
-    return String(text == null ? "" : text)
-      .replace(/^\uFEFF/, "")
-      .replace(/\r\n?/g, "\n");
-  }
+  // 文本解码（readableScore / utf16UnitStats / decodeUtf16Candidate / decodeBuffer /
+  // base64ToBytes / normalizeText）已提升为模块级函数：在线书源响应解码与本地 TXT 导入共用。
 
   // ---------------- 在线书源：状态与业务 ----------------
   // 书源列表持久化在插件私有存储；在线书籍复用书架，用 source 字段区分本地 TXT / 在线书。
@@ -2435,26 +3511,14 @@ function createEngine(api) {
     return enabledSources().filter((item) => item.searchUrl && item.ruleSearch && item.ruleSearch.bookList);
   }
 
-  // 导入书源文本：解析 -> 去重（按 bookSourceUrl）-> 合并
+  // 导入书源文本：解析 -> 按 bookSourceUrl 去重合并（importOverwrite 开启时覆盖同地址旧源）
   function importSourceText(text) {
     const parsed = parseBookSourcePayload(text);
-    if (parsed.error === "parse") return { added: 0, skipped: 0, error: tr("source.importParseError") };
-    if (!parsed.sources.length) return { added: 0, skipped: 0, error: tr("source.importEmpty") };
-    const known = {};
-    for (const item of state.sources) known[item.id] = true;
-    let added = 0;
-    let skipped = 0;
-    for (const item of parsed.sources) {
-      if (known[item.id]) {
-        skipped += 1;
-        continue;
-      }
-      known[item.id] = true;
-      state.sources.push(item);
-      added += 1;
-    }
-    if (added) saveSources();
-    return { added: added, skipped: skipped, error: "" };
+    if (parsed.error === "parse") return { added: 0, updated: 0, skipped: 0, error: tr("source.importParseError") };
+    if (!parsed.sources.length) return { added: 0, updated: 0, skipped: 0, error: tr("source.importEmpty") };
+    const result = mergeBookSources(state.sources, parsed.sources, importOverwrite);
+    if (result.added || result.updated) saveSources();
+    return { added: result.added, updated: result.updated, skipped: result.skipped, error: "" };
   }
 
   function removeSource(sourceId) {
@@ -2493,8 +3557,11 @@ function createEngine(api) {
     return exactNameMatch(item.name, keyword) || exactNameMatch(item.author, keyword);
   }
 
-  // 并发搜索：按 SEARCH_CONCURRENCY 限流的并发 worker，单源失败不影响其它源
-  async function searchAllSources(keyword) {
+  // 并发搜索：按 SEARCH_CONCURRENCY 限流的并发 worker，单源失败不影响其它源。
+  // hooks.onItems 在每个书源解析完成后立刻回调该源新增的条目：调用方据此「搜到一个就显示一个」，
+  // 不必等全部书源跑完。返回值仍是完整结果，供调用方做收尾判定。
+  async function searchAllSources(keyword, hooks) {
+    const onItems = hooks && typeof hooks.onItems === "function" ? hooks.onItems : null;
     const sources = searchableSources();
     if (!sources.length) return { items: [], total: 0, failed: 0, skipped: state.sources.length };
     searchState.running = true;
@@ -2521,7 +3588,7 @@ function createEngine(api) {
             log("source search failed", source.name, response.error);
             continue;
           }
-          const context = buildSourceContext(response.text, response.headers["content-type"]);
+          const context = buildSourceContext(response.text, response.headers["content-type"], request.url);
           const items = parseSearchResult(source, context, request.url);
           for (const item of items) {
             item.sourceId = source.id;
@@ -2529,6 +3596,8 @@ function createEngine(api) {
             item.encodingRisk = response.encodingRisk;
             results.push(item);
           }
+          // 这个源已经跑完：命中的条目立刻交给调用方显示（流式回填）
+          if (items.length && onItems) onItems(items);
         } catch (err) {
           failed += 1;
           log("source search error", source.name, err);
@@ -2571,7 +3640,7 @@ function createEngine(api) {
     const response = await sourceFetch(api, source, request);
     if (disposed) return { ok: false, text: "", error: "disposed" };
     if (!response.ok) return { ok: false, text: "", error: response.error, encodingRisk: response.encodingRisk };
-    const context = buildSourceContext(response.text, response.headers["content-type"]);
+    const context = buildSourceContext(response.text, response.headers["content-type"], request.url);
     const text = parseContentResult(source, context);
     if (text) {
       chapterCache.set(cacheKey, text);
@@ -2596,7 +3665,7 @@ function createEngine(api) {
     const detailResponse = await sourceFetch(api, source, detailRequest);
     if (disposed) return { ok: false, error: "disposed" };
     if (detailResponse.ok) detailHtml = detailResponse.text;
-    const detailContext = buildSourceContext(detailHtml, detailResponse.headers["content-type"]);
+    const detailContext = buildSourceContext(detailHtml, detailResponse.headers["content-type"], bookUrl);
     const detailRule = source.ruleBookInfo || {};
     // 详情页取值：规则为空或没取到时回退到搜索结果（与 name / author 同一范式，避免逐字段重复判断）
     const detailValue = (key, fallback) => {
@@ -2629,7 +3698,7 @@ function createEngine(api) {
         break;
       }
       tocRisk = tocResponse.encodingRisk || tocRisk;
-      const tocContext = buildSourceContext(tocResponse.text, tocResponse.headers["content-type"]);
+      const tocContext = buildSourceContext(tocResponse.text, tocResponse.headers["content-type"], tocRequest.url);
       for (const chapter of parseTocResult(source, tocContext, tocRequest.url)) chapters.push(chapter);
       nextTocUrl = resolveSourceUrl(tocRequest.url, parseTocNextUrl(source, tocContext));
     }
@@ -2735,7 +3804,15 @@ function createEngine(api) {
     setStatus(tr("source.searching", { count: searchableSources().length }), "loading");
     renderView();
     const token = ++searchToken;
-    const result = await searchAllSources(keyword);
+    // 流式回填：每个书源一返回就把它命中的条目追加进列表，搜到一个就显示一个。
+    // 列表只追加、不重排，条目点击时按原始下标回查 searchState.items 的契约保持不变。
+    // token 校验与收尾一致：清空数据或重新搜索后，旧搜索的增量结果不得再写回。
+    const result = await searchAllSources(keyword, {
+      onItems: (items) => {
+        if (disposed || token !== searchToken) return;
+        for (const item of items) searchState.items.push(item);
+      }
+    });
     if (disposed || token !== searchToken) return;
     searchState.items = result.items;
     searchState.running = false;
@@ -3698,6 +4775,7 @@ function createEngine(api) {
     scriptTextCache.drop("");
     sourceDraft = "";
     modalOpen = false;
+    importOverwrite = true;
     searchState.keyword = "";
     searchState.items = [];
     searchState.searched = false;
@@ -4182,13 +5260,13 @@ function createEngine(api) {
       const entries = searchState.items
         .map((item, index) => ({ item: item, index: index }))
         .filter((entry) => !searchState.exact || exactItemMatch(entry.item, searchState.keyword));
+      // 搜索进行中：显示已经搜到的条数与已完成的书源数，结果随每个书源返回实时增长
       const progressText = searchState.running
-        ? tr("source.searching", { count: searchState.total }) +
-          "  (" +
-          searchState.done +
-          "/" +
-          searchState.total +
-          ")"
+        ? tr("source.searchStreaming", {
+            found: entries.length,
+            done: searchState.done,
+            total: searchState.total
+          })
         : entries.length
           ? tr("source.searchDone", { count: entries.length })
           : "";
@@ -4711,6 +5789,23 @@ function createEngine(api) {
           }),
           h(
             "div",
+            { className: "nr-row", key: "overwrite" },
+            h(
+              "label",
+              { className: "nr-check" },
+              h("input", {
+                type: "checkbox",
+                checked: importOverwrite,
+                onChange: (e) => {
+                  importOverwrite = !!e.target.checked;
+                  panelStore.notify();
+                }
+              }),
+              h("span", null, tr("source.importOverwrite"))
+            )
+          ),
+          h(
+            "div",
             { className: "nr-modal-actions" },
             labeledBtn("FolderOpen", tr("source.importFromFile"), {
               onClick: () => {
@@ -4730,6 +5825,7 @@ function createEngine(api) {
                   setStatus(result.error, "error");
                 } else {
                   let message = tr("source.importOk", { count: result.added });
+                  if (result.updated) message += tr("source.importUpdated", { count: result.updated });
                   if (result.skipped) message += tr("source.importDup", { count: result.skipped });
                   setStatus(message, "success");
                   sourceDraft = "";
@@ -4889,6 +5985,7 @@ function createEngine(api) {
               setStatus(result.error, "error");
             } else {
               let message = tr("source.importOk", { count: result.added });
+              if (result.updated) message += tr("source.importUpdated", { count: result.updated });
               if (result.skipped) message += tr("source.importDup", { count: result.skipped });
               setStatus(message, "success");
               sourceDraft = "";

@@ -6,12 +6,12 @@ Snow App 插件集合仓库。每个子目录是一个独立插件（该目录�
 
 | 插件 | ID | 版本 | 说明 |
 | ---- | -- | ---- | ---- |
-| 小说阅读器 | `com.snow.novel-reader` | 1.1.0 | 悬浮 TXT 小说阅读器（可调透明度与显示位置、滚轮与快捷键翻页、章节识别与自动滚动）+ legado 书源导入、多源并发搜索与在线追书 |
+| 小说阅读器 | `com.snow.novel-reader` | 1.2.0 | 悬浮 TXT 小说阅读器（可调透明度与显示位置、滚轮与快捷键翻页、章节识别与自动滚动）+ legado 书源导入、多源并发搜索与在线追书 |
 
 ### 小说阅读器：功能范围
 
 - 本地阅读：导入 TXT（可多选）、书架与目录、阅读进度、悬浮阅读窗（透明度 / 位置 / 字号 / 行高，配色跟随宿主主题）。
-- 在线追书：导入 **legado 格式**书源（只支持 legado，不做其它阅读器格式适配；一次可导入多个源）、多源并发搜索、详情与目录分页抓取、章节正文缓存。
+- 在线追书：导入 **legado 格式**书源（只支持 legado，不做其它阅读器格式适配；一次可导入多个源）、多源并发搜索、详情与目录分页抓取、章节正文缓存；响应走宿主原始字节通道并自动识别站点编码（GBK / GB18030 / UTF-16 等站点不再乱码）。
 - 隐私：不内置任何书源、不后台联网；只有你主动点「搜索」或打开在线章节时，才会通过宿主网络通道访问书源里指定的站点。
 - 「数据」页的「清空全部数据」会一并清掉书源与章节缓存（阅读设置与快捷键保留），二次确认时会列出清除范围。
 
@@ -66,22 +66,24 @@ config-set scope=plugins key=com.snow.novel-reader value={sourceDir: "D:/ai-work
      "kind": "plugin",
      "name": { "default": "Novel Reader", "zh-CN": "小说阅读器", "zh-TW": "小說閱讀器" },
      "description": {
-       "default": "Floating TXT novel reader with adjustable opacity and position, wheel and hotkey paging, auto hide on mouse leave, chapter detection and auto scroll.",
-       "zh-CN": "悬浮 TXT 小说阅读器：可调透明度与显示位置，支持滚轮与快捷键翻页、鼠标移入显示移出隐藏，并带章节识别与自动滚动。"
+       "default": "Novel reader with a floating TXT reading window (adjustable opacity and position, wheel and hotkey paging, auto hide on mouse leave, chapter detection and auto scroll), plus legado book-source import, multi-source search and online chapter reading with caching.",
+       "zh-CN": "小说阅读器：悬浮 TXT 阅读窗（可调透明度与显示位置、滚轮与快捷键翻页、鼠标移入显示移出隐藏、章节识别与自动滚动），并支持导入 legado 书源、多源并发搜索、在线追书与章节缓存。"
      },
      "author": "azhu949",
      "repo": "https://github.com/azhu949/snow-plugins",
      "homepage": "https://github.com/azhu949/snow-plugins/tree/main/snow-novel-reader",
-     "version": "1.0.0",
-     "tag": "novel-reader/v1.0.0",
-     "asset": "com.snow.novel-reader-1.0.0.zip",
-     "downloadUrl": "https://github.com/azhu949/snow-plugins/releases/download/novel-reader%2Fv1.0.0/com.snow.novel-reader-1.0.0.zip",
+     "version": "1.2.0",
+     "tag": "novel-reader/v1.2.0",
+     "asset": "com.snow.novel-reader-1.2.0.zip",
+     "downloadUrl": "https://github.com/azhu949/snow-plugins/releases/download/novel-reader%2Fv1.2.0/com.snow.novel-reader-1.2.0.zip",
      "sha256": "<pack.ps1 输出的 64 位十六进制哈希>",
      "icon": "lucide:BookOpen",
-     "privacy": [],
+     "privacy": ["network"],
      "tags": ["novel", "reader", "txt", "floating", "小说", "阅读器"]
    }
    ```
+
+   `sha256` 字段先保留占位符，以 `pack.ps1` 实际输出回填后再提交 PR。
 
    注意：tag 含 `/` 时必须同时提供 `downloadUrl`（把 tag 中的 `/` 编码为 `%2F`）。客户端优先使用 `downloadUrl`，缺失时才按 `https://github.com/<owner>/<repo>/releases/download/<tag>/<asset>` 推导，而斜杠会让推导结果产生路径歧义。
 
