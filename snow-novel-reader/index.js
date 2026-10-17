@@ -4238,21 +4238,23 @@ function createEngine(api) {
     const fragment = document.createDocumentFragment();
     const offsets = new Array(lines.length);
     let acc = 0;
-    let prevEmpty = true;
     for (let i = 0; i < lines.length; i += 1) {
       const line = lines[i];
       offsets[i] = acc;
       acc += line.length + 1;
       const div = document.createElement("div");
       div.className = "snr-line";
-      if (line.length === 0) {
+      // 每个非空行都可能是一个独立段落：在线书源正文按块级标签转成单换行、
+      // 本地 TXT 也是一段一行、段间常无空行。缩进若只在「空行之后」补，整章
+      // 就只有第一行缩进。改为按行判定：空白行走空行盒；行首已带全角/半角
+      // 空白的段落保留原文自带缩进，不再叠加 text-indent 造成双重空白。
+      if (line.trim().length === 0) {
         div.classList.add("snr-line-empty");
-      } else if (state.settings.indent && prevEmpty) {
+      } else if (state.settings.indent && !/^\s/.test(line)) {
         div.classList.add("snr-indent");
       }
       div.textContent = line;
       fragment.appendChild(div);
-      prevEmpty = line.trim().length === 0;
     }
     contentEl.replaceChildren(fragment);
     runtime.lineOffsets = offsets;
