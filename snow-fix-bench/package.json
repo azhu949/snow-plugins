@@ -1,0 +1,19 @@
+{
+  "name": "snow-fix-bench",
+  "version": "2.8.5",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "description": "Snow App 修复工作台：客户端脚本插件（工程化源码与构建产物）",
+  "scripts": {
+    "build": "node build.mjs",
+    "test": "node --test",
+    "check": "node --check dist/snow-fix-bench.user.js"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0"
+  },
+  "dependencies": {
+    "preact": "^10.29.8"
+  }
+}
