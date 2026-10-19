@@ -40,10 +40,313 @@ import {
   resolveIssueFilePath,
   shouldReadMessages,
   shouldReadRuntime,
+  isWatchTimedOut,
+  resolveWatchIdleTimeoutMs,
+  toPositiveMs,
+  normalizeWatchTimeouts,
+  buildRuntimeProgressSignature,
 } from "../src/util.js";
 import { createT, normalizeLocale, DICTIONARIES } from "../src/i18n.js";
 import { parseCommitLog } from "../src/engine.js";
-import { ISSUE_STATUS, SEVERITY } from "../src/constants.js";
+import { ISSUE_STATUS, SEVERITY, UNKNOWN_RUNTIME_IDLE_TIMEOUT_MS } from "../src/constants.js";
+
+test("isWatchTimedOut 只在无新进展或超过绝对上限时判超时", () => {
+  const startedAt = 1_000_000;
+  const idleTimeoutMs = 15 * 60 * 1000;
+  const maxTimeoutMs = 4 * 60 * 60 * 1000;
+  // 已经运行超过 15 分钟，但刚有新进展：继续跟踪，不被固定总时长打断。
+  assert.equal(
+    isWatchTimedOut({
+      now: startedAt + 40 * 60 * 1000,
+      startedAt,
+      lastActivityAt: startedAt + 39 * 60 * 1000,
+      idleTimeoutMs,
+      maxTimeoutMs,
+    }),
+    false,
+  );
+  // 连续无进展达到阈值：超时。
+  assert.equal(
+    isWatchTimedOut({
+      now: startedAt + 16 * 60 * 1000,
+      startedAt,
+      lastActivityAt: startedAt,
+      idleTimeoutMs,
+      maxTimeoutMs,
+    }),
+    true,
+  );
+  // 一直在进展但超过绝对上限：仍然超时，避免永久挂起。
+  assert.equal(
+    isWatchTimedOut({
+      now: startedAt + maxTimeoutMs + 1,
+      startedAt,
+      lastActivityAt: startedAt + maxTimeoutMs,
+      idleTimeoutMs,
+      maxTimeoutMs,
+    }),
+    true,
+  );
+});
+
+test("runtime 不可读时长工具阶段不被常规 idle 阈值误判超时", () => {
+  const startedAt = 1_000_000;
+  const maxTimeoutMs = 8 * 60 * 60 * 1000;
+  // 与 engine 使用同一套阈值选择逻辑。
+  const idleTimeoutMs = resolveWatchIdleTimeoutMs({
+    runtimeKnown: false,
+    idleTimeoutMs: 30 * 60 * 1000,
+    unknownIdleTimeoutMs: UNKNOWN_RUNTIME_IDLE_TIMEOUT_MS,
+  });
+  assert.equal(idleTimeoutMs, UNKNOWN_RUNTIME_IDLE_TIMEOUT_MS);
+  // runtime 可读时仍按常规阈值判定。
+  assert.equal(
+    resolveWatchIdleTimeoutMs({
+      runtimeKnown: true,
+      idleTimeoutMs: 30 * 60 * 1000,
+      unknownIdleTimeoutMs: UNKNOWN_RUNTIME_IDLE_TIMEOUT_MS,
+    }),
+    30 * 60 * 1000,
+  );
+  // 未知态阈值不会反向收紧更大的常规阈值。
+  assert.equal(
+    resolveWatchIdleTimeoutMs({
+      runtimeKnown: false,
+      idleTimeoutMs: 90 * 60 * 1000,
+      unknownIdleTimeoutMs: UNKNOWN_RUNTIME_IDLE_TIMEOUT_MS,
+    }),
+    90 * 60 * 1000,
+  );
+  // runtime 缺失且消息长时间不变（长构建 / 长测试）：超过常规 30 分钟仍继续跟踪。
+  assert.equal(
+    isWatchTimedOut({
+      now: startedAt + 30 * 60 * 1000,
+      startedAt,
+      lastActivityAt: startedAt,
+      idleTimeoutMs,
+      maxTimeoutMs,
+    }),
+    false,
+  );
+  // 连续无进展达到未知态阈值：停止跟踪。
+  assert.equal(
+    isWatchTimedOut({
+      now: startedAt + UNKNOWN_RUNTIME_IDLE_TIMEOUT_MS + 1,
+      startedAt,
+      lastActivityAt: startedAt,
+      idleTimeoutMs,
+      maxTimeoutMs,
+    }),
+    true,
+  );
+  // 绝对上限仍然生效，避免永久挂起。
+  assert.equal(
+    isWatchTimedOut({
+      now: startedAt + maxTimeoutMs + 1,
+      startedAt,
+      lastActivityAt: startedAt + maxTimeoutMs,
+      idleTimeoutMs,
+      maxTimeoutMs,
+    }),
+    true,
+  );
+});
+
+test("toPositiveMs 只接受有限正数", () => {
+  assert.equal(toPositiveMs(1), 1);
+  assert.equal(toPositiveMs("60000"), 60000);
+  for (const value of [undefined, null, 0, -1, NaN, Infinity, "abc", true, {}]) {
+    assert.equal(toPositiveMs(value), null);
+  }
+});
+
+test("normalizeWatchTimeouts 对缺失与非法阈值回退默认值", () => {
+  const defaults = { idleMs: 20 * 60 * 1000, maxMs: 4 * 60 * 60 * 1000 };
+  assert.deepEqual(normalizeWatchTimeouts(undefined, defaults), {
+    idleMs: defaults.idleMs,
+    maxMs: defaults.maxMs,
+    usedFallback: true,
+  });
+  assert.deepEqual(normalizeWatchTimeouts({}, defaults), {
+    idleMs: defaults.idleMs,
+    maxMs: defaults.maxMs,
+    usedFallback: true,
+  });
+  // 非法字段各自回退，合法字段保留数字字符串转换结果。
+  assert.deepEqual(normalizeWatchTimeouts({ idleMs: NaN, maxMs: "1800000" }, defaults), {
+    idleMs: defaults.idleMs,
+    maxMs: 1800000,
+    usedFallback: true,
+  });
+  // 绝对上限写小于空闲阈值时抬升，避免参数写反导致提前中断。
+  assert.deepEqual(normalizeWatchTimeouts({ idleMs: 60000, maxMs: 1000 }, defaults), {
+    idleMs: 60000,
+    maxMs: 60000,
+    usedFallback: false,
+  });
+  assert.deepEqual(normalizeWatchTimeouts({ idleMs: "60000", maxMs: 120000 }, defaults), {
+    idleMs: 60000,
+    maxMs: 120000,
+    usedFallback: false,
+  });
+});
+
+test("resolveWatchIdleTimeoutMs 对非法阈值回退而不是返回 NaN", () => {
+  for (const value of [undefined, null, NaN, Infinity, "abc", 0, -1]) {
+    assert.equal(
+      resolveWatchIdleTimeoutMs({
+        runtimeKnown: true,
+        idleTimeoutMs: value,
+        unknownIdleTimeoutMs: value,
+      }),
+      UNKNOWN_RUNTIME_IDLE_TIMEOUT_MS,
+    );
+  }
+  // 非法常规阈值回退 60 分钟后仍按“不收紧”规则取较大值。
+  assert.equal(
+    resolveWatchIdleTimeoutMs({
+      runtimeKnown: false,
+      idleTimeoutMs: NaN,
+      unknownIdleTimeoutMs: 30 * 60 * 1000,
+    }),
+    UNKNOWN_RUNTIME_IDLE_TIMEOUT_MS,
+  );
+  // 非法未知态阈值回退后不收紧更大的常规阈值。
+  assert.equal(
+    resolveWatchIdleTimeoutMs({
+      runtimeKnown: false,
+      idleTimeoutMs: 90 * 60 * 1000,
+      unknownIdleTimeoutMs: NaN,
+    }),
+    90 * 60 * 1000,
+  );
+});
+
+test("isWatchTimedOut 对非法阈值回退默认上限，不再静默跳过", () => {
+  const startedAt = 1_000_000;
+  // idle 非法：回退 60 分钟，无进展超过阈值仍会超时。
+  assert.equal(
+    isWatchTimedOut({
+      now: startedAt + UNKNOWN_RUNTIME_IDLE_TIMEOUT_MS + 1,
+      startedAt,
+      lastActivityAt: startedAt,
+      idleTimeoutMs: NaN,
+      maxTimeoutMs: 8 * 60 * 60 * 1000,
+    }),
+    true,
+  );
+  // idle 缺失：回退 60 分钟，30 分钟尚未到阈值。
+  assert.equal(
+    isWatchTimedOut({
+      now: startedAt + 30 * 60 * 1000,
+      startedAt,
+      lastActivityAt: startedAt,
+      idleTimeoutMs: undefined,
+      maxTimeoutMs: 8 * 60 * 60 * 1000,
+    }),
+    false,
+  );
+  // max 非法：回退 8 小时绝对上限，即使刚有进展也会被兜住。
+  assert.equal(
+    isWatchTimedOut({
+      now: startedAt + 9 * 60 * 60 * 1000,
+      startedAt,
+      lastActivityAt: startedAt + 9 * 60 * 60 * 1000 - 1,
+      idleTimeoutMs: 30 * 60 * 1000,
+      maxTimeoutMs: NaN,
+    }),
+    true,
+  );
+  // idle 为 0 / 负数：回退 60 分钟，而不是立即超时。
+  assert.equal(
+    isWatchTimedOut({
+      now: startedAt + 30 * 60 * 1000,
+      startedAt,
+      lastActivityAt: startedAt,
+      idleTimeoutMs: 0,
+      maxTimeoutMs: 8 * 60 * 60 * 1000,
+    }),
+    false,
+  );
+  // 数字字符串阈值会被 Number 化后参与判定。
+  assert.equal(
+    isWatchTimedOut({
+      now: startedAt + 61 * 1000,
+      startedAt,
+      lastActivityAt: startedAt,
+      idleTimeoutMs: "60000",
+      maxTimeoutMs: "86400000",
+    }),
+    true,
+  );
+});
+
+test("buildRuntimeProgressSignature 只把可观测进展纳入签名", () => {
+  const streamingSession = {
+    startedAt: 1000,
+    messageCount: 2,
+    tokenCount: 50,
+    elapsedMs: 20000,
+    ttftMs: 500,
+  };
+  const base = buildRuntimeProgressSignature({ streamingSession, focusedConversation: null });
+  assert.notEqual(base, "");
+  // token 数、消息数、run 起点变化都算进展。
+  assert.notEqual(
+    buildRuntimeProgressSignature({ streamingSession: { ...streamingSession, tokenCount: 51 } }),
+    base,
+  );
+  assert.notEqual(
+    buildRuntimeProgressSignature({ streamingSession: { ...streamingSession, messageCount: 3 } }),
+    base,
+  );
+  assert.notEqual(
+    buildRuntimeProgressSignature({ streamingSession: { ...streamingSession, startedAt: 1001 } }),
+    base,
+  );
+  // 随时间自然增长的派生值不参与签名，否则等于无条件续期。
+  assert.equal(
+    buildRuntimeProgressSignature({
+      streamingSession: { ...streamingSession, elapsedMs: 999999, ttftMs: 999999 },
+    }),
+    base,
+  );
+
+  const focused = {
+    streamStartedAt: 1000,
+    messageCount: 2,
+    streamTokenCount: 50,
+    pendingMessageCount: 0,
+    streamElapsedMs: 20000,
+    streamTtftMs: 500,
+  };
+  const focusedBase = buildRuntimeProgressSignature({ focusedConversation: focused });
+  assert.notEqual(focusedBase, "");
+  assert.notEqual(
+    buildRuntimeProgressSignature({ focusedConversation: { ...focused, streamTokenCount: 51 } }),
+    focusedBase,
+  );
+  assert.notEqual(
+    buildRuntimeProgressSignature({ focusedConversation: { ...focused, pendingMessageCount: 1 } }),
+    focusedBase,
+  );
+  assert.equal(
+    buildRuntimeProgressSignature({
+      focusedConversation: { ...focused, streamElapsedMs: 999999, streamTtftMs: 999999 },
+    }),
+    focusedBase,
+  );
+
+  // 只有状态位、没有任何可观测字段时返回空串，交给调用方降级处理。
+  assert.equal(
+    buildRuntimeProgressSignature({
+      streamingSession: { isStreaming: true },
+      focusedConversation: { isStreaming: true, isPaused: true },
+    }),
+    "",
+  );
+  assert.equal(buildRuntimeProgressSignature(), "");
+});
 
 test("normalizeSeverity 识别中英文与未知兜底", () => {
   assert.equal(normalizeSeverity("严重"), SEVERITY.critical);

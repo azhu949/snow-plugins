@@ -2,8 +2,11 @@
 import {
   STORE_PREFIX,
   SETTINGS_KEY,
-  REVIEW_TIMEOUT_MS,
-  FIX_TIMEOUT_MS,
+  REVIEW_IDLE_TIMEOUT_MS,
+  REVIEW_MAX_TIMEOUT_MS,
+  FIX_IDLE_TIMEOUT_MS,
+  FIX_MAX_TIMEOUT_MS,
+  UNKNOWN_RUNTIME_IDLE_TIMEOUT_MS,
   POLL_INTERVAL_MS,
   STREAM_MESSAGE_READ_MS,
   IDLE_MESSAGE_READ_MS,
@@ -27,6 +30,10 @@ import {
   sleep,
   shouldReadMessages,
   shouldReadRuntime,
+  isWatchTimedOut,
+  resolveWatchIdleTimeoutMs,
+  normalizeWatchTimeouts,
+  buildRuntimeProgressSignature,
   formatStamp,
   parseLocation,
   resolveIssueFilePath,
@@ -1452,8 +1459,34 @@ function createEngine(api) {
     }
   }
 
-  async function watchConversation(conversationId, timeoutMs, token, options = {}) {
+  async function watchConversation(conversationId, timeouts, token, options = {}) {
+    // 入口统一校验阈值：漏传、字段改名或写入非法值时回退到对应任务的默认阈值，
+    // 不能因为参数问题让空闲 / 绝对超时检查静默失效。
+    const watchTimeouts = normalizeWatchTimeouts(
+      timeouts,
+      token.kind === "review"
+        ? { idleMs: REVIEW_IDLE_TIMEOUT_MS, maxMs: REVIEW_MAX_TIMEOUT_MS }
+        : { idleMs: FIX_IDLE_TIMEOUT_MS, maxMs: FIX_MAX_TIMEOUT_MS },
+    );
+    if (watchTimeouts.usedFallback) {
+      console.warn("[snow-fix-bench] invalid watch timeouts, fallback applied", {
+        kind: token.kind,
+        idleMs: timeouts?.idleMs,
+        maxMs: timeouts?.maxMs,
+        usedIdleMs: watchTimeouts.idleMs,
+        usedMaxMs: watchTimeouts.maxMs,
+      });
+    }
     const startedAt = nowMs();
+    // 最近一次“有新进展”的时刻：正文变化、消息行变化与 runtime 可观测进展都算进展。
+    // 超时只看这个时间与绝对上限，不再使用固定总时长。
+    let lastActivityAt = startedAt;
+    // 上一轮 runtime 是否可读；runtime 不可读时无法确认会话是否仍在执行工具，
+    // 因此不能沿用常规的 idle 阈值（首轮未知，此时尚无空闲，不影响判定）。
+    let runtimeKnown = false;
+    let lastMessageSignature = "";
+    // 上一轮 runtime 进展签名；签名不变说明没有新 token / 新消息 / 新 run 起点。
+    let lastRuntimeProgress = "";
     let lastCombined = "";
     let stable = 0;
     // runtime 不可读期间的独立稳定计数：不能复用 stable，否则可读 / 未知切换会沿用旧计数。
@@ -1478,7 +1511,23 @@ function createEngine(api) {
       ["error", "failed"].includes(String(message?.status || "").toLowerCase());
     while (true) {
       if (token.cancelled) throw new Error("cancelled");
-      if (nowMs() - startedAt > timeoutMs) throw new Error("timeout");
+      if (
+        isWatchTimedOut({
+          now: nowMs(),
+          startedAt,
+          lastActivityAt,
+          // runtime 不可读时没有可观察的运行状态信号，长工具阶段会长时间没有正文变化：
+          // 使用放大后的未知态阈值（且不小于常规阈值），避免被误判为空闲超时。
+          idleTimeoutMs: resolveWatchIdleTimeoutMs({
+            runtimeKnown,
+            idleTimeoutMs: watchTimeouts.idleMs,
+            unknownIdleTimeoutMs: UNKNOWN_RUNTIME_IDLE_TIMEOUT_MS,
+          }),
+          maxTimeoutMs: watchTimeouts.maxMs,
+        })
+      ) {
+        throw new Error("timeout");
+      }
       await sleep(POLL_INTERVAL_MS);
       if (token.cancelled) throw new Error("cancelled");
       // runtime 是轻量快照：按 RUNTIME_READ_MS 节流读取，其余轮次复用上次快照。
@@ -1504,7 +1553,7 @@ function createEngine(api) {
         lastRuntimeAt = nowMs();
       }
       // streamingSessions 是判断任意会话（包括非焦点会话）是否仍在运行的主信号。
-      const runtimeKnown = Boolean(runtimeDomain && Array.isArray(runtimeDomain.streamingSessions));
+      runtimeKnown = Boolean(runtimeDomain && Array.isArray(runtimeDomain.streamingSessions));
       if (wasRuntimeKnown !== null && wasRuntimeKnown !== runtimeKnown) {
         stable = 0;
         stableUnknown = 0;
@@ -1528,6 +1577,22 @@ function createEngine(api) {
       );
       const busy = isStreaming || pendingMessageCount > 0;
       if (isStreaming) sawStreaming = true;
+      // 会话仍在运行不代表仍有进展：暂停等待授权、streamStartedAt 未清理或 run 卡死时，
+      // 宿主会持续报告流式 / 排队，但没有新的 token、消息或 run 起点。
+      // 只有可观测进展才刷新活动时间，空闲看门狗才能按 20 / 30 分钟阈值生效。
+      const runtimeProgress = runtimeKnown
+        ? buildRuntimeProgressSignature({ streamingSession, focusedConversation })
+        : "";
+      if (runtimeProgress) {
+        if (runtimeProgress !== lastRuntimeProgress) {
+          lastRuntimeProgress = runtimeProgress;
+          if (busy) lastActivityAt = nowMs();
+        }
+      } else if (busy) {
+        // 旧宿主未提供 tokenCount / messageCount / startedAt：没有可观测进展信号，
+        // 保持原有等待行为，避免把没有可观测指标的长工具阶段误判为空闲。
+        lastActivityAt = nowMs();
+      }
       // 流式刚结束的一轮必须立即补读一次消息：空闲间隔不能让已完成结果多等一轮。
       const streamingChangedToIdle = wasStreaming && runtimeKnown && !isStreaming;
       wasStreaming = isStreaming;
@@ -1577,6 +1642,17 @@ function createEngine(api) {
       const items = Array.isArray(rawItems) ? rawItems : [];
       const messagesKnown = Array.isArray(rawItems);
       hasMessages = items.length > 0;
+      // 消息行数量、末条 id / 状态 / 正文长度、思维链与工具调用参数长度的变化都说明会话仍在推进。
+      const lastRow = items[items.length - 1] || null;
+      const messageSignature = `${items.length}|${String(lastRow?.id || "")}|${String(
+        lastRow?.status || "",
+      )}|${String(lastRow?.content || "").length}|${String(lastRow?.thinking || "").length}|${String(
+        lastRow?.toolCallsJson || "",
+      ).length}`;
+      if (messageSignature !== lastMessageSignature) {
+        lastMessageSignature = messageSignature;
+        lastActivityAt = nowMs();
+      }
       // 会话可能在中途被删除：连续为空达到阈值后用 conversations 域确认存在性，
       // 首次跟踪与重连恢复都适用；确认不存在时立即结束，避免修复中状态挂到超时。
       if (items.length) {
@@ -1627,6 +1703,7 @@ function createEngine(api) {
           lastCombined = combined;
           stable = 0;
           stableUnknown = 0;
+          lastActivityAt = nowMs();
         }
         abortedPolls = 0;
         emptyResponsePolls = 0;
@@ -2197,9 +2274,12 @@ function createEngine(api) {
       if (tracking.get(token.kind) === token) tracking.delete(token.kind);
       return;
     }
-    const timeoutMs = job.kind === "review" ? REVIEW_TIMEOUT_MS : FIX_TIMEOUT_MS;
+    const timeouts =
+      job.kind === "review"
+        ? { idleMs: REVIEW_IDLE_TIMEOUT_MS, maxMs: REVIEW_MAX_TIMEOUT_MS }
+        : { idleMs: FIX_IDLE_TIMEOUT_MS, maxMs: FIX_MAX_TIMEOUT_MS };
     try {
-      const text = await watchConversation(job.conversationId, timeoutMs, token, {
+      const text = await watchConversation(job.conversationId, timeouts, token, {
         resumed: Boolean(job.resumed),
       });
       if (!isCurrentToken(token) || !isProjectCurrent(token)) return;

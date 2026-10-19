@@ -72,7 +72,7 @@
   "fx.activity.open": "打开会话",
   "fx.activity.detach": "停止跟踪",
   "fx.activity.close": "关闭",
-  "fx.activity.timeout": "等待超时。可打开会话查看结果，或重新解析最后回复。",
+  "fx.activity.timeout": "长时间没有新进展，已停止等待。可打开会话查看结果，或重新解析最后回复。",
   "fx.activity.failed": "跟踪失败：{{error}}",
   "fx.activity.parseRetry": "重新解析",
   "fx.activity.resume": "继续跟踪",

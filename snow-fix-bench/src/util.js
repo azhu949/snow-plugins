@@ -1,4 +1,6 @@
 // 通用工具：纯函数，不依赖宿主或 DOM。
+import { FIX_MAX_TIMEOUT_MS, UNKNOWN_RUNTIME_IDLE_TIMEOUT_MS } from "./constants.js";
+
 export function nowMs() {
   return Date.now();
 }
@@ -48,6 +50,97 @@ export function shouldReadRuntime({ known, sinceLastReadMs, intervalMs }) {
   const interval = Number(intervalMs);
   if (!Number.isFinite(elapsed) || !Number.isFinite(interval)) return true;
   return elapsed >= interval;
+}
+
+// 会话跟踪阈值只接受有限正数：未传、NaN、Infinity、0、负数与非数字字符串一律视为非法。
+// 非法阈值不能让超时检查被静默跳过，必须回退到调用方默认值或全局兜底值。
+export function toPositiveMs(value) {
+  if (typeof value !== "number" && typeof value !== "string") return null;
+  const ms = Number(value);
+  return Number.isFinite(ms) && ms > 0 ? ms : null;
+}
+
+// watchConversation 入口的阈值归一化：缺失或非法的 idleMs / maxMs 回退到调用方默认值，
+// 同时保证绝对上限不小于空闲阈值，避免参数写反导致提前中断跟踪。
+export function normalizeWatchTimeouts(timeouts, defaults = {}) {
+  const source = timeouts && typeof timeouts === "object" ? timeouts : {};
+  const fallbackIdle = toPositiveMs(defaults?.idleMs) ?? UNKNOWN_RUNTIME_IDLE_TIMEOUT_MS;
+  const fallbackMax = toPositiveMs(defaults?.maxMs) ?? FIX_MAX_TIMEOUT_MS;
+  const idleMs = toPositiveMs(source.idleMs) ?? fallbackIdle;
+  const rawMax = toPositiveMs(source.maxMs) ?? fallbackMax;
+  return {
+    idleMs,
+    maxMs: Math.max(rawMax, idleMs),
+    usedFallback: toPositiveMs(source.idleMs) === null || toPositiveMs(source.maxMs) === null,
+  };
+}
+
+// runtime 进展签名：只纳入能证明会话仍在推进的累积量或本轮 run 起点。
+// 明确排除 elapsedMs / streamElapsedMs / ttftMs 等随时间自然增长的派生值，
+// 否则签名每轮都会变化，等同于无条件刷新活动时间。
+// 返回空串表示当前宿主没有提供任何可观测字段，调用方需要降级处理。
+export function buildRuntimeProgressSignature({ streamingSession, focusedConversation } = {}) {
+  const formatFields = (values) => {
+    const normalized = values.map((value) => {
+      if (value === null || value === undefined || value === "") return "";
+      const number = Number(value);
+      return Number.isFinite(number) ? number : "";
+    });
+    return normalized.some((value) => value !== "") ? normalized.join("|") : "";
+  };
+  const parts = [];
+  if (streamingSession && typeof streamingSession === "object") {
+    const streamingPart = formatFields([
+      streamingSession.startedAt,
+      streamingSession.messageCount,
+      streamingSession.tokenCount,
+    ]);
+    if (streamingPart) parts.push(`s:${streamingPart}`);
+  }
+  if (focusedConversation && typeof focusedConversation === "object") {
+    const focusedPart = formatFields([
+      focusedConversation.streamStartedAt,
+      focusedConversation.messageCount,
+      focusedConversation.streamTokenCount,
+      focusedConversation.pendingMessageCount,
+    ]);
+    if (focusedPart) parts.push(`f:${focusedPart}`);
+  }
+  return parts.join(";");
+}
+
+// 会话跟踪的 idle 阈值：runtime 可读时使用常规阈值；不可读时没有可观察的运行状态信号，
+// 采用不小于常规阈值的未知态阈值，覆盖长构建 / 长测试等长时间没有正文变化的工具阶段。
+export function resolveWatchIdleTimeoutMs({ runtimeKnown, idleTimeoutMs, unknownIdleTimeoutMs }) {
+  const idle = toPositiveMs(idleTimeoutMs) ?? UNKNOWN_RUNTIME_IDLE_TIMEOUT_MS;
+  if (runtimeKnown) return idle;
+  const unknown = toPositiveMs(unknownIdleTimeoutMs) ?? UNKNOWN_RUNTIME_IDLE_TIMEOUT_MS;
+  return Math.max(idle, unknown);
+}
+
+// 会话跟踪是否超时：只有「连续一段时间没有任何新进展」或「超过绝对上限」才算超时。
+// 调用方在正文变化、消息行变化或 runtime 可观测进展时刷新 lastActivityAt；
+// 宿主仅报告运行中、却没有新 token / 新消息 / 新 run 起点时不再续期，
+// 空闲阈值因此能兜住暂停等待授权、streamStartedAt 未清理或 run 卡死的运行态。
+// runtime 不可读时没有可观察的运行状态信号，调用方改用放大后的 idle 阈值覆盖长工具阶段；
+// maxTimeoutMs 只用于兜住永久挂起。阈值或时间戳非法时回退到安全默认值，不允许静默退化为永不超时。
+export function isWatchTimedOut({
+  now,
+  startedAt,
+  lastActivityAt,
+  idleTimeoutMs,
+  maxTimeoutMs,
+}) {
+  const current = Number(now);
+  if (!Number.isFinite(current)) return false;
+  const started = Number(startedAt);
+  const last = Number(lastActivityAt);
+  const startedMs = Number.isFinite(started) ? started : current;
+  const lastActivityMs = Number.isFinite(last) ? last : startedMs;
+  const idleTimeout = toPositiveMs(idleTimeoutMs) ?? UNKNOWN_RUNTIME_IDLE_TIMEOUT_MS;
+  const maxTimeout = toPositiveMs(maxTimeoutMs) ?? FIX_MAX_TIMEOUT_MS;
+  if (current - startedMs > maxTimeout) return true;
+  return current - lastActivityMs > idleTimeout;
 }
 
 export function truncate(text, limit) {

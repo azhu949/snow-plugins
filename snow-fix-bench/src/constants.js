@@ -15,8 +15,16 @@ const STORE_VERSION = 2;
 // 脚本级偏好：与项目 issue 分开存放，切换项目后仍然生效。
 const SETTINGS_KEY = `${STORE_PREFIX}settings`;
 
-const REVIEW_TIMEOUT_MS = 15 * 60 * 1000;
-const FIX_TIMEOUT_MS = 60 * 60 * 1000;
+// 会话跟踪超时：不再使用固定总时长，而按“是否还有新进展”判定。
+// 代码审查在大型项目上可能跑过 15 分钟：只要会话仍在流式输出、执行工具或排队下一轮，
+// 就继续等待；只有连续一段时间毫无进展才停止跟踪，并另设绝对上限防止永久挂起。
+const REVIEW_IDLE_TIMEOUT_MS = 20 * 60 * 1000;
+const REVIEW_MAX_TIMEOUT_MS = 4 * 60 * 60 * 1000;
+const FIX_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
+const FIX_MAX_TIMEOUT_MS = 8 * 60 * 60 * 1000;
+// runtime 不可读时无法确认会话是否仍在执行工具：长构建 / 长测试期间正文可能长时间不变，
+// 此时 idle 阈值回到旧版固定总时长的量级，避免比旧行为更早停止跟踪；绝对上限不变。
+const UNKNOWN_RUNTIME_IDLE_TIMEOUT_MS = 60 * 60 * 1000;
 const POLL_INTERVAL_MS = 2000;
 // 流式期间 messages 域的兜底读取间隔：runtime 只用于廉价判断会话是否仍在运行。
 const STREAM_MESSAGE_READ_MS = 10000;
@@ -155,7 +163,7 @@ const FALLBACK = {
   "fx.activity.open": "打开会话",
   "fx.activity.detach": "停止跟踪",
   "fx.activity.close": "关闭",
-  "fx.activity.timeout": "等待超时。可打开会话查看结果，或重新解析最后回复。",
+  "fx.activity.timeout": "长时间没有新进展，已停止等待。可打开会话查看结果，或重新解析最后回复。",
   "fx.activity.failed": "跟踪失败：{{error}}",
   "fx.activity.parseRetry": "重新解析",
   "fx.activity.resume": "继续跟踪",
@@ -325,8 +333,11 @@ export {
   STORE_PREFIX,
   STORE_VERSION,
   SETTINGS_KEY,
-  REVIEW_TIMEOUT_MS,
-  FIX_TIMEOUT_MS,
+  REVIEW_IDLE_TIMEOUT_MS,
+  REVIEW_MAX_TIMEOUT_MS,
+  FIX_IDLE_TIMEOUT_MS,
+  FIX_MAX_TIMEOUT_MS,
+  UNKNOWN_RUNTIME_IDLE_TIMEOUT_MS,
   POLL_INTERVAL_MS,
   STREAM_MESSAGE_READ_MS,
   IDLE_MESSAGE_READ_MS,
