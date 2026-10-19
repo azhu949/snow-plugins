@@ -1,7 +1,7 @@
 // 面板展示组件：流程条、文件树、issue 卡片与活动卡片。
 import { h, iconEl, STEP_KEYS, formatElapsed, formatDateTime, statusLabel, severityLabel, severityClass, useEffect, useState } from "./host.js";
 import { ISSUE_STATUS, SEVERITY } from "../constants.js";
-import { statusCounts } from "../issues.js";
+import { statusCounts, isFixSelectable } from "../issues.js";
 
 function Stepper({ current, t, api }) {
   const currentIndex = STEP_KEYS.indexOf(current);
@@ -175,6 +175,9 @@ function IssueCard({ issue, selected, engine, api, t }) {
   const [expanded, setExpanded] = useState(false);
   const [confirmLeft, setConfirmLeft] = useState(0);
   const archived = issue.status === ISSUE_STATUS.archived;
+  // 重开来源决定详情文案：not_found 重开是取证结论被推翻，不是修复后回归。
+  const reopenedKey =
+    issue.reopenedFrom === ISSUE_STATUS.notFound ? "fx.issues.overturned" : "fx.issues.regressed";
   useEffect(() => {
     if (confirmLeft <= 0) return;
     const timer = setInterval(() => setConfirmLeft((value) => Math.max(0, value - 1)), 1000);
@@ -248,7 +251,7 @@ function IssueCard({ issue, selected, engine, api, t }) {
             ? h(
                 "p",
                 { className: "fx-regressed" },
-                `${t("fx.issues.regressed")} · ${issue.regression.count || 1}`,
+                `${t(reopenedKey)} · ${issue.regression.count || 1}`,
               )
             : null,
           issue.source?.conversationId
@@ -283,16 +286,18 @@ function IssueCard({ issue, selected, engine, api, t }) {
 function IssuesSection({ snapshot, visible, engine, api, t }) {
   const counts = statusCounts(snapshot.state.issues);
   const selected = snapshot.selected;
-  const fixedCount = counts.fixed;
+  // 清理入口同时覆盖已修复与已确认不存在的条目：两者都已定论，不再需要修复。
+  const settledCount = counts.fixed + counts.not_found;
   const toggleFilters = [
     { key: "all", label: t("fx.issues.filterAll") },
     { key: SEVERITY.critical, label: t("fx.issues.filterCritical") },
     { key: SEVERITY.major, label: t("fx.issues.filterMajor") },
   ];
-  // 归档项也能勾选（用于批量删除），但「修复选中项」只统计未归档项。
+  // 归档项也能勾选（用于批量删除），但「修复选中项」只统计仍可修复的条目：
+  // 已修复与已确认不存在都已定论，再次投入修复会在会话失败时覆盖结论。
   const selectableIds = visible.map((issue) => issue.id);
   const fixableSelectedCount = snapshot.state.issues.filter(
-    (issue) => selected.includes(issue.id) && issue.status !== ISSUE_STATUS.archived,
+    (issue) => selected.includes(issue.id) && isFixSelectable(issue),
   ).length;
   // 清理入口也要覆盖没有当前跟踪会话、但存在历史会话台账的情况。
   const hasSessionLog =
@@ -309,7 +314,7 @@ function IssuesSection({ snapshot, visible, engine, api, t }) {
         "div",
         { className: "fx-section-title" },
         t("fx.issues.title"),
-        h("span", { className: "fx-count" }, t("fx.issues.count", { count: counts.open + counts.fixing + counts.fixed })),
+        h("span", { className: "fx-count" }, t("fx.issues.count", { count: counts.open + counts.fixing + settledCount })),
       ),
       h(
         "div",
@@ -333,7 +338,7 @@ function IssuesSection({ snapshot, visible, engine, api, t }) {
           },
           t("fx.issues.deleteSelected", { count: selected.length }),
         ),
-        fixedCount > 0 || hasSessionLog
+        settledCount > 0 || hasSessionLog
           ? h(
               "button",
               { className: "fx-btn small", onClick: () => engine.openCleanupDialog() },

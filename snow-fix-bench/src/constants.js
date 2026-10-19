@@ -72,6 +72,8 @@ const ISSUE_STATUS = {
   open: "open",
   fixing: "fixing",
   fixed: "fixed",
+  // 取证后确认问题不存在或已失效：与「已修复」区分，避免把未改动代码的结论记成修复。
+  notFound: "not_found",
   archived: "archived",
 };
 
@@ -145,6 +147,7 @@ const FALLBACK = {
   "fx.issues.outsideProject": "该位置不在当前项目内，已拒绝打开。",
   "fx.issues.openFailed": "打开文件失败：{{error}}",
   "fx.issues.regressed": "已回归",
+  "fx.issues.overturned": "结论被推翻",
 
   "fx.sev.critical": "严重",
   "fx.sev.major": "一般",
@@ -152,6 +155,7 @@ const FALLBACK = {
   "fx.status.open": "待修复",
   "fx.status.fixing": "修复中",
   "fx.status.fixed": "已修复",
+  "fx.status.not_found": "不存在",
   "fx.status.archived": "已归档",
 
   "fx.activity.review": "代码审查进行中",
@@ -186,7 +190,7 @@ const FALLBACK = {
   "fx.toast.reviewFailed": "审查启动失败：{{error}}",
   "fx.toast.reviewBusy": "已有审查任务正在运行，请等待完成或先停止跟踪。",
   "fx.toast.fixStarted": "已新建修复会话，正在跟踪结果。",
-  "fx.toast.fixDone": "修复完成：{{fixed}} 条已修复，{{blocked}} 条待处理。",
+  "fx.toast.fixDone": "修复完成：{{fixed}} 条已修复，{{notFound}} 条不存在，{{blocked}} 条待处理。",
   "fx.toast.fixParseFailed": "未找到结构化修复结果，issue 状态保持不变。",
   "fx.toast.fixFailed": "修复启动失败：{{error}}",
   "fx.toast.fixBusy": "已有修复任务正在运行，请等待完成或先停止跟踪。",
@@ -194,8 +198,8 @@ const FALLBACK = {
   "fx.toast.autoFixStarted": "审查完成，已自动开始修复 {{count}} 条待修复 issue。",
   "fx.toast.fixBatchStarted": "第 {{batch}}/{{total}} 批修复已启动（{{count}} 条）。",
   "fx.toast.fixAllDone": "全部 {{batches}} 批修复完成。",
-  "fx.toast.autoCleanupDone": "自动清理完成：已归档 {{count}} 条已修复 issue 及本轮会话。",
-  "fx.toast.autoCleanupDeleted": "自动清理完成：已删除 {{count}} 条已修复 issue 及本轮会话。",
+  "fx.toast.autoCleanupDone": "自动清理完成：已归档 {{count}} 条已修复或不存在 issue 及本轮会话。",
+  "fx.toast.autoCleanupDeleted": "自动清理完成：已删除 {{count}} 条已修复或不存在 issue 及本轮会话。",
   "fx.toast.autoCleanupFailed": "自动清理未完全成功：{{error}}",
   "fx.toast.archived": "已归档 {{count}} 条 issue。",
   "fx.toast.deleted": "已删除 {{count}} 条 issue。",
@@ -281,7 +285,7 @@ const FALLBACK = {
   "fx.cleanup.cancel": "取消",
   "fx.cleanup.noSessions": "暂无可处理的会话",
   "fx.cleanup.sessionGroup": "{{label}} · {{count}} 个会话",
-  "fx.cleanup.fixedHint": "已修复的 issue 默认勾选；修复中或待修复项也可勾选后一并删除。",
+  "fx.cleanup.fixedHint": "已修复或已确认不存在的 issue 默认勾选；修复中或待修复项也可勾选后一并删除。",
   "fx.cleanup.deleteWarn": "删除 issue 与删除会话都不可恢复。",
   "fx.cleanup.runningTag": "运行中",
   "fx.cleanup.runningBlocked": "会话仍在运行，已取消清理。请等待其完成，或先停止跟踪。",
@@ -314,7 +318,7 @@ const FALLBACK = {
   "fx.settings.autoFix": "审查完成后自动开始修复",
   "fx.settings.autoFixHint": "默认关闭。开启后，仅自动修复本次审查新增或重开的 issue。",
   "fx.settings.autoCleanup": "全部修复完成后自动清理",
-  "fx.settings.autoCleanupHint": "所有批次修复完成后，自动处理本轮已修复的 issue 与修复会话。",
+  "fx.settings.autoCleanupHint": "所有批次修复完成后，自动处理本轮的已修复或不存在 issue 与修复会话。",
   "fx.settings.autoCleanupAction": "自动清理动作",
   "fx.settings.cleanupArchive": "归档（可恢复）",
   "fx.settings.cleanupDelete": "删除（不可恢复）",

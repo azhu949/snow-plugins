@@ -48,7 +48,7 @@ import {
 } from "../src/util.js";
 import { createT, normalizeLocale, DICTIONARIES } from "../src/i18n.js";
 import { parseCommitLog } from "../src/engine.js";
-import { ISSUE_STATUS, SEVERITY, UNKNOWN_RUNTIME_IDLE_TIMEOUT_MS } from "../src/constants.js";
+import { ISSUE_STATUS, SEVERITY, UNKNOWN_RUNTIME_IDLE_TIMEOUT_MS, FALLBACK } from "../src/constants.js";
 
 test("isWatchTimedOut 只在无新进展或超过绝对上限时判超时", () => {
   const startedAt = 1_000_000;
@@ -627,13 +627,17 @@ test("archiveIssueRecord / restoreIssueRecord 保留归档前状态", () => {
   const open = archiveIssueRecord({ id: "2", status: ISSUE_STATUS.open });
   assert.equal(open.archivedFrom, ISSUE_STATUS.open);
   assert.equal(restoreIssueRecord(open).status, ISSUE_STATUS.open);
+
+  const notFound = archiveIssueRecord({ id: "3", status: ISSUE_STATUS.notFound, fix: { result: "not_found" } });
+  assert.equal(notFound.archivedFrom, ISSUE_STATUS.notFound);
+  assert.equal(restoreIssueRecord(notFound).status, ISSUE_STATUS.notFound);
 });
 
 test("restoreIssueRecord 对旧数据按 fix 结果兜底，并排除回归项", () => {
   const legacyFixed = restoreIssueRecord({ id: "3", status: ISSUE_STATUS.archived, fix: { result: "fixed" } });
   assert.equal(legacyFixed.status, ISSUE_STATUS.fixed);
   const legacyNotFound = restoreIssueRecord({ id: "4", status: ISSUE_STATUS.archived, fix: { result: "not_found" } });
-  assert.equal(legacyNotFound.status, ISSUE_STATUS.fixed);
+  assert.equal(legacyNotFound.status, ISSUE_STATUS.notFound);
   const legacyBlocked = restoreIssueRecord({ id: "5", status: ISSUE_STATUS.archived, fix: { result: "blocked" } });
   assert.equal(legacyBlocked.status, ISSUE_STATUS.open);
   const noFix = restoreIssueRecord({ id: "6", status: ISSUE_STATUS.archived, fix: null });
@@ -645,6 +649,24 @@ test("restoreIssueRecord 对旧数据按 fix 结果兜底，并排除回归项",
     regression: { count: 1 },
   });
   assert.equal(regressed.status, ISSUE_STATUS.open);
+
+  // 有重开来源但缺 regression 的旧数据同样恢复为待修复，不能回退成「不存在」。
+  const overturned = restoreIssueRecord({
+    id: "9",
+    status: ISSUE_STATUS.archived,
+    fix: { result: "not_found" },
+    reopenedFrom: ISSUE_STATUS.notFound,
+  });
+  assert.equal(overturned.status, ISSUE_STATUS.open);
+
+  // 旧版把 not_found 写成 fixed 后再归档：archivedFrom 仍是 fixed，恢复时也要校正。
+  const legacyArchivedNotFound = restoreIssueRecord({
+    id: "8",
+    status: ISSUE_STATUS.archived,
+    archivedFrom: ISSUE_STATUS.fixed,
+    fix: { result: "not_found" },
+  });
+  assert.equal(legacyArchivedNotFound.status, ISSUE_STATUS.notFound);
 });
 
 test("normalizeIssueState 只保留合法的 archivedFrom", () => {
@@ -654,12 +676,55 @@ test("normalizeIssueState 只保留合法的 archivedFrom", () => {
       { id: "2", status: "archived", archivedFrom: "fixing" },
       { id: "3", status: "archived", archivedFrom: "archived" },
       { id: "4", status: "open", archivedFrom: "fixed" },
+      { id: "5", status: "archived", archivedFrom: "not_found" },
     ],
   });
   assert.equal(normalized.issues[0].archivedFrom, "fixed");
   assert.equal(normalized.issues[1].archivedFrom, null);
   assert.equal(normalized.issues[2].archivedFrom, null);
   assert.equal(normalized.issues[3].archivedFrom, null);
+  assert.equal(normalized.issues[4].archivedFrom, "not_found");
+});
+
+test("normalizeIssue 把旧数据的 not_found 结果迁移为不存在状态", () => {
+  const normalized = normalizeIssueState({
+    issues: [
+      { id: "legacy", severity: "一般", status: "fixed", fix: { result: "not_found" } },
+      { id: "regressed", severity: "一般", status: "open", fix: { result: "not_found" }, regression: { count: 1 } },
+      { id: "fixed", severity: "一般", status: "fixed", fix: { result: "fixed" } },
+      // 旧版归档时 archivedFrom 也写成 fixed，迁移必须同步校正来源状态。
+      {
+        id: "legacy-archived",
+        severity: "一般",
+        status: "archived",
+        archivedFrom: "fixed",
+        fix: { result: "not_found" },
+      },
+      // 合法归档的已修复项不能被误迁移。
+      {
+        id: "legacy-archived-fixed",
+        severity: "一般",
+        status: "archived",
+        archivedFrom: "fixed",
+        fix: { result: "fixed" },
+      },
+      // 旧版回归后再次得出 not_found 时状态仍写 fixed，regression 不应阻断迁移。
+      {
+        id: "regressed-fixed",
+        severity: "一般",
+        status: "fixed",
+        fix: { result: "not_found" },
+        regression: { count: 2 },
+      },
+    ],
+  });
+  assert.equal(normalized.issues[0].status, ISSUE_STATUS.notFound);
+  assert.equal(normalized.issues[1].status, ISSUE_STATUS.open);
+  assert.equal(normalized.issues[2].status, ISSUE_STATUS.fixed);
+  assert.equal(normalized.issues[3].archivedFrom, ISSUE_STATUS.notFound);
+  assert.equal(restoreIssueRecord(normalized.issues[3]).status, ISSUE_STATUS.notFound);
+  assert.equal(normalized.issues[4].archivedFrom, ISSUE_STATUS.fixed);
+  assert.equal(normalized.issues[5].status, ISSUE_STATUS.notFound);
 });
 
 test("applyFixResults 只更新匹配的 issue", () => {
@@ -688,6 +753,28 @@ test("applyFixResults 只更新匹配的 issue", () => {
   assert.equal(updatedA.status, ISSUE_STATUS.fixed);
   assert.equal(updatedA.fix.conversationId, "fix1");
   assert.equal(updatedB.status, ISSUE_STATUS.open);
+});
+
+test("applyFixResults 把 not_found 写为不存在状态", () => {
+  const issues = [
+    { id: "i1", status: ISSUE_STATUS.fixing, fix: { conversationId: "c1" } },
+    { id: "i2", status: ISSUE_STATUS.fixing, fix: { conversationId: "c1" } },
+  ];
+  const applied = applyFixResults(
+    issues,
+    [
+      { issueId: "i1", status: "not_found", summary: "复核后不存在", files: [], verification: "rg" },
+      { issueId: "i2", status: "blocked", summary: "需要决策", files: [], verification: "" },
+    ],
+    { conversationId: "c1" },
+  );
+  assert.equal(applied.matched, 2);
+  assert.equal(applied.fixed, 0);
+  assert.equal(applied.notFound, 1);
+  assert.equal(applied.blocked, 1);
+  assert.equal(applied.issues[0].status, ISSUE_STATUS.notFound);
+  assert.equal(applied.issues[0].fix.result, "not_found");
+  assert.equal(applied.issues[1].status, ISSUE_STATUS.open);
 });
 
 test("applyFixResults 不覆盖已归档 issue 的状态", () => {
@@ -753,25 +840,72 @@ test("markIssuesFixing 与 restoreFixingIssues", () => {
   assert.equal(restored[0].fix, null);
 });
 
+test("not_found 条目进入修复后按快照恢复结论与取证记录", () => {
+  const issues = [
+    {
+      id: "nf",
+      severity: SEVERITY.major,
+      status: ISSUE_STATUS.notFound,
+      fix: {
+        conversationId: "conv-old",
+        result: "not_found",
+        summary: "复核后不存在",
+        files: ["a.ts"],
+        verification: "rg 无匹配",
+        at: 1,
+      },
+    },
+    { id: "open", severity: SEVERITY.major, status: ISSUE_STATUS.open, fix: null },
+  ];
+  const fixing = markIssuesFixing(issues, ["nf", "open"], "fix-conv");
+  assert.equal(fixing[0].status, ISSUE_STATUS.fixing);
+  assert.equal(fixing[0].fix.conversationId, "fix-conv");
+  assert.equal(fixing[0].fixingFrom.status, ISSUE_STATUS.notFound);
+  assert.equal(fixing[0].fixingFrom.fix.summary, "复核后不存在");
+
+  // 持久化再加载后快照仍需保留，否则重新打开工作台就无法按原状态回滚。
+  const normalized = normalizeIssueState({ issues: fixing });
+  assert.equal(normalized.issues[0].fixingFrom.status, ISSUE_STATUS.notFound);
+  assert.equal(normalized.issues[0].fixingFrom.fix.verification, "rg 无匹配");
+
+  const restored = restoreFixingIssues(normalized.issues, "fix-conv");
+  assert.equal(restored[0].status, ISSUE_STATUS.notFound);
+  assert.equal(restored[0].fix.summary, "复核后不存在");
+  assert.equal(restored[0].fix.result, "not_found");
+  assert.equal(restored[0].fixingFrom, null);
+  // 进入修复前是待修复的条目仍按原有语义回落 open。
+  assert.equal(restored[1].status, ISSUE_STATUS.open);
+  assert.equal(restored[1].fix, null);
+
+  // 旧数据没有快照时保持 open/null 兜底。
+  const legacy = restoreFixingIssues(
+    [{ id: "legacy", status: ISSUE_STATUS.fixing, fix: { conversationId: "conv-legacy" } }],
+    "conv-legacy",
+  );
+  assert.equal(legacy[0].status, ISSUE_STATUS.open);
+  assert.equal(legacy[0].fix, null);
+});
+
 test("statusCounts / sortIssues / listVisibleIssues", () => {
   const issues = [
     { id: "1", severity: SEVERITY.major, status: ISSUE_STATUS.open, title: "m", updatedAt: 3 },
     { id: "2", severity: SEVERITY.critical, status: ISSUE_STATUS.open, title: "c", updatedAt: 1 },
     { id: "3", severity: SEVERITY.critical, status: ISSUE_STATUS.archived, title: "x", updatedAt: 2 },
     { id: "4", severity: SEVERITY.major, status: ISSUE_STATUS.fixed, title: "f", updatedAt: 9 },
+    { id: "5", severity: SEVERITY.major, status: ISSUE_STATUS.notFound, title: "n", updatedAt: 8 },
   ];
-  assert.deepEqual(statusCounts(issues), { open: 2, fixing: 0, fixed: 1, archived: 1 });
+  assert.deepEqual(statusCounts(issues), { open: 2, fixing: 0, fixed: 1, not_found: 1, archived: 1 });
 
   const sorted = sortIssues(issues);
-  assert.deepEqual(sorted.map((issue) => issue.id), ["2", "1", "4", "3"]);
+  assert.deepEqual(sorted.map((issue) => issue.id), ["2", "1", "4", "5", "3"]);
 
   const visible = listVisibleIssues(issues, { showArchived: false, severityFilter: "all" });
-  assert.equal(visible.length, 3);
+  assert.equal(visible.length, 4);
   const criticalOnly = listVisibleIssues(issues, { showArchived: true, severityFilter: SEVERITY.critical });
   assert.deepEqual(criticalOnly.map((issue) => issue.id), ["2", "3"]);
-  // major 过滤未归档：open(id1) 与 fixed(id4) 都会显示
+  // major 过滤未归档：open(id1)、fixed(id4) 与 not_found(id5) 都会显示
   const majorOnly = listVisibleIssues(issues, { showArchived: false, severityFilter: SEVERITY.major });
-  assert.deepEqual(majorOnly.map((issue) => issue.id), ["1", "4"]);
+  assert.deepEqual(majorOnly.map((issue) => issue.id), ["1", "4", "5"]);
 });
 
 test("currentStep 按活动与 issue 状态推导", () => {
@@ -779,6 +913,7 @@ test("currentStep 按活动与 issue 状态推导", () => {
   assert.equal(currentStep({ activity: { kind: "fix", phase: "waiting" }, state: { issues: [] } }), "fix");
   assert.equal(currentStep({ state: { issues: [{ status: ISSUE_STATUS.open }] } }), "fix");
   assert.equal(currentStep({ state: { issues: [{ status: ISSUE_STATUS.fixed }] } }), "cleanup");
+  assert.equal(currentStep({ state: { issues: [{ status: ISSUE_STATUS.notFound }] } }), "cleanup");
   assert.equal(
     currentStep({ activity: { kind: "review", phase: "done" }, state: { issues: [{ status: ISSUE_STATUS.fixed }] } }),
     "cleanup",
@@ -1334,9 +1469,43 @@ test("mergeReviewIssues 已修复项再次命中时标记回归并保留 fix", (
   assert.equal(second.issues[0].regression.count, 1);
   assert.equal(second.issues[0].regression.conversationId, "c2");
   assert.equal(second.issues[0].regression.scopeLabel, "s2");
+  assert.equal(second.issues[0].reopenedFrom, ISSUE_STATUS.fixed);
 
   second.issues[0].status = ISSUE_STATUS.fixed;
   const third = mergeReviewIssues(second.issues, [{ severity: "严重", title: "A", location: "a.ts:1" }], {});
+  assert.equal(third.issues[0].regression.count, 2);
+  assert.equal(third.issues[0].reopenedFrom, ISSUE_STATUS.fixed);
+});
+
+test("mergeReviewIssues not_found 重开记录来源并保留 fix", () => {
+  const first = mergeReviewIssues([], [{ severity: "严重", title: "B", location: "b.ts:2" }], {
+    conversationId: "c1",
+  });
+  const issue = first.issues[0];
+  issue.status = ISSUE_STATUS.notFound;
+  issue.fix = { conversationId: "f1", result: "not_found", summary: "复核后不存在" };
+  const second = mergeReviewIssues(first.issues, [{ severity: "严重", title: "B", location: "b.ts:2" }], {
+    conversationId: "c2",
+  });
+  assert.equal(second.reopened, 1);
+  assert.equal(second.issues[0].status, ISSUE_STATUS.open);
+  assert.equal(second.issues[0].fix.result, "not_found");
+  assert.equal(second.issues[0].regression.count, 1);
+  assert.equal(second.issues[0].reopenedFrom, ISSUE_STATUS.notFound);
+
+  // 重开后再次修复为 fixed：来源字段保留「结论被推翻」，直到下一次重开覆盖。
+  const applied = applyFixResults(
+    second.issues,
+    [{ issueId: issue.id, status: "fixed", summary: "已修" }],
+    { conversationId: "f2" },
+  );
+  assert.equal(applied.issues[0].status, ISSUE_STATUS.fixed);
+  assert.equal(applied.issues[0].reopenedFrom, ISSUE_STATUS.notFound);
+
+  const third = mergeReviewIssues(applied.issues, [{ severity: "严重", title: "B", location: "b.ts:2" }], {
+    conversationId: "c3",
+  });
+  assert.equal(third.issues[0].reopenedFrom, ISSUE_STATUS.fixed);
   assert.equal(third.issues[0].regression.count, 2);
 });
 
@@ -1357,6 +1526,7 @@ test("mergeReviewIssues 归档项重新命中时清空旧 regression", () => {
   assert.equal(archived.status, ISSUE_STATUS.archived);
   assert.equal(archived.archivedFrom, ISSUE_STATUS.open);
   assert.equal(archived.regression.count, 1);
+  assert.equal(archived.reopenedFrom, ISSUE_STATUS.fixed);
 
   const reopened = mergeReviewIssues([archived], [{ severity: "严重", title: "A", location: "a.ts:1" }], {
     conversationId: "c3",
@@ -1366,6 +1536,7 @@ test("mergeReviewIssues 归档项重新命中时清空旧 regression", () => {
   assert.equal(reopened.issues[0].archivedFrom, null);
   assert.equal(reopened.issues[0].fix, null);
   assert.equal(reopened.issues[0].regression, null);
+  assert.equal(reopened.issues[0].reopenedFrom, null);
 
   const normalized = normalizeIssueState(
     { issues: reopened.issues },
@@ -1373,10 +1544,29 @@ test("mergeReviewIssues 归档项重新命中时清空旧 regression", () => {
   );
   assert.equal(normalized.issues[0].status, ISSUE_STATUS.open);
   assert.equal(normalized.issues[0].regression, null);
+  assert.equal(normalized.issues[0].reopenedFrom, null);
 
   const restored = restoreIssueRecord(archiveIssueRecord(reopened.issues[0]));
   assert.equal(restored.status, ISSUE_STATUS.open);
   assert.equal(restored.regression, null);
+  assert.equal(restored.reopenedFrom, null);
+});
+
+test("normalizeIssueState 按 fix 结果推断旧数据的 reopenedFrom", () => {
+  const normalized = normalizeIssueState({
+    issues: [
+      { id: "legacy-not-found", status: "open", fix: { result: "not_found" }, regression: { count: 1 } },
+      { id: "legacy-fixed", status: "open", fix: { result: "fixed" }, regression: { count: 2 } },
+      { id: "legacy-no-fix", status: "open", regression: { count: 1 } },
+      { id: "no-regression", status: "open", fix: { result: "not_found" } },
+      { id: "explicit", status: "open", fix: { result: "not_found" }, regression: { count: 1 }, reopenedFrom: "fixed" },
+    ],
+  });
+  assert.equal(normalized.issues[0].reopenedFrom, ISSUE_STATUS.notFound);
+  assert.equal(normalized.issues[1].reopenedFrom, ISSUE_STATUS.fixed);
+  assert.equal(normalized.issues[2].reopenedFrom, ISSUE_STATUS.fixed);
+  assert.equal(normalized.issues[3].reopenedFrom, null);
+  assert.equal(normalized.issues[4].reopenedFrom, ISSUE_STATUS.fixed);
 });
 
 test("normalizeIssueState 保留 regression 字段", () => {
@@ -1575,6 +1765,35 @@ test("i18n 三语言字典 key 一致且按 locale 回退", () => {
   assert.equal(zh("fx.launcher"), "修复工作台");
   assert.equal(normalizeLocale("en_US"), "en");
   assert.equal(normalizeLocale("zh-MO"), "zh-TW");
+});
+
+test("每个 issue 状态在三套语言与兜底文案中都有可读文案", () => {
+  const keys = Object.values(ISSUE_STATUS)
+    .map((status) => `fx.status.${status}`)
+    .sort();
+  for (const locale of ["zh-CN", "zh-TW", "en"]) {
+    const dictionary = DICTIONARIES[locale];
+    assert.deepEqual(
+      Object.keys(dictionary)
+        .filter((key) => key.startsWith("fx.status."))
+        .sort(),
+      keys,
+      `${locale} 的状态文案键应与 ISSUE_STATUS 一一对应`,
+    );
+    const t = createT(() => locale);
+    for (const key of keys) {
+      assert.notEqual(t(key), key, `${locale} 缺少 ${key} 的文案`);
+    }
+  }
+  assert.deepEqual(
+    Object.keys(FALLBACK)
+      .filter((key) => key.startsWith("fx.status."))
+      .sort(),
+    keys,
+    "兜底文案的状态键应与 ISSUE_STATUS 一一对应",
+  );
+  assert.equal(createT(() => "zh-CN")("fx.status.not_found"), "不存在");
+  assert.equal(createT(() => "en")("fx.status.not_found"), "Not found");
 });
 
 test("会话台账去重、按类型补齐 sessionIds 并支持移除", () => {

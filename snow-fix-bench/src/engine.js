@@ -44,6 +44,7 @@ import {
   normalizeIssueState,
   mergeReviewIssues,
   applyFixResults,
+  isFixSelectable,
   markIssuesFixing,
   restoreFixingIssues,
   restoreFixingIssuesForConversations,
@@ -1910,12 +1911,9 @@ function createEngine(api) {
       conversationId,
       issueIds: allowedIds,
     });
-    const matched = new Set(results.map((result) => result.issueId));
-    const issues = applied.issues.map((issue) =>
-      issue.status === ISSUE_STATUS.fixing && issue.fix?.conversationId === conversationId && !matched.has(issue.id)
-        ? { ...issue, status: ISSUE_STATUS.open, updatedAt: nowMs() }
-        : issue,
-    );
+    // 未返回结果的条目仍停在 fixing：按进入修复前的快照恢复，
+    // 不能一律回落 open，否则已定论条目的结论与取证记录会被覆盖。
+    const issues = restoreFixingIssues(applied.issues, conversationId);
     const nextState = {
       ...snapshot.state,
       issues,
@@ -1925,7 +1923,14 @@ function createEngine(api) {
       },
     };
     store.set({ state: nextState, activity: activityDone });
-    setToast("success", t("fx.toast.fixDone", { fixed: applied.fixed, blocked: applied.blocked }));
+    setToast(
+      "success",
+      t("fx.toast.fixDone", {
+        fixed: applied.fixed,
+        notFound: applied.notFound,
+        blocked: applied.blocked,
+      }),
+    );
     await saveState({ projectId: snapshot.project?.directoryId, state: nextState });
 
     // 分批修复：本批完成后继续下一批；队列为空时收尾并按需自动清理。
@@ -1987,7 +1992,10 @@ function createEngine(api) {
     }
     const batchSize = Math.max(1, Number(session.batchSize) || 1);
     const next = takeNextFixBatch(session.queue, snapshot.state.issues, batchSize);
-    const issues = snapshot.state.issues.filter((issue) => next.batchIds.includes(issue.id));
+    // 旧版本留下的队列可能含已定论条目：取批时再次过滤，避免重新标记为修复中。
+    const issues = snapshot.state.issues.filter(
+      (issue) => next.batchIds.includes(issue.id) && isFixSelectable(issue),
+    );
     if (!issues.length) return "empty";
     const batchNumber = Math.min(session.batchTotal, Number(session.batchNumber || 0) + 1);
     const prompt = buildFixPrompt({
@@ -2198,7 +2206,7 @@ function createEngine(api) {
     const fixedIssues = latest.state.issues.filter(
       (issue) =>
         targetIds.has(issue.id) &&
-        issue.status === ISSUE_STATUS.fixed &&
+        (issue.status === ISSUE_STATUS.fixed || issue.status === ISSUE_STATUS.notFound) &&
         sessionIdSet.has(String(issue.fix?.conversationId || "")),
     );
     const fixedIds = new Set(fixedIssues.map((issue) => issue.id));
@@ -2519,7 +2527,7 @@ function createEngine(api) {
       const selectedIds = Array.isArray(issueIds) ? issueIds.map(String) : [];
       const snapshot = store.get();
       const issues = snapshot.state.issues.filter(
-        (issue) => selectedIds.includes(issue.id) && issue.status !== ISSUE_STATUS.archived,
+        (issue) => selectedIds.includes(issue.id) && isFixSelectable(issue),
       );
       if (!issues.length) throw new Error(t("fx.toast.noSelection"));
       // 同一批 issue 仍在修复中（含停止跟踪后旧会话可能继续运行）时拒绝新建会话，
@@ -2581,7 +2589,7 @@ function createEngine(api) {
       }
       const current = store.get();
       const liveIssues = current.state.issues.filter(
-        (issue) => batchIds.includes(issue.id) && issue.status !== ISSUE_STATUS.archived,
+        (issue) => batchIds.includes(issue.id) && isFixSelectable(issue),
       );
       if (!liveIssues.length) {
         await closeConversation(conversationId);
@@ -3015,9 +3023,10 @@ function createEngine(api) {
       setToast("error", t("fx.toast.noSelection"));
       return;
     }
-    // 归档项可以勾选用于批量删除，但不能进入修复：这里与 startFix 一样过滤掉。
+    // 归档项可以勾选用于批量删除，但不能进入修复；已修复与已确认不存在的条目同理。
+    // 这里与 startFix 一样过滤掉，确保弹窗展示的条目与实际修复范围一致。
     const issues = snapshot.state.issues.filter(
-      (issue) => ids.includes(issue.id) && issue.status !== ISSUE_STATUS.archived,
+      (issue) => ids.includes(issue.id) && isFixSelectable(issue),
     );
     if (!issues.length) {
       setToast("error", t("fx.toast.noSelection"));
@@ -3033,7 +3042,7 @@ function createEngine(api) {
   function openCleanupDialog() {
     const snapshot = store.get();
     const fixedIds = snapshot.state.issues
-      .filter((issue) => issue.status === ISSUE_STATUS.fixed)
+      .filter((issue) => issue.status === ISSUE_STATUS.fixed || issue.status === ISSUE_STATUS.notFound)
       .map((issue) => issue.id);
     const sessions = snapshot.state.sessions;
     // 运行中或跟踪超时后可能仍在运行的会话不能清理：默认保持，避免用户确认后才被引擎拒绝。

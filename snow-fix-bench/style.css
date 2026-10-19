@@ -17,6 +17,7 @@
   --fx-accent: var(--accent-blue, #4f8cff);
   --fx-danger: var(--accent-red, #e5484d);
   --fx-green: var(--accent-green, #3fb950);
+  --fx-amber: var(--accent-amber-text, #b45309);
   --fx-card: var(--bg-secondary, transparent);
 }
 
@@ -505,6 +506,10 @@
 
 .fx-status.is-fixed {
   color: var(--fx-green);
+}
+
+.fx-status.is-not_found {
+  color: var(--fx-amber);
 }
 
 .fx-issue-meta {

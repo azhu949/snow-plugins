@@ -51,6 +51,10 @@ function createIssue(row, meta) {
       scopeLabel: meta?.scopeLabel || "",
     },
     fix: null,
+    // 进入修复前的状态与取证快照：修复失败或被关闭时按此回滚。
+    fixingFrom: null,
+    // 最近一次重开的来源：fixed = 修复后回归，not_found = 上次取证结论被推翻。
+    reopenedFrom: null,
     createdAt: at,
     updatedAt: at,
   };
@@ -88,8 +92,10 @@ function mergeReviewIssues(existing, incoming, meta) {
       reviewedAt: nowMs(),
       scopeLabel: meta?.scopeLabel || current.source?.scopeLabel || "",
     };
-    if (current.status === ISSUE_STATUS.fixed) {
-      // 已修复的问题再次被审查命中：保留上次修复记录，标记回归并重新打开。
+    if (current.status === ISSUE_STATUS.fixed || current.status === ISSUE_STATUS.notFound) {
+      // 重开来源决定界面文案：已修复项再次命中是「回归」，已确认不存在的条目再次命中
+      // 说明上次取证结论被推翻。保留 fix 供追溯，regression 只统计重开次数。
+      current.reopenedFrom = current.status;
       current.regression = {
         count: Number(current.regression?.count || 0) + 1,
         detectedAt: nowMs(),
@@ -105,6 +111,7 @@ function mergeReviewIssues(existing, incoming, meta) {
       current.fix = null;
       // 归档重开是新的审查命中，不是「修复后回归」，旧回归记录必须一并清除。
       current.regression = null;
+      current.reopenedFrom = null;
       reopened += 1;
       reopenedIds.push(current.id);
     }
@@ -116,6 +123,7 @@ function mergeReviewIssues(existing, incoming, meta) {
 function applyFixResults(issues, results, meta) {
   const list = Array.isArray(issues) ? issues.slice() : [];
   let fixed = 0;
+  let notFound = 0;
   let blocked = 0;
   let matched = 0;
   let ignored = 0;
@@ -138,47 +146,82 @@ function applyFixResults(issues, results, meta) {
       verification: result.verification,
       at: nowMs(),
     };
+    // 本轮已有结论，进入修复前的快照不再需要，避免之后误回滚。
+    issue.fixingFrom = null;
     issue.updatedAt = nowMs();
     // 用户已在修复期间归档：保留归档状态与 archivedFrom，只记录本轮修复摘要。
     if (issue.status === ISSUE_STATUS.archived) continue;
-    if (result.status === "fixed" || result.status === "not_found") {
+    if (result.status === "fixed") {
       issue.status = ISSUE_STATUS.fixed;
       fixed += 1;
+    } else if (result.status === "not_found") {
+      // 取证结论是「问题不存在或已失效」：代码未改动，不能记成已修复。
+      issue.status = ISSUE_STATUS.notFound;
+      notFound += 1;
     } else {
       issue.status = ISSUE_STATUS.open;
       blocked += 1;
     }
   }
-  return { issues: list, fixed, blocked, matched, ignored };
+  return { issues: list, fixed, notFound, blocked, matched, ignored };
+}
+
+// 已定论（已修复 / 已确认不存在）与归档条目不再进入修复：它们没有待修复的问题，
+// 投入修复只会在会话失败时覆盖已有结论。fixing 仍然放行，交给 hasFixConflict
+// 给出「正在修复中」的提示，而不是静默丢弃。
+const FIX_BLOCKED_STATUSES = new Set([
+  ISSUE_STATUS.archived,
+  ISSUE_STATUS.fixed,
+  ISSUE_STATUS.notFound,
+]);
+
+function isFixSelectable(issue) {
+  return Boolean(issue) && !FIX_BLOCKED_STATUSES.has(issue.status);
 }
 
 function markIssuesFixing(issues, ids, conversationId) {
   const target = new Set(ids);
-  return (Array.isArray(issues) ? issues : []).map((issue) =>
-    target.has(issue.id)
-      ? {
-          ...issue,
-          status: ISSUE_STATUS.fixing,
-          fix: {
-            conversationId,
-            result: "",
-            summary: "",
-            files: [],
-            verification: "",
-            at: nowMs(),
-          },
-          updatedAt: nowMs(),
-        }
-      : issue,
-  );
+  return (Array.isArray(issues) ? issues : []).map((issue) => {
+    if (!target.has(issue.id)) return issue;
+    // 记录进入修复前的状态与取证记录：修复会话失败、被关闭或结果缺失时按此回滚。
+    // 已在修复中的条目保留首次快照，避免二次标记把 fixing 当成来源状态。
+    const fixingFrom =
+      issue.status === ISSUE_STATUS.fixing
+        ? issue.fixingFrom || null
+        : {
+            status: issue.status,
+            fix: issue.fix && typeof issue.fix === "object" ? issue.fix : null,
+          };
+    return {
+      ...issue,
+      status: ISSUE_STATUS.fixing,
+      fixingFrom,
+      fix: {
+        conversationId,
+        result: "",
+        summary: "",
+        files: [],
+        verification: "",
+        at: nowMs(),
+      },
+      updatedAt: nowMs(),
+    };
+  });
 }
 
 function restoreFixingIssues(issues, conversationId) {
-  return (Array.isArray(issues) ? issues : []).map((issue) =>
-    issue.status === ISSUE_STATUS.fixing && issue.fix?.conversationId === conversationId
-      ? { ...issue, status: ISSUE_STATUS.open, fix: null, updatedAt: nowMs() }
-      : issue,
-  );
+  return (Array.isArray(issues) ? issues : []).map((issue) => {
+    if (issue.status !== ISSUE_STATUS.fixing || issue.fix?.conversationId !== conversationId) return issue;
+    const from = issue.fixingFrom;
+    // 有快照按进入修复前的状态与取证记录恢复；旧数据没有快照时保持 open/null 兜底。
+    return {
+      ...issue,
+      status: from && ARCHIVABLE_FROM.has(from.status) ? from.status : ISSUE_STATUS.open,
+      fix: from && from.fix && typeof from.fix === "object" ? from.fix : null,
+      fixingFrom: null,
+      updatedAt: nowMs(),
+    };
+  });
 }
 
 // 批量释放多个修复会话锁定的 issue：清理历史台账会话与接管已结束的旧会话时使用。
@@ -190,24 +233,38 @@ function restoreFixingIssuesForConversations(issues, conversationIds) {
 }
 
 // 归档时记录来源状态：只允许可恢复的业务状态，避免把瞬态修复中写回。
+const ARCHIVABLE_FROM = new Set([ISSUE_STATUS.open, ISSUE_STATUS.fixed, ISSUE_STATUS.notFound]);
+
+// 旧版本把 not_found 并入 fixed：按最后一次修复结果校正为独立状态。
+// regression 只是历史回归计数，被回归重开的条目状态已是 open，不会进入这里的校正。
+function migrateLegacyNotFound(status, fix) {
+  return status === ISSUE_STATUS.fixed && fix?.result === "not_found" ? ISSUE_STATUS.notFound : status;
+}
+
 function archiveIssueRecord(issue) {
   return {
     ...issue,
     status: ISSUE_STATUS.archived,
-    archivedFrom: issue.status === ISSUE_STATUS.fixed ? ISSUE_STATUS.fixed : ISSUE_STATUS.open,
+    archivedFrom: ARCHIVABLE_FROM.has(issue.status) ? issue.status : ISSUE_STATUS.open,
     updatedAt: nowMs(),
   };
 }
 
 // 恢复时还原归档前状态；旧数据没有 archivedFrom 时按修复结果兜底。
 function restoreIssueRecord(issue) {
-  const hasArchivedFrom = issue.archivedFrom === ISSUE_STATUS.open || issue.archivedFrom === ISSUE_STATUS.fixed;
-  const fixedByResult = issue.fix?.result === "fixed" || issue.fix?.result === "not_found";
-  // 已修复项再次被审查命中后是 open + 保留 fix + regression，不能按 fix 结果误判为已修复。
-  const fallback = fixedByResult && !issue.regression ? ISSUE_STATUS.fixed : ISSUE_STATUS.open;
+  const hasArchivedFrom = ARCHIVABLE_FROM.has(issue.archivedFrom);
+  // 已修复 / 已确认不存在的条目再次被审查命中后是 open + 保留 fix + 重开来源，
+  // 不能按 fix 结果误判为已定论；两种来源恢复后都回到待修复。
+  const fallback = issue.regression || issue.reopenedFrom
+    ? ISSUE_STATUS.open
+    : issue.fix?.result === "not_found"
+      ? ISSUE_STATUS.notFound
+      : issue.fix?.result === "fixed"
+        ? ISSUE_STATUS.fixed
+        : ISSUE_STATUS.open;
   return {
     ...issue,
-    status: hasArchivedFrom ? issue.archivedFrom : fallback,
+    status: hasArchivedFrom ? migrateLegacyNotFound(issue.archivedFrom, issue.fix) : fallback,
     archivedFrom: null,
     updatedAt: nowMs(),
   };
@@ -280,7 +337,7 @@ function sortIssues(issues) {
 }
 
 function statusCounts(issues) {
-  const counts = { open: 0, fixing: 0, fixed: 0, archived: 0 };
+  const counts = { open: 0, fixing: 0, fixed: 0, not_found: 0, archived: 0 };
   for (const issue of Array.isArray(issues) ? issues : []) {
     if (counts[issue.status] === undefined) counts.open += 1;
     else counts[issue.status] += 1;
@@ -482,10 +539,31 @@ function isSessionPossiblyRunning(session, activity) {
   return !TERMINAL_SESSION_ERRORS.has(String(session.lastError || ""));
 }
 
+// 重开来源：新数据直接读取；旧数据只有 regression 时按最后一次修复结果推断。
+function normalizeReopenedFrom(raw) {
+  if (raw.reopenedFrom === ISSUE_STATUS.fixed || raw.reopenedFrom === ISSUE_STATUS.notFound) {
+    return raw.reopenedFrom;
+  }
+  if (!raw.regression || typeof raw.regression !== "object") return null;
+  return raw.fix?.result === "not_found" ? ISSUE_STATUS.notFound : ISSUE_STATUS.fixed;
+}
+
+// 修复中快照：只接受可恢复的业务状态，旧数据缺少该字段时为 null。
+function normalizeFixingFrom(raw) {
+  if (!raw || typeof raw !== "object" || !ARCHIVABLE_FROM.has(raw.status)) return null;
+  return {
+    status: raw.status,
+    fix: raw.fix && typeof raw.fix === "object" ? raw.fix : null,
+  };
+}
+
 function normalizeIssue(raw) {
   if (!raw || typeof raw !== "object") return null;
   const severity = normalizeSeverity(raw.severity) || SEVERITY.major;
-  const status = Object.values(ISSUE_STATUS).includes(raw.status) ? raw.status : ISSUE_STATUS.open;
+  const storedStatus = Object.values(ISSUE_STATUS).includes(raw.status) ? raw.status : ISSUE_STATUS.open;
+  // 旧版本把 not_found 并入 fixed：读取时按最后一次修复结果迁移，历史数据也能显示为「不存在」。
+  // regression 只是历史计数，不能改变最后一次取证结论，因此不参与阻断。
+  const status = migrateLegacyNotFound(storedStatus, raw.fix);
   return {
     id: String(raw.id || uid("issue")),
     severity,
@@ -496,12 +574,12 @@ function normalizeIssue(raw) {
     evidence: String(raw.evidence || ""),
     status,
     archivedFrom:
-      status === ISSUE_STATUS.archived &&
-      (raw.archivedFrom === ISSUE_STATUS.open || raw.archivedFrom === ISSUE_STATUS.fixed)
-        ? raw.archivedFrom
+      status === ISSUE_STATUS.archived && ARCHIVABLE_FROM.has(raw.archivedFrom)
+        ? migrateLegacyNotFound(raw.archivedFrom, raw.fix)
         : null,
     source: raw.source && typeof raw.source === "object" ? raw.source : { conversationId: "", reviewedAt: 0, scopeLabel: "" },
     fix: raw.fix && typeof raw.fix === "object" ? raw.fix : null,
+    fixingFrom: normalizeFixingFrom(raw.fixingFrom),
     regression:
       raw.regression && typeof raw.regression === "object"
         ? {
@@ -511,6 +589,7 @@ function normalizeIssue(raw) {
             scopeLabel: String(raw.regression.scopeLabel || ""),
           }
         : null,
+    reopenedFrom: normalizeReopenedFrom(raw),
     createdAt: Number(raw.createdAt) || nowMs(),
     updatedAt: Number(raw.updatedAt) || nowMs(),
   };
@@ -560,7 +639,8 @@ function currentStep(snapshot) {
   const counts = statusCounts(issues);
   // 部分修复、部分仍待处理时停在修复步骤，避免流程条提前跳到清理而掩盖剩余项。
   if (counts.open > 0 || counts.fixing > 0) return "fix";
-  if (counts.fixed > 0) return "cleanup";
+  // 已修复与已确认不存在都已定论，直接进入清理步骤。
+  if (counts.fixed > 0 || counts.not_found > 0) return "cleanup";
   return "cleanup";
 }
 
@@ -580,6 +660,7 @@ export {
   createIssue,
   mergeReviewIssues,
   applyFixResults,
+  isFixSelectable,
   markIssuesFixing,
   restoreFixingIssues,
   restoreFixingIssuesForConversations,

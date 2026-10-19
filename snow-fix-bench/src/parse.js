@@ -91,7 +91,9 @@ function statusRank(status) {
   if (status === ISSUE_STATUS.open) return 0;
   if (status === ISSUE_STATUS.fixing) return 1;
   if (status === ISSUE_STATUS.fixed) return 2;
-  return 3;
+  // 不存在的条目已经定论、无需修复，排在已修复之后、归档之前。
+  if (status === ISSUE_STATUS.notFound) return 3;
+  return 4;
 }
 
 function issueLocationText(row) {

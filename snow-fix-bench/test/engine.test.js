@@ -2014,6 +2014,134 @@ test("归档 issue 可勾选批量删除，但不会进入修复", async () => {
   engine.unmount();
 });
 
+test("全选不会把已修复与不存在条目带入修复", async () => {
+  const stored = {
+    version: 2,
+    projectId: "a",
+    issues: [
+      {
+        id: "i1",
+        severity: "严重",
+        title: "A",
+        location: "a.ts:1",
+        status: "not_found",
+        fix: {
+          conversationId: "conv-old",
+          result: "not_found",
+          summary: "复核后不存在",
+          files: [],
+          verification: "rg",
+          at: 1,
+        },
+      },
+      {
+        id: "i2",
+        severity: "一般",
+        title: "B",
+        location: "b.ts:2",
+        status: "fixed",
+        fix: {
+          conversationId: "conv-old",
+          result: "fixed",
+          summary: "已修复",
+          files: [],
+          verification: "npm test",
+          at: 1,
+        },
+      },
+      { id: "i3", severity: "一般", title: "C", location: "c.ts:3", status: "open" },
+    ],
+    sessions: { review: null, fix: null },
+  };
+  const { api, state } = createMockApi({ stored });
+  const engine = resolveEngine(api);
+  await engine.mount();
+
+  // 全选已定论条目时不能打开修复弹窗。
+  engine.selectMany(["i1", "i2"]);
+  engine.openFixDialog();
+  assert.equal(engine.getSnapshot().dialog, null);
+  assert.match(engine.getSnapshot().toast.text, /请先勾选 issue/);
+
+  // 混合选中时只把仍可修复的条目带入弹窗。
+  engine.selectMany(["i1", "i2", "i3"]);
+  engine.openFixDialog();
+  assert.deepEqual(engine.getSnapshot().dialog.issueIds, ["i3"]);
+  engine.closeDialog();
+
+  // 直接调用 startFix 也不能把已定论条目卷进修复会话。
+  await assert.rejects(() => engine.startFix(["i1", "i2"]), /请先勾选 issue/);
+  assert.equal(state.createCalls, 0);
+
+  await engine.startFix(["i3"]);
+  assert.equal(state.createCalls, 1);
+  const snapshot = engine.getSnapshot();
+  const notFound = snapshot.state.issues.find((issue) => issue.id === "i1");
+  assert.equal(notFound.status, "not_found");
+  assert.equal(notFound.fix.summary, "复核后不存在");
+  const fixed = snapshot.state.issues.find((issue) => issue.id === "i2");
+  assert.equal(fixed.status, "fixed");
+  assert.equal(fixed.fix.summary, "已修复");
+  assert.deepEqual(snapshot.state.sessions.fix.issueIds, ["i3"]);
+  engine.unmount();
+});
+
+test("关闭修复卡片时按快照恢复不存在的结论与取证", async () => {
+  const stored = {
+    version: 2,
+    projectId: "a",
+    issues: [
+      {
+        id: "i1",
+        severity: "严重",
+        title: "A",
+        location: "a.ts:1",
+        status: "fixing",
+        fix: { conversationId: "conv-fix" },
+        fixingFrom: {
+          status: "not_found",
+          fix: {
+            conversationId: "conv-old",
+            result: "not_found",
+            summary: "复核后不存在",
+            files: [],
+            verification: "rg",
+            at: 1,
+          },
+        },
+      },
+    ],
+    sessions: {
+      review: null,
+      fix: {
+        conversationId: "conv-fix",
+        startedAt: 1,
+        status: "detached",
+        issueIds: ["i1"],
+        batchNumber: 1,
+        batchTotal: 1,
+        batchSize: 1,
+        queue: [],
+        allIssueIds: ["i1"],
+        sessionIds: ["conv-fix"],
+      },
+    },
+  };
+  const { api } = createMockApi({ stored });
+  const engine = resolveEngine(api);
+  await engine.mount();
+  assert.equal(engine.getSnapshot().activity.phase, "detached");
+
+  await engine.dismissActivity();
+
+  const issue = engine.getSnapshot().state.issues.find((item) => item.id === "i1");
+  assert.equal(issue.status, "not_found");
+  assert.equal(issue.fix.result, "not_found");
+  assert.equal(issue.fix.summary, "复核后不存在");
+  assert.equal(issue.fixingFrom, null);
+  engine.unmount();
+});
+
 function fixResultText(rows) {
   return "```snow-fix-results\n" + JSON.stringify(rows) + "\n```";
 }
