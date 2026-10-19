@@ -1,0 +1,15 @@
+{
+  "name": "snow-novel-reader",
+  "version": "1.3.0",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "description": "小说阅读器面板插件：工程化源码与单文件 ESM 构建产物",
+  "scripts": {
+    "build": "node build.mjs",
+    "check": "node --check index.js"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0"
+  }
+}

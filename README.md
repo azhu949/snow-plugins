@@ -6,7 +6,7 @@ Snow App 插件集合仓库。子目录包含两类插件：面板插件（发�
 
 | 插件 | ID | 版本 | 说明 |
 | ---- | -- | ---- | ---- |
-| 小说阅读器 | `com.snow.novel-reader` | 1.2.1 | 悬浮 TXT 小说阅读器（可调透明度与显示位置、滚轮与快捷键翻页、章节识别与自动滚动）+ legado 书源导入、多源并发搜索与在线追书 |
+| 小说阅读器 | `com.snow.novel-reader` | 1.3.0 | 悬浮 TXT 小说阅读器（可调透明度与显示位置、滚轮与快捷键翻页、章节识别与自动滚动）+ legado 书源导入、多源并发搜索与在线追书 |
 | 修复工作台 | `com.snow.fix-bench` | 2.8.6 | 客户端脚本插件（`.user.js`）：聊天输入框工具栏扳手入口 + 居中浮层，完成代码审查 → issue 跟踪 → 批量修复 → 结果清理的闭环；项目切换、严重度筛选、结构化结果回写与清理确认 |
 
 ### 修复工作台：功能范围
@@ -29,9 +29,20 @@ Snow App 插件集合仓库。子目录包含两类插件：面板插件（发�
 
 ```
 snow-plugins/
-  snow-novel-reader/          插件源码目录（打包根，单文件入口 index.js）
+  snow-novel-reader/          面板插件（发布打包根）
     plugin.json               插件清单（id / version / panels / locales / styles / privacy）
-    index.js                  入口（默认导出 React 面板组件；兼容 export function mount(container, api)）
+    index.js                  构建产物（默认导出 React 面板组件；兼容 export function mount(container, api)）
+    src/                      工程化源码
+      main.js                 入口导出（default / mount）与引擎缓存
+      constants.js            存储键与容量常量
+      config.js               阅读设置默认值、收敛规则与键位绑定
+      i18n.js                 语言包缺失时的内置中文兜底
+      utils.js                通用小工具
+      ui/assets.js            字体栈、阅读主题、图标几何与面板标签
+      legado/                 书源规则引擎（表达式、净化、DOM/CSS、查询、求值与业务动作）
+      engine/create-engine.js 引擎编排：状态、存储、悬浮阅读窗与 React 面板视图
+    build.mjs                 esbuild 打包：src/ → 单文件 ESM（index.js）
+    package.json              构建脚本与依赖（version 与 plugin.json 保持一致）
     style.css                 面板与悬浮阅读窗样式
     locales/                  zh-CN / zh-TW / en 语言包
     icon.svg                  插件图标
@@ -54,7 +65,18 @@ snow-plugins/
 
 ### 面板插件（snow-novel-reader）
 
-通过 Snow App 的 `config` 工具（`plugins` 域）把源码目录安装到本机，安装位置为 `~/.snowapp/plugins/com.snow.novel-reader/`：
+通过 Snow App 的 `config` 工具（`plugins` 域）把插件目录安装到本机，安装位置为 `~/.snowapp/plugins/com.snow.novel-reader/`。
+
+工程化源码位于 `snow-novel-reader/src/`，`index.js` 是 esbuild 打包出的单文件 ESM 产物；宿主只读取入口文件，源码里的相对 `import` 不会被解析（宿主文档「工程化源码与单文件打包」）。修改源码后先构建：
+
+```powershell
+cd snow-novel-reader
+npm install        # 首次
+npm run build      # src/ → index.js
+npm run check      # node --check index.js
+```
+
+然后安装到本机：
 
 ```
 config-set scope=plugins key=com.snow.novel-reader value={sourceDir: "D:/ai-workspace/snow-plugins/snow-novel-reader"}
@@ -91,7 +113,7 @@ config-set scope=userscripts key="new" value={sourcePath: "D:/ai-workspace/snow-
 
 ### 面板插件（snow-novel-reader）
 
-1. 修改 `plugin.json` 中的 `version`（如 `1.0.0` → `1.0.1`），提交并推送本仓库。
+1. 同步修改 `package.json` 与 `plugin.json` 的 `version`（构建脚本会校验两者一致），在 `snow-novel-reader` 下执行 `npm run build`，提交并推送本仓库。
 2. 打包并计算哈希：
 
    ```powershell
@@ -115,10 +137,10 @@ config-set scope=userscripts key="new" value={sourcePath: "D:/ai-workspace/snow-
      "author": "azhu949",
      "repo": "https://github.com/azhu949/snow-plugins",
      "homepage": "https://github.com/azhu949/snow-plugins/tree/main/snow-novel-reader",
-     "version": "1.2.0",
-     "tag": "novel-reader/v1.2.0",
-     "asset": "com.snow.novel-reader-1.2.0.zip",
-     "downloadUrl": "https://github.com/azhu949/snow-plugins/releases/download/novel-reader%2Fv1.2.0/com.snow.novel-reader-1.2.0.zip",
+     "version": "1.3.0",
+     "tag": "novel-reader/v1.3.0",
+     "asset": "com.snow.novel-reader-1.3.0.zip",
+     "downloadUrl": "https://github.com/azhu949/snow-plugins/releases/download/novel-reader%2Fv1.3.0/com.snow.novel-reader-1.3.0.zip",
      "sha256": "<pack.ps1 输出的 64 位十六进制哈希>",
      "icon": "lucide:BookOpen",
      "privacy": ["network"],
@@ -142,3 +164,4 @@ config-set scope=userscripts key="new" value={sourcePath: "D:/ai-workspace/snow-
 ## 许可
 
 以各插件目录内的 `plugin.json`（面板插件）或 `package.json`（`snow-fix-bench` 脚本插件）的 `license` 字段为准；本项目插件均为 MIT。`snow-fix-bench` 的许可全文与第三方声明见其目录下的 `LICENSE` 与 `THIRD-PARTY-NOTICES.md`。
+
