@@ -53,6 +53,11 @@ const SESSION_MISSING_RECHECK_POLLS = 30;
 
 const MAX_DIFF_CHARS = 40000;
 const MAX_TOTAL_DIFF_CHARS = 180000;
+// 复审按批创建会话：单批条数决定模型需要逐条输出的结论行数，
+// 字符预算兜住超长字段与文件列表，避免提示词挤占上下文或输出被截断。
+const MAX_VERIFY_BATCH_ISSUES = 20;
+const MAX_VERIFY_PROMPT_CHARS = 40000;
+const MAX_VERIFY_FILES_PER_ISSUE = 8;
 const COMMIT_LIMIT = 20;
 // 沙箱档借内置终端 MCP 工具执行只读 git log 时的条数上限。
 const COMMIT_COMMAND_LIMIT = 50;
@@ -82,6 +87,11 @@ const SEVERITY = {
   major: "一般",
   minor: "建议",
 };
+
+// 纳入修复范围的严重程度：数组顺序同时决定设置面板的展示顺序。
+const ISSUE_SEVERITIES = [SEVERITY.critical, SEVERITY.major, SEVERITY.minor];
+// 默认纳入「严重」与「一般」，「建议」需在设置中显式勾选。
+const DEFAULT_ISSUE_SEVERITIES = [SEVERITY.critical, SEVERITY.major];
 
 // 语言包缺失时的内置兜底文案（简体中文）。
 const FALLBACK = {
@@ -114,24 +124,32 @@ const FALLBACK = {
   "fx.step.extract": "提取",
   "fx.step.fix": "修复",
   "fx.step.cleanup": "清理",
+  "fx.step.verifying": "复审中",
 
   "fx.empty.title": "当前项目还没有 issue",
-  "fx.empty.desc": "先执行一次代码审查，系统会把「一般」及以上的问题写入工作台，并自动生成修复清单。",
+  "fx.empty.desc": "先执行一次代码审查，系统会按设置中的修复范围把问题写入工作台，并自动产生修复清单。",
   "fx.empty.start": "开始代码审查",
   "fx.empty.hint": "审查使用与内置 /review 相同的范围选择与提示词规则。",
 
   "fx.issues.title": "项目 issue",
   "fx.issues.count": "共 {{count}} 条",
   "fx.issues.selected": "已选 {{count}} 条",
-  "fx.issues.selectAll": "全选",
+  "fx.issues.selectAll": "全选当前结果",
+  "fx.issues.invertSelection": "反选",
   "fx.issues.clearSelection": "取消选择",
-  "fx.issues.showArchived": "显示已归档",
-  "fx.issues.hideArchived": "隐藏已归档",
+  "fx.issues.filterStatus": "状态",
+  "fx.issues.filterSeverity": "严重度",
   "fx.issues.filterAll": "全部",
   "fx.issues.filterCritical": "严重",
   "fx.issues.filterMajor": "一般",
+  "fx.issues.filterMinor": "建议",
+  "fx.issues.searchPlaceholder": "搜索标题、位置或影响",
+  "fx.issues.filteredCount": "当前 {{visible}} / {{total}} 条",
   "fx.issues.empty": "没有符合条件的 issue。",
   "fx.issues.startFix": "修复选中项（{{count}}）",
+  "fx.issues.startAutoFix": "开始自动修复（{{count}}）",
+  "fx.issues.reverifyCount": "重新复审（{{count}}）",
+  "fx.issues.verifyCount": "复审（{{count}}）",
   "fx.issues.deleteSelected": "删除选中项（{{count}}）",
   "fx.issues.archive": "归档",
   "fx.issues.delete": "删除",
@@ -140,6 +158,10 @@ const FALLBACK = {
   "fx.issues.impact": "影响",
   "fx.issues.suggestion": "建议",
   "fx.issues.fixNote": "修复记录",
+  "fx.issues.verify": "复审",
+  "fx.issues.verifyConfirmed": "复审已确认",
+  "fx.issues.verifyFailed": "复审未通过",
+  "fx.issues.verifyUncertain": "复审待确认",
   "fx.issues.source": "来源会话",
   "fx.issues.unlocated": "未标注位置",
   "fx.issues.more": "展开详情",
@@ -160,6 +182,7 @@ const FALLBACK = {
 
   "fx.activity.review": "代码审查进行中",
   "fx.activity.fix": "缺陷修复进行中",
+  "fx.activity.verify": "修复后复审进行中",
   "fx.activity.waiting": "等待会话输出…",
   "fx.activity.streaming": "正在接收会话输出…",
   "fx.activity.done": "已完成",
@@ -182,10 +205,12 @@ const FALLBACK = {
   "fx.activity.sessionMissing": "会话已不存在或无法读取，已停止跟踪并释放修复中状态。",
   "fx.activity.fixUnsettled": "修复会话可能仍在运行，请先继续跟踪或等待其结束后再重新解析。",
   "fx.activity.sessionUnsettled": "会话可能仍在运行，请先继续跟踪或等待其结束后再重新解析。",
+  "fx.activity.verifyBatchFailed": "下一批复审会话创建失败，剩余批次已保留；可重新解析继续。",
 
   "fx.toast.reviewStarted": "已新建审查会话，正在跟踪结果。",
   "fx.toast.reviewDone": "审查完成：新增 {{added}} 条，更新 {{updated}} 条，重新打开 {{reopened}} 条。",
-  "fx.toast.reviewEmpty": "审查完成：未发现「一般」及以上问题。",
+  "fx.toast.reviewEmpty": "审查完成：未发现纳入修复范围的问题。",
+  "fx.toast.reviewFiltered": "审查完成：发现 {{count}} 条结论，但均不在本次审查使用的修复范围内；如需纳入，请调整范围后重新发起审查。",
   "fx.toast.reviewParseFailed": "未能从审查结果中解析出 issue，请打开会话检查。",
   "fx.toast.reviewFailed": "审查启动失败：{{error}}",
   "fx.toast.reviewBusy": "已有审查任务正在运行，请等待完成或先停止跟踪。",
@@ -194,8 +219,24 @@ const FALLBACK = {
   "fx.toast.fixParseFailed": "未找到结构化修复结果，issue 状态保持不变。",
   "fx.toast.fixFailed": "修复启动失败：{{error}}",
   "fx.toast.fixBusy": "已有修复任务正在运行，请等待完成或先停止跟踪。",
+  "fx.toast.verifyStarted": "修复完成，已自动开始复审 {{count}} 条已修复 issue。",
+  "fx.toast.verifyDone": "复审完成：{{confirmed}} 条已确认修复，{{still}} 条仍存在，{{uncertain}} 条待确认。",
+  "fx.toast.verifyParseFailed": "未能从复审结果中解析出结论；修复状态保持不变，可重新解析或手动清理。",
+  "fx.toast.verifyExpired": "复审结果已过期：目标 issue 已被新一轮修复或审查改写，未写入任何结论。可重新解析或等待本轮结束后重新复审。",
+  "fx.toast.verifyFailed": "复审启动失败：{{error}}",
+  "fx.toast.verifyBusy": "已有复审任务正在运行，本次复审未启动；本轮修复结果未自动清理，请等待当前复审结束后手动处理。",
+  "fx.toast.verifyWaitFix": "修复会话仍在运行或可能仍在运行，本次复审未启动；请等待修复结束（必要时先继续跟踪旧会话）后重试，本轮修复结果未自动清理。",
+  "fx.toast.fixWaitVerify": "复审会话仍在运行或可能仍在运行，本次修复未启动；请等待复审结束，避免复审基于半成品代码下结论。",
+  "fx.toast.verifyBatchStarted": "第 {{batch}}/{{total}} 批复审已启动（{{count}} 条）。",
+  "fx.toast.verifyBatchCreateFailed": "下一批复审会话创建失败：{{error}}；剩余批次已保留，可重新解析后继续。",
+  "fx.toast.verifyBatchEmpty": "下一批复审目标已被改写，剩余批次已保留；请重新解析或重新复审。",
+  "fx.toast.verifyNoTarget": "没有可重新复审的条目；仅「已修复且复审未确认」的 issue 可重新复审。",
+  "fx.toast.verifyRestarted": "已重新发起复审 {{count}} 条已修复 issue。",
   "fx.toast.fixConflict": "选中的 issue 正在修复中，或与可能仍在运行的修复会话重叠；请取消勾选这些 issue，或先继续跟踪、等待当前修复结束。",
   "fx.toast.autoFixStarted": "审查完成，已自动开始修复 {{count}} 条待修复 issue。",
+  "fx.toast.autoFixConfirm": "自动修复等待确认：请先核对本次修复范围，确认后再开始修复。",
+  "fx.toast.autoFixPending": "审查完成：检测到 {{count}} 条待修复 issue，但当前有未关闭的弹窗；已保留本次范围，可从 issue 列表点「开始自动修复」。",
+  "fx.toast.autoFixDeferred": "审查完成：本次 {{count}} 条待修复 issue 暂不能自动修复（复审或修复仍在进行）；已保留本次范围，可从 issue 列表点「开始自动修复」。",
   "fx.toast.fixBatchStarted": "第 {{batch}}/{{total}} 批修复已启动（{{count}} 条）。",
   "fx.toast.fixAllDone": "全部 {{batches}} 批修复完成。",
   "fx.toast.autoCleanupDone": "自动清理完成：已归档 {{count}} 条已修复或不存在 issue 及本轮会话。",
@@ -252,8 +293,16 @@ const FALLBACK = {
   "fx.review.commitsDescription": "读取 Git 提交记录（只读 git log）",
   "fx.title.review": "代码审查 · {{project}} · {{time}}",
   "fx.title.fix": "缺陷修复 · {{project}} · {{count}} 项 · {{time}}",
+  "fx.title.verify": "修复复审 · {{project}} · {{count}} 条已修复 · {{time}}",
+  "fx.title.verifyBatch": "修复复审 · {{project}} · {{count}} 条 · 第 {{batch}}/{{total}} 批 · {{time}}",
   "fx.title.fixBatch": "缺陷修复 · {{project}} · {{count}} 项 · 第 {{batch}}/{{total}} 批 · {{time}}",
   "fx.fix.scopeIssues": "{{count}} 条 issue",
+  "fx.verify.scope": "复审 {{count}} 条已修复 issue",
+  "fx.verify.scopeBatch": "复审 {{count}} 条已修复 issue（第 {{batch}}/{{total}} 批）",
+  "fx.verify.title": "复审确认",
+  "fx.verify.confirm": "将新建只读会话并自动发送提示词，复核选中的 {{count}} 条已修复 issue（共 {{batches}} 批）。复审会消耗模型调用，但不会修改代码。",
+  "fx.verify.start": "开始复审",
+  "fx.verify.busy": "正在创建复审会话…",
 
   "fx.fix.title": "批量修复",
   "fx.fix.confirm": "将新建会话，按修复流程处理选中的 {{count}} 条 issue。修复期间不会自动执行 Git 操作。",
@@ -278,6 +327,7 @@ const FALLBACK = {
   "fx.cleanup.sessions": "会话处理",
   "fx.cleanup.reviewSession": "审查会话",
   "fx.cleanup.fixSession": "修复会话",
+  "fx.cleanup.verifySession": "复审会话",
   "fx.cleanup.keep": "保留",
   "fx.cleanup.archive": "归档",
   "fx.cleanup.delete": "删除",
@@ -311,12 +361,20 @@ const FALLBACK = {
 
   "fx.settings.title": "设置",
   "fx.settings.open": "设置",
+  "fx.settings.groupExecution": "执行",
+  "fx.settings.groupAutomation": "自动化",
   "fx.settings.parallel": "并行上限",
   "fx.settings.parallelHint":
     "并行上限会写入修复提示词，约束同一轮中的并行取证与并行实施数量；它不改变宿主的实际并发能力，超出上限的任务按顺序排队。",
   "fx.settings.parallelRange": "范围 {{min}} - {{max}}，默认 {{default}}。",
+  "fx.settings.severityScope": "纳入修复范围",
+  "fx.settings.severityScopeHint":
+    "勾选的严重程度会在审查后写入 issue 清单并纳入修复；建议默认不勾选，全部取消时恢复默认（严重 + 一般）。",
   "fx.settings.autoFix": "审查完成后自动开始修复",
-  "fx.settings.autoFixHint": "默认关闭。开启后，仅自动修复本次审查新增或重开的 issue。",
+  "fx.settings.autoFixHint": "默认开启。首次自动修复前会先请求确认；确认后仅自动修复本次审查新增或重开的 issue。设置读取失败时同样先等待确认。",
+  "fx.settings.verify": "修复后自动复审（验证闭环）",
+  "fx.settings.verifyHint":
+    "默认关闭。全部批次修复完成后，按批新建只读会话逐条复核已修复的 issue；复审不通过会退回待修复，待确认项不参与自动清理。",
   "fx.settings.autoCleanup": "全部修复完成后自动清理",
   "fx.settings.autoCleanupHint": "所有批次修复完成后，自动处理本轮的已修复或不存在 issue 与修复会话。",
   "fx.settings.autoCleanupAction": "自动清理动作",
@@ -326,6 +384,10 @@ const FALLBACK = {
   "fx.settings.cancel": "取消",
   "fx.settings.saved": "设置已保存。",
   "fx.settings.failed": "设置保存失败：{{error}}",
+  "fx.settings.readFailed": "设置读取失败，本次改动仅在当前会话内生效，未写入本地存储；请检查本地存储后重试。",
+  "fx.settings.loadFailedNotice":
+    "设置读取失败，当前显示的是默认值。保存只会写入你实际改动的项，未改动项保留本地存储中的原值。",
+  "fx.settings.unchanged": "设置未修改，无需保存。",
 
   "fx.confirm.title": "确认操作",
   "fx.confirm.cancel": "取消",
@@ -357,6 +419,9 @@ export {
   SESSION_MISSING_RECHECK_POLLS,
   MAX_DIFF_CHARS,
   MAX_TOTAL_DIFF_CHARS,
+  MAX_VERIFY_BATCH_ISSUES,
+  MAX_VERIFY_PROMPT_CHARS,
+  MAX_VERIFY_FILES_PER_ISSUE,
   COMMIT_LIMIT,
   COMMIT_COMMAND_LIMIT,
   COMMIT_FIELD_SEP,
@@ -365,5 +430,7 @@ export {
   TREE_LOAD_LIMIT,
   ISSUE_STATUS,
   SEVERITY,
+  ISSUE_SEVERITIES,
+  DEFAULT_ISSUE_SEVERITIES,
   FALLBACK,
 };

@@ -3,11 +3,12 @@ import { strict as assert } from "node:assert";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 
-import { normalizeSeverity, parseReviewResult, parseReviewIssues, parseFixResults } from "../src/parse.js";
+import { normalizeSeverity, normalizeSeverityScope, parseReviewResult, parseReviewIssues, parseFixResults, parseVerifyResults } from "../src/parse.js";
 import {
   mergeReviewIssues,
   issueLocationFiles,
   applyFixResults,
+  applyVerifyResults,
   markIssuesFixing,
   restoreFixingIssues,
   archiveIssueRecord,
@@ -21,6 +22,7 @@ import {
   findConversationInDomain,
   shouldDeclareSessionMissing,
   planFixBatches,
+  planVerifyBatches,
   takeNextFixBatch,
   statusCounts,
   sortIssues,
@@ -30,8 +32,9 @@ import {
   normalizeIssueState,
   isSessionBusy,
   isSessionPossiblyRunning,
+  isVerifySelectable,
 } from "../src/issues.js";
-import { buildReviewPrompt, buildFixPrompt, langText } from "../src/prompts.js";
+import { buildReviewPrompt, buildFixPrompt, buildVerifyPrompt, estimateVerifyIssueChars, langText } from "../src/prompts.js";
 import { normalizeParallelLimit, normalizeSettings } from "../src/settings.js";
 import { createStore } from "../src/store.js";
 import {
@@ -48,7 +51,7 @@ import {
 } from "../src/util.js";
 import { createT, normalizeLocale, DICTIONARIES } from "../src/i18n.js";
 import { parseCommitLog } from "../src/engine.js";
-import { ISSUE_STATUS, SEVERITY, UNKNOWN_RUNTIME_IDLE_TIMEOUT_MS, FALLBACK } from "../src/constants.js";
+import { ISSUE_STATUS, SEVERITY, UNKNOWN_RUNTIME_IDLE_TIMEOUT_MS, FALLBACK, MAX_VERIFY_FILES_PER_ISSUE } from "../src/constants.js";
 
 test("isWatchTimedOut 只在无新进展或超过绝对上限时判超时", () => {
   const startedAt = 1_000_000;
@@ -374,6 +377,53 @@ test("parseReviewIssues 解析 snow-issues 块并过滤建议级", () => {
   assert.equal(issues[1].title, "重复请求");
 });
 
+test("parseReviewIssues 按纳入修复范围过滤严重度", () => {
+  const text = [
+    "```snow-issues",
+    JSON.stringify([
+      { severity: "严重", title: "崩溃", location: "src/a.ts:1" },
+      { severity: "一般", title: "日志缺失", location: "src/b.ts:2" },
+      { severity: "建议", title: "命名", location: "src/c.ts:3" },
+    ]),
+    "```",
+  ].join("\n");
+
+  // 未配置范围时保持默认：严重 + 一般。
+  assert.deepEqual(
+    parseReviewIssues(text).map((issue) => issue.severity),
+    [SEVERITY.critical, SEVERITY.major],
+  );
+  // 勾选建议后，建议级也进入 issue 清单。
+  assert.deepEqual(
+    parseReviewIssues(text, { severities: [SEVERITY.critical, SEVERITY.major, SEVERITY.minor] }).map(
+      (issue) => issue.severity,
+    ),
+    [SEVERITY.critical, SEVERITY.major, SEVERITY.minor],
+  );
+  // 只勾选建议时只保留建议级。
+  assert.deepEqual(
+    parseReviewIssues(text, { severities: [SEVERITY.minor] }).map((issue) => issue.severity),
+    [SEVERITY.minor],
+  );
+  // 条目合法但全部落在范围外：属于可信的空结果，不算解析失败。
+  assert.equal(
+    parseReviewResult('```snow-issues\n[{"severity":"严重","title":"崩溃"}]\n```', {
+      severities: [SEVERITY.minor],
+    }).status,
+    "empty",
+  );
+});
+
+test("normalizeSeverityScope 去重排序并在空值时回退默认范围", () => {
+  assert.deepEqual(normalizeSeverityScope([]), [SEVERITY.critical, SEVERITY.major]);
+  assert.deepEqual(normalizeSeverityScope(undefined), [SEVERITY.critical, SEVERITY.major]);
+  assert.deepEqual(normalizeSeverityScope(["建议", "严重", "建议"]), [
+    SEVERITY.critical,
+    SEVERITY.minor,
+  ]);
+  assert.deepEqual(normalizeSeverityScope(["critical", "unknown"]), [SEVERITY.critical]);
+});
+
 test("parseReviewIssues 使用 json 回退块", () => {
   const text = '```json\n[{"level":"高","summary":"泄漏","file":"src/x.ts","line":5,"effect":"内存"}]\n```';
   const issues = parseReviewIssues(text);
@@ -434,15 +484,17 @@ test("parseReviewIssues 输出为空时返回空数组", () => {
 });
 
 test("parseReviewResult 区分显式空结果与解析失败", () => {
-  assert.deepEqual(parseReviewResult("```snow-issues\n[]\n```"), { issues: [], status: "empty" });
+  assert.deepEqual(parseReviewResult("```snow-issues\n[]\n```"), { issues: [], status: "empty", filtered: 0 });
   assert.deepEqual(parseReviewResult('```snow-issues\n[{"severity":"建议","title":"命名"}]\n```'), {
     issues: [],
     status: "empty",
+    filtered: 1,
   });
   // 非空但没有任何可用正文字段：属于格式异常，必须判解析失败而不是干净结论。
   assert.deepEqual(parseReviewResult('```snow-issues\n[{"severity":"严重"}]\n```'), {
     issues: [],
     status: "failed",
+    filtered: 0,
   });
   assert.equal(parseReviewResult('```snow-issues\n[{"severity":"建议"}]\n```').status, "failed");
   // 可用建议级行与不可用行混排：仍按「只有建议级」判空，不能误报失败。
@@ -450,6 +502,13 @@ test("parseReviewResult 区分显式空结果与解析失败", () => {
     parseReviewResult('```snow-issues\n[{"severity":"建议","title":"命名"},{"severity":"严重"}]\n```').status,
     "empty",
   );
+  // 全部落在范围外时记录被过滤条数，供界面给出独立提示。
+  const filtered = parseReviewResult(
+    '```snow-issues\n[{"severity":"严重","title":"崩溃"},{"severity":"严重","title":"越界"}]\n```',
+    { severities: [SEVERITY.minor] },
+  );
+  assert.equal(filtered.status, "empty");
+  assert.equal(filtered.filtered, 2);
   assert.equal(parseReviewResult("模型只给了自然语言总结。").status, "failed");
   assert.equal(parseReviewResult("```snow-issues\n[{severity: 严重\n```").status, "failed");
   assert.equal(parseReviewResult('```json\n[{"title":"无严重度"}]\n```').status, "failed");
@@ -908,6 +967,97 @@ test("statusCounts / sortIssues / listVisibleIssues", () => {
   assert.deepEqual(majorOnly.map((issue) => issue.id), ["1", "4", "5"]);
 });
 
+test("listVisibleIssues 支持状态、严重度与关键词组合筛选", () => {
+  const issues = [
+    {
+      id: "o1",
+      severity: SEVERITY.critical,
+      status: ISSUE_STATUS.open,
+      title: "空指针",
+      location: "src/a.ts:10",
+      impact: "启动时崩溃",
+      updatedAt: 1,
+    },
+    {
+      id: "o2",
+      severity: SEVERITY.minor,
+      status: ISSUE_STATUS.open,
+      title: "命名不规范",
+      location: "src/b.ts:2",
+      impact: "可读性差",
+      updatedAt: 2,
+    },
+    {
+      id: "f1",
+      severity: SEVERITY.major,
+      status: ISSUE_STATUS.fixing,
+      title: "并发写入",
+      location: "src/cache.ts:12",
+      impact: "缓存击穿",
+      updatedAt: 3,
+    },
+    {
+      id: "f2",
+      severity: SEVERITY.major,
+      status: ISSUE_STATUS.fixed,
+      title: "空指针",
+      location: "src/a.ts:10",
+      impact: "启动时崩溃",
+      updatedAt: 4,
+    },
+    {
+      id: "n1",
+      severity: SEVERITY.major,
+      status: ISSUE_STATUS.notFound,
+      title: "旧问题",
+      location: "src/old.ts:1",
+      impact: "无",
+      updatedAt: 5,
+    },
+    {
+      id: "a1",
+      severity: SEVERITY.critical,
+      status: ISSUE_STATUS.archived,
+      title: "归档崩溃",
+      location: "src/z.ts:1",
+      impact: "崩溃",
+      updatedAt: 6,
+    },
+  ];
+  const ids = (options) => listVisibleIssues(issues, options).map((issue) => issue.id);
+
+  // 状态单选：「全部」默认不含已归档，查看归档需显式选择。
+  assert.deepEqual(ids({ statusFilter: "all" }), ["o1", "o2", "f1", "f2", "n1"]);
+  assert.deepEqual(ids({ statusFilter: ISSUE_STATUS.open }), ["o1", "o2"]);
+  assert.deepEqual(ids({ statusFilter: ISSUE_STATUS.fixing }), ["f1"]);
+  assert.deepEqual(ids({ statusFilter: ISSUE_STATUS.fixed }), ["f2"]);
+  assert.deepEqual(ids({ statusFilter: ISSUE_STATUS.notFound }), ["n1"]);
+  assert.deepEqual(ids({ statusFilter: ISSUE_STATUS.archived }), ["a1"]);
+  // 非法状态与非法严重度回退到「全部」。
+  assert.deepEqual(ids({ statusFilter: "bogus" }), ["o1", "o2", "f1", "f2", "n1"]);
+  assert.deepEqual(ids({ statusFilter: "all", severityFilter: SEVERITY.minor }), ["o2"]);
+  assert.deepEqual(ids({ statusFilter: "all", severityFilter: "bogus" }), ["o1", "o2", "f1", "f2", "n1"]);
+
+  // 关键词匹配标题、位置与影响，忽略大小写与首尾空白。
+  assert.deepEqual(ids({ statusFilter: "all", searchQuery: "空指针" }), ["o1", "f2"]);
+  assert.deepEqual(ids({ statusFilter: "all", searchQuery: "CACHE" }), ["f1"]);
+  assert.deepEqual(ids({ statusFilter: "all", searchQuery: "崩溃" }), ["o1", "f2"]);
+  assert.deepEqual(ids({ statusFilter: "all", searchQuery: "src/" }), ["o1", "o2", "f1", "f2", "n1"]);
+  assert.deepEqual(ids({ statusFilter: "all", searchQuery: "  并发  " }), ["f1"]);
+  // 多个关键词按 AND 匹配，可跨标题与影响文本。
+  assert.deepEqual(ids({ statusFilter: "all", searchQuery: "并发 缓存" }), ["f1"]);
+  assert.deepEqual(ids({ statusFilter: "all", searchQuery: "并发 不存在" }), []);
+  assert.deepEqual(ids({ statusFilter: "all", searchQuery: "不存在" }), []);
+
+  // 状态、严重度与搜索可叠加；归档状态下同样可搜索。
+  assert.deepEqual(ids({ statusFilter: ISSUE_STATUS.open, severityFilter: SEVERITY.minor }), ["o2"]);
+  assert.deepEqual(ids({ statusFilter: ISSUE_STATUS.fixed, searchQuery: "空指针" }), ["f2"]);
+  assert.deepEqual(ids({ statusFilter: ISSUE_STATUS.archived, searchQuery: "崩溃" }), ["a1"]);
+
+  // 旧调用方只传 showArchived 时保持原语义。
+  assert.deepEqual(ids({ showArchived: true, severityFilter: "all" }), ["o1", "o2", "f1", "f2", "n1", "a1"]);
+});
+
 test("currentStep 按活动与 issue 状态推导", () => {
   assert.equal(currentStep({ activity: { kind: "review", phase: "streaming" }, state: { issues: [] } }), "review");
   assert.equal(currentStep({ activity: { kind: "fix", phase: "waiting" }, state: { issues: [] } }), "fix");
@@ -944,7 +1094,7 @@ test("currentStep 按活动与 issue 状态推导", () => {
 test("createIssueState 与 normalizeIssueState 容错", () => {
   const state = createIssueState({ directoryId: "p1", path: "D:/repo", name: "repo" });
   assert.equal(state.projectId, "p1");
-  assert.deepEqual(state.sessions, { review: null, fix: null });
+  assert.deepEqual(state.sessions, { review: null, fix: null, verify: null });
 
   const normalized = normalizeIssueState(
     {
@@ -1002,6 +1152,38 @@ test("buildReviewPrompt 包含范围、diff 与结构化输出契约", () => {
   assert.ok(prompt.includes("## 插件结构化输出要求（必读）"));
   assert.ok(prompt.includes("```snow-issues"));
   assert.ok(prompt.includes("输出语言：繁體中文") === false);
+  // 默认范围：严重 + 一般，提示词不要求建议级，示例严重度取范围内首项。
+  assert.ok(prompt.includes("只列出纳入修复范围的严重程度：严重 / 一般；"));
+  assert.ok(prompt.includes('"severity":"严重"'));
+  assert.ok(!prompt.includes("只列出纳入修复范围的严重程度：严重 / 一般 / 建议"));
+
+  const withMinor = buildReviewPrompt({
+    locale: "zh-CN",
+    currentCode: true,
+    severities: [SEVERITY.critical, SEVERITY.major, SEVERITY.minor],
+  });
+  assert.ok(withMinor.includes("严重 / 一般 / 建议"));
+  // 示例严重度必须落在所选范围内，不能固定为「严重」。
+  const minorOnly = buildReviewPrompt({
+    locale: "zh-CN",
+    currentCode: true,
+    severities: [SEVERITY.major, SEVERITY.minor],
+  });
+  assert.ok(minorOnly.includes('"severity":"一般"'));
+  assert.ok(!minorOnly.includes('"severity":"严重"'));
+  const englishScope = buildReviewPrompt({
+    locale: "en-US",
+    currentCode: true,
+    severities: [SEVERITY.critical, SEVERITY.minor],
+  });
+  assert.ok(englishScope.includes("Critical / Minor"));
+  const englishMinorOnly = buildReviewPrompt({
+    locale: "en-US",
+    currentCode: true,
+    severities: [SEVERITY.minor],
+  });
+  assert.ok(englishMinorOnly.includes('"severity":"Minor"'));
+  assert.ok(!englishMinorOnly.includes('"severity":"Critical"'));
 
   const current = buildReviewPrompt({ locale: "zh-CN", repoPath: "D:/repo", sections: [], currentCode: true });
   assert.ok(current.includes("请审查当前项目的代码变更与实现质量"));
@@ -1173,35 +1355,73 @@ test("normalizeParallelLimit 收敛区间并回退默认值", () => {
   assert.equal(normalizeParallelLimit(99), 10);
   assert.equal(normalizeParallelLimit(3.6), 4);
   assert.deepEqual(normalizeSettings({}), {
-    schemaVersion: 2,
+    schemaVersion: 3,
     parallelLimit: 3,
-    autoFixAfterReview: false,
+    autoFixAfterReview: true,
+    autoFixOptIn: false,
     autoCleanupAfterFix: false,
     autoCleanupAction: "archive",
+    verifyAfterFix: false,
+    issueSeverities: [SEVERITY.critical, SEVERITY.major],
   });
   assert.deepEqual(
     normalizeSettings({
-      schemaVersion: 2,
+      schemaVersion: 3,
       parallelLimit: "8",
-      autoFixAfterReview: true,
+      autoFixAfterReview: false,
       autoCleanupAfterFix: 1,
       autoCleanupAction: "delete",
+      issueSeverities: ["建议", "严重", "建议"],
     }),
     {
-      schemaVersion: 2,
+      schemaVersion: 3,
       parallelLimit: 8,
-      autoFixAfterReview: true,
+      autoFixAfterReview: false,
+      autoFixOptIn: false,
       autoCleanupAfterFix: true,
       autoCleanupAction: "delete",
+      verifyAfterFix: false,
+      issueSeverities: [SEVERITY.critical, SEVERITY.minor],
     },
   );
-  // 显式值一律保留：旧存储里的 false 不能被升级覆盖。
+  // 空数组或非法值回退默认范围，避免 issue 清单彻底为空。
+  assert.deepEqual(normalizeSettings({ issueSeverities: [] }).issueSeverities, [
+    SEVERITY.critical,
+    SEVERITY.major,
+  ]);
+  // 升级不覆盖显式关闭：旧存储里的 false 可能是用户主动选择。
   assert.equal(
     normalizeSettings({ schemaVersion: 2, autoFixAfterReview: false }).autoFixAfterReview,
     false,
   );
   assert.equal(normalizeSettings({ autoFixAfterReview: false }).autoFixAfterReview, false);
+  // 字段缺失或类型非法时使用默认值（默认开启），但都不算用户确认。
+  assert.equal(normalizeSettings({ schemaVersion: 2 }).autoFixAfterReview, true);
+  assert.equal(normalizeSettings({ schemaVersion: 2 }).autoFixOptIn, false);
+  assert.equal(normalizeSettings({ schemaVersion: 3 }).autoFixAfterReview, true);
+  assert.equal(normalizeSettings({ autoFixAfterReview: "true" }).autoFixAfterReview, true);
+  assert.equal(normalizeSettings({ autoFixAfterReview: "true" }).autoFixOptIn, false);
+  // 升级后显式写入的值一律保留；旧记录里显式开启视为已确认。
+  assert.equal(
+    normalizeSettings({ schemaVersion: 3, autoFixAfterReview: false }).autoFixAfterReview,
+    false,
+  );
   assert.equal(normalizeSettings({ autoFixAfterReview: true }).autoFixAfterReview, true);
+  assert.equal(normalizeSettings({ autoFixAfterReview: true }).autoFixOptIn, true);
+  assert.equal(normalizeSettings({ autoFixAfterReview: false }).autoFixOptIn, false);
+  // 新字段一旦写入就以它为准，避免用户关闭后被旧字段重新视为确认。
+  assert.equal(
+    normalizeSettings({ autoFixAfterReview: false, autoFixOptIn: true }).autoFixOptIn,
+    true,
+  );
+  assert.equal(
+    normalizeSettings({ autoFixAfterReview: true, autoFixOptIn: false }).autoFixOptIn,
+    false,
+  );
+  // 复审默认关闭，显式开启或关闭都保留用户选择。
+  assert.equal(normalizeSettings({}).verifyAfterFix, false);
+  assert.equal(normalizeSettings({ verifyAfterFix: true }).verifyAfterFix, true);
+  assert.equal(normalizeSettings({ verifyAfterFix: false }).verifyAfterFix, false);
 });
 
 test("shouldReadMessages 按运行状态使用对应兜底间隔", () => {
@@ -1248,6 +1468,25 @@ test("planFixBatches 按并行上限切批", () => {
   assert.deepEqual(planFixBatches(["a", "b", "c", "d", "e"], 2), [["a", "b"], ["c", "d"], ["e"]]);
   assert.deepEqual(planFixBatches([], 3), []);
   assert.deepEqual(planFixBatches(["a"], 0), [["a"]]);
+});
+
+test("planVerifyBatches 按条数与字符预算切批", () => {
+  const issues = Array.from({ length: 25 }, (_, index) => ({ id: `i${index}` }));
+  const byCount = planVerifyBatches(issues, { maxIssues: 10 });
+  assert.deepEqual(byCount.map((batch) => batch.length), [10, 10, 5]);
+  assert.deepEqual(byCount.flat().map((issue) => issue.id), issues.map((issue) => issue.id));
+
+  const byChars = planVerifyBatches(issues, { maxChars: 3000, estimate: () => 1000 });
+  assert.deepEqual(byChars.map((batch) => batch.length), [3, 3, 3, 3, 3, 3, 3, 3, 1]);
+
+  // 单条自身超预算时独占一批，后续条目继续正常分批。
+  const oversized = planVerifyBatches(
+    [{ id: "big" }, { id: "a" }, { id: "b" }],
+    { maxChars: 100, estimate: (issue) => (issue.id === "big" ? 500 : 10) },
+  );
+  assert.deepEqual(oversized[0].map((issue) => issue.id), ["big"]);
+  assert.deepEqual(oversized[1].map((issue) => issue.id), ["a", "b"]);
+  assert.deepEqual(planVerifyBatches([], { maxIssues: 5 }), []);
 });
 
 test("takeNextFixBatch 跳过已删除与已归档项", () => {
@@ -1620,6 +1859,46 @@ test("normalizeIssueState 保留分批修复字段", () => {
   assert.equal(fix.cleanupAction, "delete");
 });
 
+test("normalizeIssueState 保留审查范围快照与复审批次计数", () => {
+  const normalized = normalizeIssueState(
+    {
+      issues: [],
+      sessions: {
+        review: {
+          conversationId: "c1",
+          status: "done",
+          issueSeverities: ["建议", "严重", "建议"],
+        },
+        verify: {
+          conversationId: "v1",
+          status: "running",
+          batchNumber: 2,
+          batchTotal: 3,
+          batchSize: 20,
+          queue: ["i9"],
+          confirmedCount: 2,
+          stillPresentCount: 1,
+          uncertainCount: 3,
+        },
+      },
+    },
+    { directoryId: "p", path: "D:/repo", name: "repo" },
+  );
+  assert.deepEqual(normalized.sessions.review.issueSeverities, ["严重", "建议"]);
+  assert.equal(normalized.sessions.verify.batchNumber, 2);
+  assert.equal(normalized.sessions.verify.batchTotal, 3);
+  assert.deepEqual(normalized.sessions.verify.queue, ["i9"]);
+  assert.equal(normalized.sessions.verify.confirmedCount, 2);
+  assert.equal(normalized.sessions.verify.stillPresentCount, 1);
+  assert.equal(normalized.sessions.verify.uncertainCount, 3);
+
+  const legacy = normalizeIssueState(
+    { issues: [], sessions: { review: { conversationId: "c2", status: "done" } } },
+    { directoryId: "p", path: "D:/repo", name: "repo" },
+  );
+  assert.equal(legacy.sessions.review.issueSeverities, null);
+});
+
 test("isSessionBusy 以持久化状态为主，活动态只补充同会话", () => {
   const running = { status: "running", conversationId: "c1" };
   assert.equal(isSessionBusy(running, null), true);
@@ -1651,6 +1930,7 @@ test("isSessionPossiblyRunning 把超时与未知异常视为可能仍在运行"
     "session-error",
     "parse-failed",
     "review-parse-failed",
+    "verify-expired",
     "batch-create-failed",
   ]) {
     assert.equal(isSessionPossiblyRunning({ status: "error", conversationId: "c1", lastError }, null), false);
@@ -1938,4 +2218,399 @@ test("全局 toast 层级高于审查弹窗遮罩", () => {
   assert.ok(layer && modal);
   assert.match(css, /\.fx-toast-layer\s*\{[^}]*position:\s*fixed/s);
   assert.ok(Number(layer[1]) > Number(modal[1]));
+});
+
+test("parseVerifyResults 只认专用围栏并按三态归一化", () => {
+  const text =
+    "复审结果如下。\n```snow-verify-results\n" +
+    JSON.stringify([
+      { issueId: "i1", status: "confirmed", summary: "已修复", evidence: "a.ts:1" },
+      { issue_id: "i2", result: "仍存在", note: "仍然复现", proof: "b.ts:2" },
+      { id: "i3", verdict: "unknown" },
+    ]) +
+    "\n```";
+  const results = parseVerifyResults(text);
+  assert.equal(results.length, 3);
+  assert.deepEqual(results[0], {
+    issueId: "i1",
+    status: "confirmed",
+    summary: "已修复",
+    evidence: "a.ts:1",
+  });
+  assert.equal(results[1].issueId, "i2");
+  assert.equal(results[1].status, "still_present");
+  assert.equal(results[1].summary, "仍然复现");
+  assert.equal(results[1].evidence, "b.ts:2");
+  assert.equal(results[2].status, "uncertain");
+
+  // 通用 json 回退必须带 issueId 与状态，普通说明用的 json 块不误判。
+  assert.equal(
+    parseVerifyResults('```json\n[{"issueId":"i9","status":"confirmed"}]\n```')[0].status,
+    "confirmed",
+  );
+  assert.deepEqual(parseVerifyResults('```json\n[{"title":"x","status":"fixed"}]\n```'), []);
+  // 无结构化输出时不做自然语言兜底。
+  assert.deepEqual(parseVerifyResults("i1 已修复，i2 仍存在"), []);
+  // 专用围栏存在但内容非法时不得回退到后面的 json 块。
+  assert.deepEqual(
+    parseVerifyResults(
+      '```snow-verify-results\nnot json\n```\n```json\n[{"issueId":"i1","status":"confirmed"}]\n```',
+    ),
+    [],
+  );
+  assert.deepEqual(parseVerifyResults("```snow-verify-results\n[]\n```"), []);
+
+  // 缺少合法状态的记录不算复审结论。
+  assert.deepEqual(parseVerifyResults('```snow-verify-results\n[{"issueId":"i1"}]\n```'), []);
+  assert.deepEqual(
+    parseVerifyResults('```snow-verify-results\n[{"issueId":"i1","status":"maybe"}]\n```'),
+    [],
+  );
+  // 混合输出只保留合法行；显式 unknown 仍归一为 uncertain。
+  const mixed = parseVerifyResults(
+    '```snow-verify-results\n[{"issueId":"i1","status":"confirmed"},{"issueId":"i2"}]\n```',
+  );
+  assert.equal(mixed.length, 1);
+  assert.equal(mixed[0].issueId, "i1");
+  // 同一 issueId 重复时只保留第一条。
+  const duplicated = parseVerifyResults(
+    '```snow-verify-results\n[{"issueId":"i1","status":"confirmed"},{"issueId":"i1","status":"still_present"}]\n```',
+  );
+  assert.equal(duplicated.length, 1);
+  assert.equal(duplicated[0].status, "confirmed");
+});
+
+test("isVerifySelectable 只允许已修复且复审未确认的条目", () => {
+  assert.equal(isVerifySelectable({ status: ISSUE_STATUS.fixed, verify: null }), true);
+  assert.equal(isVerifySelectable({ status: ISSUE_STATUS.fixed, verify: { status: "uncertain" } }), true);
+  assert.equal(isVerifySelectable({ status: ISSUE_STATUS.fixed, verify: { status: "confirmed" } }), false);
+  assert.equal(isVerifySelectable({ status: ISSUE_STATUS.open, verify: null }), false);
+  assert.equal(isVerifySelectable({ status: ISSUE_STATUS.archived, verify: { status: "uncertain" } }), false);
+  assert.equal(isVerifySelectable(null), false);
+});
+
+test("applyVerifyResults 三态回写、白名单与待确认语义", () => {
+  const issues = [
+    { id: "i1", status: ISSUE_STATUS.fixed, verify: null },
+    { id: "i2", status: ISSUE_STATUS.fixed, verify: null },
+    { id: "i3", status: ISSUE_STATUS.open, verify: null },
+    { id: "i4", status: ISSUE_STATUS.fixed, verify: null },
+    { id: "i5", status: ISSUE_STATUS.archived, verify: null },
+  ];
+  const applied = applyVerifyResults(
+    issues,
+    [
+      { issueId: "i1", status: "confirmed", summary: "ok", evidence: "a.ts:1" },
+      { issueId: "i2", status: "still_present", summary: "仍然存在", evidence: "b.ts:2" },
+      { issueId: "i3", status: "still_present" },
+      { issueId: "i4", status: "unknown" },
+      { issueId: "i5", status: "still_present" },
+      { issueId: "i9", status: "confirmed" },
+    ],
+    { conversationId: "conv-verify", issueIds: ["i1", "i2", "i3", "i4", "i5"] },
+  );
+  assert.equal(applied.confirmed, 1);
+  assert.equal(applied.stillPresent, 1);
+  assert.equal(applied.uncertain, 1);
+  assert.equal(applied.applied, 3);
+  assert.equal(applied.issues[0].status, ISSUE_STATUS.fixed);
+  assert.equal(applied.issues[0].verify.status, "confirmed");
+  assert.equal(applied.issues[0].verify.conversationId, "conv-verify");
+  // 复审未通过：已修复项退回待修复，并保留可核对结论。
+  assert.equal(applied.issues[1].status, ISSUE_STATUS.open);
+  assert.equal(applied.issues[1].verify.status, "still_present");
+  assert.equal(applied.issues[1].verify.summary, "仍然存在");
+  // 复审期间已被重开的条目不再写入迟到结论。
+  assert.equal(applied.issues[2].status, ISSUE_STATUS.open);
+  assert.equal(applied.issues[2].verify, null);
+  // 非法状态一律按 uncertain 处理，保留已修复结论。
+  assert.equal(applied.issues[3].status, ISSUE_STATUS.fixed);
+  assert.equal(applied.issues[3].verify.status, "uncertain");
+  // 归档项不被复审覆盖状态，也不写入结论。
+  assert.equal(applied.issues[4].status, ISSUE_STATUS.archived);
+  assert.equal(applied.issues[4].verify, null);
+
+  // 白名单外结果不写入。
+  const untouched = { id: "x1", status: ISSUE_STATUS.fixed, verify: null };
+  const skipped = applyVerifyResults([untouched], [{ issueId: "x1", status: "still_present" }], {
+    issueIds: ["other"],
+  });
+  assert.equal(untouched.status, ISSUE_STATUS.fixed);
+  assert.equal(untouched.verify, null);
+  assert.equal(skipped.stillPresent, 0);
+
+  // 白名单内未返回结论：标记待确认，保留已修复。
+  const missing = { id: "m1", status: ISSUE_STATUS.fixed, verify: null };
+  const missingApplied = applyVerifyResults([missing], [], { issueIds: ["m1"] });
+  assert.equal(missingApplied.uncertain, 1);
+  assert.equal(missing.status, ISSUE_STATUS.fixed);
+  assert.equal(missing.verify.status, "uncertain");
+
+  // 空白名单属于异常调用：忽略结果而不是改写全部 issue。
+  const ignored = { id: "e1", status: ISSUE_STATUS.fixed, verify: null };
+  const emptyAllowed = applyVerifyResults([ignored], [{ issueId: "e1", status: "confirmed" }], {
+    issueIds: [],
+  });
+  assert.equal(emptyAllowed.confirmed, 0);
+  assert.equal(ignored.verify, null);
+});
+
+test("applyVerifyResults 缺失结论不把已确认条目标成待确认", () => {
+  const confirmed = {
+    id: "i1",
+    status: ISSUE_STATUS.fixed,
+    fix: { conversationId: "conv-fix-1" },
+    verify: {
+      status: "confirmed",
+      summary: "人工复核通过",
+      evidence: "a.ts:1",
+      conversationId: "conv-manual",
+      at: 5,
+    },
+  };
+  const other = { id: "i2", status: ISSUE_STATUS.fixed, fix: { conversationId: "conv-fix-2" } };
+  const applied = applyVerifyResults(
+    [confirmed, other],
+    [{ issueId: "i2", status: "confirmed", summary: "ok" }],
+    {
+      conversationId: "conv-auto",
+      issueIds: ["i1", "i2"],
+      fixSessionIds: ["conv-fix-1", "conv-fix-2"],
+    },
+  );
+
+  assert.equal(applied.uncertain, 0);
+  assert.equal(applied.applied, 1);
+  assert.equal(confirmed.verify.status, "confirmed");
+  assert.equal(confirmed.verify.summary, "人工复核通过");
+  assert.equal(confirmed.verify.conversationId, "conv-manual");
+  assert.equal(other.verify.status, "confirmed");
+});
+
+test("applyVerifyResults 忽略非被复审修复轮次的结论", () => {
+  const issues = [
+    {
+      id: "i1",
+      status: ISSUE_STATUS.fixed,
+      fix: { conversationId: "conv-fix-2" },
+      verify: null,
+    },
+    {
+      id: "i2",
+      status: ISSUE_STATUS.fixed,
+      fix: { conversationId: "conv-fix-1" },
+      verify: null,
+    },
+  ];
+  const applied = applyVerifyResults(
+    issues,
+    [
+      { issueId: "i1", status: "still_present", summary: "上一轮结论" },
+      { issueId: "i2", status: "confirmed", summary: "本轮结论" },
+    ],
+    { conversationId: "conv-verify", issueIds: ["i1", "i2"], fixSessionIds: ["conv-fix-1"] },
+  );
+  // 新一轮修复不被回退，也不写入过期结论。
+  assert.equal(applied.issues[0].status, ISSUE_STATUS.fixed);
+  assert.equal(applied.issues[0].verify, null);
+  assert.equal(applied.stillPresent, 0);
+  assert.equal(applied.confirmed, 1);
+  assert.equal(applied.applied, 1);
+  assert.equal(applied.issues[1].verify.status, "confirmed");
+
+  // 缺结果补齐同样不能把新一轮修复标记为待确认。
+  const missing = applyVerifyResults(
+    [
+      {
+        id: "i3",
+        status: ISSUE_STATUS.fixed,
+        fix: { conversationId: "conv-fix-2" },
+        verify: null,
+      },
+    ],
+    [],
+    { issueIds: ["i3"], fixSessionIds: ["conv-fix-1"] },
+  );
+  assert.equal(missing.uncertain, 0);
+  assert.equal(missing.issues[0].verify, null);
+});
+
+test("applyVerifyResults 不写回已被审查重开的条目", () => {
+  const reopened = mergeReviewIssues(
+    [
+      {
+        id: "r1",
+        severity: "严重",
+        title: "A",
+        location: "a.ts:1",
+        status: ISSUE_STATUS.fixed,
+        fix: { conversationId: "conv-fix-1", result: "fixed" },
+        verify: null,
+      },
+    ],
+    [{ severity: "严重", title: "A", location: "a.ts:1" }],
+    { conversationId: "conv-review-2" },
+  );
+  assert.equal(reopened.issues[0].status, ISSUE_STATUS.open);
+  assert.equal(reopened.issues[0].verify, null);
+
+  const applied = applyVerifyResults(
+    reopened.issues,
+    [{ issueId: "r1", status: "confirmed", summary: "旧结论" }],
+    { conversationId: "conv-verify", issueIds: ["r1"], fixSessionIds: ["conv-fix-1"] },
+  );
+  assert.equal(applied.confirmed, 0);
+  assert.equal(applied.applied, 0);
+  assert.equal(applied.issues[0].status, ISSUE_STATUS.open);
+  assert.equal(applied.issues[0].verify, null);
+
+  // 未返回结论的补缺同样不能把重开项标记为待确认。
+  const missing = applyVerifyResults(reopened.issues, [], {
+    conversationId: "conv-verify",
+    issueIds: ["r1"],
+    fixSessionIds: ["conv-fix-1"],
+  });
+  assert.equal(missing.uncertain, 0);
+  assert.equal(missing.applied, 0);
+  assert.equal(missing.issues[0].verify, null);
+});
+
+test("新的修复轮次会清空上一轮复审结论", () => {
+  const issue = {
+    id: "i1",
+    status: ISSUE_STATUS.fixed,
+    fix: { conversationId: "conv-fix-1", result: "fixed" },
+    verify: { status: "confirmed", summary: "ok" },
+    fixingFrom: null,
+  };
+  const applied = applyFixResults([issue], [{ issueId: "i1", status: "fixed", summary: "again" }], {
+    conversationId: "conv-fix-2",
+    issueIds: ["i1"],
+  });
+  assert.equal(applied.issues[0].verify, null);
+  const marked = markIssuesFixing(applied.issues, ["i1"], "conv-fix-3");
+  assert.equal(marked[0].verify, null);
+});
+
+test("normalizeIssueState 保留合法复审结论并丢弃非法值", () => {
+  const state = normalizeIssueState(
+    {
+      issues: [
+        {
+          id: "i1",
+          severity: "严重",
+          status: "fixed",
+          verify: { status: "still_present", summary: "s", evidence: "e", conversationId: "c", at: 9 },
+        },
+        { id: "i2", severity: "一般", status: "fixed", verify: { status: "bogus" } },
+      ],
+    },
+    { directoryId: "a" },
+  );
+  assert.equal(state.issues[0].verify.status, "still_present");
+  assert.equal(state.issues[0].verify.summary, "s");
+  assert.equal(state.issues[0].verify.conversationId, "c");
+  assert.equal(state.issues[1].verify, null);
+  assert.equal(state.sessions.verify, null);
+});
+
+test("conversationCleanupGroups 包含复审会话分组", () => {
+  const groups = conversationCleanupGroups(
+    {
+      conversationLog: [
+        { conversationId: "conv-verify-old", kind: "verify", title: "旧复审", createdAt: 1 },
+        { conversationId: "conv-verify", kind: "verify", title: "复审", createdAt: 2 },
+      ],
+      sessions: {
+        review: null,
+        fix: null,
+        verify: {
+          conversationId: "conv-verify",
+          sessionIds: ["conv-verify-old", "conv-verify"],
+          status: "done",
+        },
+      },
+    },
+    { verify: "archive" },
+  );
+  const verify = groups.find((entry) => entry.kind === "verify");
+  assert.ok(verify);
+  assert.deepEqual(verify.historicalIds, ["conv-verify-old"]);
+  assert.equal(verify.action, "archive");
+});
+
+test("buildVerifyPrompt 包含只读约束、三态与 issue 契约", () => {
+  const prompt = buildVerifyPrompt({
+    locale: "zh-CN",
+    issues: [
+      {
+        id: "issue_1",
+        severity: "严重",
+        title: "空指针",
+        location: "src/a.ts:10",
+        fix: { summary: "补充判空", files: ["src/a.ts"], verification: "npm test" },
+      },
+    ],
+  });
+  assert.ok(prompt.includes("只读复审"));
+  assert.ok(prompt.includes("不要修改、创建或删除任何文件"));
+  assert.ok(prompt.includes("confirmed"));
+  assert.ok(prompt.includes("still_present"));
+  assert.ok(prompt.includes("uncertain"));
+  assert.ok(prompt.includes("snow-verify-results"));
+  assert.ok(prompt.includes("简体中文"));
+  const fenced = prompt.split("```json")[1].split("```")[0];
+  const rows = JSON.parse(fenced);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].issueId, "issue_1");
+  assert.equal(rows[0].title, "空指针");
+  assert.equal(rows[0].fixSummary, "补充判空");
+  assert.deepEqual(rows[0].fixFiles, ["src/a.ts"]);
+  assert.equal(rows[0].fixVerification, "npm test");
+
+  const english = buildVerifyPrompt({ locale: "en", issues: [] });
+  assert.ok(english.includes("read-only"));
+  assert.ok(english.includes("snow-verify-results"));
+  assert.ok(english.includes("Output language: English"));
+});
+
+test("buildVerifyPrompt 截断超长文件列表并把单批提示词控制在预算内", () => {
+  const longIssue = {
+    id: "issue_long",
+    severity: "严重",
+    title: "长记录",
+    location: "src/a.ts:1",
+    fix: {
+      summary: "修复",
+      files: Array.from({ length: 20 }, (_, index) => `src/f${index}.ts`),
+      verification: "npm test",
+    },
+  };
+  const prompt = buildVerifyPrompt({ locale: "zh-CN", issues: [longIssue] });
+  const rows = JSON.parse(prompt.split("```json")[1].split("```")[0]);
+  assert.equal(rows[0].fixFiles.length, MAX_VERIFY_FILES_PER_ISSUE);
+  assert.equal(rows[0].fixFilesOmitted, 20 - MAX_VERIFY_FILES_PER_ISSUE);
+
+  const heavy = Array.from({ length: 100 }, (_, index) => ({
+    id: `issue_${index}`,
+    severity: "一般",
+    title: "标题".repeat(100),
+    location: `${"src/very/long/path/".repeat(8)}file${index}.ts:1`,
+    fix: {
+      summary: "摘要".repeat(150),
+      files: Array.from({ length: 20 }, (_, fileIndex) => `src/f${fileIndex}.ts`),
+      verification: "验证".repeat(250),
+    },
+  }));
+  const headerChars = buildVerifyPrompt({ locale: "zh-CN", issues: [] }).length;
+  const batches = planVerifyBatches(heavy, {
+    maxIssues: 20,
+    maxChars: 40000,
+    headerChars,
+    estimate: (issue) => estimateVerifyIssueChars(issue, "zh-CN"),
+  });
+  assert.ok(batches.length > 1);
+  for (const batch of batches) {
+    assert.ok(buildVerifyPrompt({ locale: "zh-CN", issues: batch }).length <= 40000);
+  }
 });

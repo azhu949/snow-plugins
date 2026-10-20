@@ -1,6 +1,14 @@
 // 面板对话框：审查范围、批量修复确认、结果清理。
 import { h, createPortal, iconEl, severityLabel, severityClass, statusLabel, useEffect, useId, useRef, useState } from "./host.js";
-import { ISSUE_STATUS, DEFAULT_PARALLEL_LIMIT, MIN_PARALLEL_LIMIT, MAX_PARALLEL_LIMIT } from "../constants.js";
+import {
+  ISSUE_STATUS,
+  DEFAULT_PARALLEL_LIMIT,
+  MIN_PARALLEL_LIMIT,
+  MAX_PARALLEL_LIMIT,
+  ISSUE_SEVERITIES,
+  DEFAULT_ISSUE_SEVERITIES,
+} from "../constants.js";
+import { normalizeSeverityScope } from "../parse.js";
 import { isSessionBusy, isSessionPossiblyRunning, conversationCleanupGroups } from "../issues.js";
 
 function DialogShell({ title, closeLabel, api, onClose, children, footer, error }) {
@@ -422,6 +430,7 @@ function FixDialog({ dialog, snapshot, engine, api, t }) {
     "div",
     { className: "fx-fix-confirm" },
     h("p", null, t("fx.fix.confirm", { count: issues.length })),
+    dialog.notice ? h("div", { className: "fx-warn" }, dialog.notice) : null,
     h(
       "div",
       { className: "fx-hint" },
@@ -470,6 +479,53 @@ function FixDialog({ dialog, snapshot, engine, api, t }) {
   return h(DialogShell, { title: t("fx.fix.title"), closeLabel: t("fx.close"), api, error: dialog.error, onClose: () => engine.closeDialog(), footer }, body);
 }
 
+function VerifyDialog({ dialog, snapshot, engine, api, t }) {
+  const [busy, setBusy] = useState(false);
+  const issues = snapshot.state.issues.filter((issue) => dialog.issueIds.includes(issue.id));
+  const batches = Math.max(1, Number(dialog.batchTotal) || 1);
+  const body = h(
+    "div",
+    { className: "fx-fix-confirm" },
+    h("p", null, t("fx.verify.confirm", { count: issues.length, batches })),
+    h(
+      "div",
+      { className: "fx-fix-issues" },
+      issues.map((issue) =>
+        h(
+          "div",
+          { className: "fx-fix-issue", key: issue.id },
+          h("span", { className: `fx-sev ${severityClass(issue.severity)}` }, severityLabel(t, issue.severity)),
+          h("span", { className: "fx-fix-title" }, issue.title),
+          h("span", { className: "fx-muted" }, issue.location),
+        ),
+      ),
+    ),
+  );
+  const footer = h(
+    "div",
+    { className: "fx-dialog-actions" },
+    h("button", { className: "fx-btn", onClick: () => engine.closeDialog() }, t("fx.fix.cancel")),
+    h(
+      "button",
+      {
+        className: "fx-btn primary",
+        disabled: busy,
+        onClick: async () => {
+          setBusy(true);
+          await engine.confirmDialog();
+          setBusy(false);
+        },
+      },
+      busy ? t("fx.verify.busy") : t("fx.verify.start"),
+    ),
+  );
+  return h(
+    DialogShell,
+    { title: t("fx.verify.title"), closeLabel: t("fx.close"), api, error: dialog.error, onClose: () => engine.closeDialog(), footer },
+    body,
+  );
+}
+
 function CleanupDialog({ dialog, snapshot, engine, api, t }) {
   const [busy, setBusy] = useState(false);
   const cleanupIssues = snapshot.state.issues.filter((issue) => issue.status !== ISSUE_STATUS.archived);
@@ -479,7 +535,12 @@ function CleanupDialog({ dialog, snapshot, engine, api, t }) {
     .map((entry) => ({
       ...entry,
       key: entry.kind,
-      label: entry.kind === "review" ? t("fx.cleanup.reviewSession") : t("fx.cleanup.fixSession"),
+      label:
+        entry.kind === "review"
+          ? t("fx.cleanup.reviewSession")
+          : entry.kind === "verify"
+            ? t("fx.cleanup.verifySession")
+            : t("fx.cleanup.fixSession"),
     }))
     .filter((entry) => entry.session || entry.conversations.length);
   const historicalCount = sessions.reduce((sum, entry) => sum + entry.historicalIds.length, 0);
@@ -726,75 +787,186 @@ function DeleteDialog({ dialog, snapshot, engine, api, t }) {
 
 function SettingsDialog({ dialog, engine, api, t }) {
   const [busy, setBusy] = useState(false);
+  const severities = Array.isArray(dialog.issueSeverities)
+    ? dialog.issueSeverities
+    : DEFAULT_ISSUE_SEVERITIES;
+  const autoCleanup = Boolean(dialog.autoCleanupAfterFix);
+  const cleanupAction = dialog.autoCleanupAction || "archive";
+
+  // 整行都是 label：点标题、说明或圆钮都能切换，减少小目标点击成本。
+  const switchRow = (label, hint, checked, onChange) =>
+    h(
+      "label",
+      { className: "fx-setting is-toggle" },
+      h(
+        "span",
+        { className: "fx-setting-main" },
+        h("span", { className: "fx-setting-name" }, label),
+        h("span", { className: "fx-setting-hint" }, hint),
+      ),
+      h(
+        "span",
+        { className: "fx-switch" },
+        h("input", {
+          type: "checkbox",
+          checked,
+          onChange: (event) => onChange(event.target.checked),
+        }),
+        h("span", { className: "fx-switch-track", "aria-hidden": "true" }),
+      ),
+    );
+
   const body = h(
     "div",
     { className: "fx-settings" },
+    // 设置读取失败时弹窗展示的是默认值：提示用户保存只会写入实际改动的项。
+    dialog.loadFailed ? h("div", { className: "fx-warn" }, t("fx.settings.loadFailedNotice")) : null,
     h(
-      "label",
-      { className: "fx-settings-row" },
-      h("span", { className: "fx-settings-label" }, t("fx.settings.parallel")),
-      h("input", {
-        className: "fx-settings-number",
-        type: "number",
-        min: MIN_PARALLEL_LIMIT,
-        max: MAX_PARALLEL_LIMIT,
-        step: 1,
-        value: dialog.parallelLimit,
-        onChange: (event) => engine.updateDialog({ parallelLimit: event.target.value }),
-      }),
-    ),
-    h("div", { className: "fx-hint" }, t("fx.settings.parallelHint")),
-    h(
-      "div",
-      { className: "fx-muted" },
-      t("fx.settings.parallelRange", {
-        min: MIN_PARALLEL_LIMIT,
-        max: MAX_PARALLEL_LIMIT,
-        default: DEFAULT_PARALLEL_LIMIT,
-      }),
-    ),
-    h(
-      "label",
-      { className: "fx-check" },
-      h("input", {
-        type: "checkbox",
-        checked: dialog.autoFixAfterReview,
-        onChange: (event) => engine.updateDialog({ autoFixAfterReview: event.target.checked }),
-      }),
-      h("span", null, t("fx.settings.autoFix")),
-    ),
-    h("div", { className: "fx-hint" }, t("fx.settings.autoFixHint")),
-    h(
-      "label",
-      { className: "fx-check" },
-      h("input", {
-        type: "checkbox",
-        checked: dialog.autoCleanupAfterFix,
-        onChange: (event) => engine.updateDialog({ autoCleanupAfterFix: event.target.checked }),
-      }),
-      h("span", null, t("fx.settings.autoCleanup")),
-    ),
-    h("div", { className: "fx-hint" }, t("fx.settings.autoCleanupHint")),
-    h("div", { className: "fx-cleanup-title" }, t("fx.settings.autoCleanupAction")),
-    h(
-      "div",
-      { className: "fx-cleanup-actions" },
-      ["archive", "delete"].map((action) =>
+      "section",
+      { className: "fx-settings-section" },
+      h("div", { className: "fx-settings-section-title" }, t("fx.settings.groupExecution")),
+      h(
+        "div",
+        { className: "fx-settings-card" },
         h(
-          "label",
-          { className: "fx-radio", key: action },
-          h("input", {
-            type: "radio",
-            name: "fx-auto-cleanup-action",
-            checked: (dialog.autoCleanupAction || "archive") === action,
-            onChange: () => engine.updateDialog({ autoCleanupAction: action }),
-          }),
+          "div",
+          { className: "fx-setting" },
           h(
-            "span",
-            null,
-            action === "archive" ? t("fx.settings.cleanupArchive") : t("fx.settings.cleanupDelete"),
+            "div",
+            { className: "fx-setting-main" },
+            h(
+              "label",
+              { className: "fx-setting-name", for: "fx-settings-parallel" },
+              t("fx.settings.parallel"),
+            ),
+            h("span", { className: "fx-setting-hint" }, t("fx.settings.parallelHint")),
+            h(
+              "span",
+              { className: "fx-setting-meta" },
+              t("fx.settings.parallelRange", {
+                min: MIN_PARALLEL_LIMIT,
+                max: MAX_PARALLEL_LIMIT,
+                default: DEFAULT_PARALLEL_LIMIT,
+              }),
+            ),
+          ),
+          h("input", {
+            id: "fx-settings-parallel",
+            className: "fx-settings-number",
+            type: "number",
+            min: MIN_PARALLEL_LIMIT,
+            max: MAX_PARALLEL_LIMIT,
+            step: 1,
+            value: dialog.parallelLimit,
+            onChange: (event) => engine.updateDialog({ parallelLimit: event.target.value }),
+          }),
+        ),
+      ),
+    ),
+    h(
+      "section",
+      { className: "fx-settings-section" },
+      h("div", { className: "fx-settings-section-title" }, t("fx.settings.severityScope")),
+      h(
+        "div",
+        { className: "fx-settings-card" },
+        h(
+          "div",
+          { className: "fx-scope-chips" },
+          ISSUE_SEVERITIES.map((severity) =>
+            h(
+              "label",
+              { className: "fx-scope-chip", key: severity },
+              h("input", {
+                type: "checkbox",
+                checked: severities.includes(severity),
+                onChange: (event) => {
+                  const next = event.target.checked
+                    ? [...severities, severity]
+                    : severities.filter((item) => item !== severity);
+                  // 全部取消时 normalizeSeverityScope 会恢复默认范围，避免出现空清单。
+                  engine.updateDialog({ issueSeverities: normalizeSeverityScope(next) });
+                },
+              }),
+              h("span", null, severityLabel(t, severity)),
+            ),
           ),
         ),
+        h("div", { className: "fx-scope-hint" }, t("fx.settings.severityScopeHint")),
+      ),
+    ),
+    h(
+      "section",
+      { className: "fx-settings-section" },
+      h("div", { className: "fx-settings-section-title" }, t("fx.settings.groupAutomation")),
+      h(
+        "div",
+        { className: "fx-settings-card" },
+        switchRow(
+          t("fx.settings.autoFix"),
+          t("fx.settings.autoFixHint"),
+          dialog.autoFixAfterReview,
+          (checked) => engine.updateDialog({ autoFixAfterReview: checked }),
+        ),
+        switchRow(
+          t("fx.settings.verify"),
+          t("fx.settings.verifyHint"),
+          dialog.verifyAfterFix,
+          (checked) => engine.updateDialog({ verifyAfterFix: checked }),
+        ),
+        switchRow(
+          t("fx.settings.autoCleanup"),
+          t("fx.settings.autoCleanupHint"),
+          dialog.autoCleanupAfterFix,
+          (checked) => engine.updateDialog({ autoCleanupAfterFix: checked }),
+        ),
+        autoCleanup
+          ? h(
+              "div",
+              { className: "fx-setting fx-setting-sub" },
+              h(
+                "span",
+                { className: "fx-setting-main" },
+                h("span", { className: "fx-setting-name" }, t("fx.settings.autoCleanupAction")),
+              ),
+              h(
+                "div",
+                {
+                  className: "fx-segment",
+                  role: "radiogroup",
+                  "aria-label": t("fx.settings.autoCleanupAction"),
+                },
+                ["archive", "delete"].map((action) =>
+                  h(
+                    "label",
+                    {
+                      className: [
+                        "fx-segment-item",
+                        cleanupAction === action ? "is-active" : "",
+                        action === "delete" ? "is-danger" : "",
+                      ]
+                        .filter(Boolean)
+                        .join(" "),
+                      key: action,
+                    },
+                    h("input", {
+                      type: "radio",
+                      name: "fx-auto-cleanup-action",
+                      checked: cleanupAction === action,
+                      onChange: () => engine.updateDialog({ autoCleanupAction: action }),
+                    }),
+                    h(
+                      "span",
+                      null,
+                      action === "archive"
+                        ? t("fx.settings.cleanupArchive")
+                        : t("fx.settings.cleanupDelete"),
+                    ),
+                  ),
+                ),
+              ),
+            )
+          : null,
       ),
     ),
   );
@@ -830,6 +1002,9 @@ function Dialogs({ dialog, snapshot, engine, api, t }) {
   }
   if (dialog.type === "fix") {
     return h(FixDialog, { dialog, snapshot, engine, api, t });
+  }
+  if (dialog.type === "verify") {
+    return h(VerifyDialog, { dialog, snapshot, engine, api, t });
   }
   if (dialog.type === "cleanup") {
     return h(CleanupDialog, { dialog, snapshot, engine, api, t });

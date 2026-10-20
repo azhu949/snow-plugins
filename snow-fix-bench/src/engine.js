@@ -24,6 +24,8 @@ import {
   SESSION_MISSING_POLLS,
   SESSION_MISSING_RECHECK_POLLS,
   ISSUE_STATUS,
+  MAX_VERIFY_BATCH_ISSUES,
+  MAX_VERIFY_PROMPT_CHARS,
 } from "./constants.js";
 import {
   nowMs,
@@ -44,7 +46,9 @@ import {
   normalizeIssueState,
   mergeReviewIssues,
   applyFixResults,
+  applyVerifyResults,
   isFixSelectable,
+  isVerifySelectable,
   markIssuesFixing,
   restoreFixingIssues,
   restoreFixingIssuesForConversations,
@@ -52,6 +56,7 @@ import {
   findConversationInDomain,
   shouldDeclareSessionMissing,
   planFixBatches,
+  planVerifyBatches,
   takeNextFixBatch,
   isSessionPossiblyRunning,
   issueLocationFiles,
@@ -62,12 +67,14 @@ import {
   conversationCleanupGroups,
   removeConversationsFromLog,
   currentStep,
+  normalizeStatusFilter,
+  normalizeSeverityFilter,
 } from "./issues.js";
-import { buildReviewPrompt, buildFixPrompt, langText } from "./prompts.js";
-import { parseReviewResult, parseFixResults } from "./parse.js";
+import { buildReviewPrompt, buildFixPrompt, buildVerifyPrompt, estimateVerifyIssueChars, langText } from "./prompts.js";
+import { parseReviewResult, parseFixResults, parseVerifyResults, normalizeSeverityScope } from "./parse.js";
 import { createStore } from "./store.js";
 import { createT } from "./i18n.js";
-import { DEFAULT_SETTINGS, normalizeSettings } from "./settings.js";
+import { DEFAULT_SETTINGS, normalizeParallelLimit, normalizeSettings } from "./settings.js";
 
 const ENGINE_CACHE = new WeakMap();
 
@@ -78,6 +85,13 @@ export function resolveEngine(api) {
     ENGINE_CACHE.set(api, engine);
   }
   return engine;
+}
+
+// 严重程度范围比较：按归一化结果比对，避免顺序或重复差异被当成用户改动。
+function sameSeverityScope(left, right) {
+  const a = normalizeSeverityScope(left);
+  const b = normalizeSeverityScope(right);
+  return a.length === b.length && a.every((item, index) => item === b[index]);
 }
 
 function normalizeProjects(domain) {
@@ -215,12 +229,17 @@ function createEngine(api) {
     },
     tree: { root: "", nodes: [], expanded: {}, loading: {}, error: "", unavailable: false },
     projects: { loading: false, directories: [], collections: [], activeId: "" },
-    showArchived: false,
+    statusFilter: "all",
     severityFilter: "all",
+    searchQuery: "",
     settings: DEFAULT_SETTINGS,
+    // 设置读取失败时默认值不可信：自动修复必须先等待用户确认。
+    settingsLoadFailed: false,
     selected: [],
     dialog: null,
     activity: null,
+    // 审查完成时若用户正在使用其它弹窗，本次自动修复范围暂存到这里，等待列表入口重新打开。
+    pendingAutoFix: null,
     toast: null,
   });
 
@@ -340,6 +359,14 @@ function createEngine(api) {
     return changed ? { ...session, claimedIssueFiles: snapshot } : session;
   }
 
+  // 会话是否仍未结束：detached / dismissed 只停止跟踪，宿主会话可能仍在读写工作区。
+  // 修复与复审之间的互斥必须共用这一口径，避免“停止跟踪”被当成会话已结束。
+  function isSessionUnsettled(session, activity) {
+    if (!session) return false;
+    if (session.status === "detached" || session.status === "dismissed") return true;
+    return isSessionPossiblyRunning(session, activity);
+  }
+
   // 修复中或可能仍在运行的修复会话会与新修复并发修改同一批文件。
   // 停止跟踪只停止读取，不会中止宿主会话，因此必须先处理旧会话；
   // 旧会话的当前批次与尚未派发的队列都属于在途工作范围。
@@ -367,10 +394,7 @@ function createEngine(api) {
     );
     // 关闭运行中的卡片只停止跟踪，不会中止宿主会话：dismissed 与 detached 一样
     // 必须继续阻挡可能仍在运行的旧会话，避免两个 AI 并发修改同一批文件。
-    const possiblyRunning =
-      session.status === "detached" ||
-      session.status === "dismissed" ||
-      isSessionPossiblyRunning(session, snapshot.activity);
+    const possiblyRunning = isSessionUnsettled(session, snapshot.activity);
     if (!possiblyRunning) return false;
     if (Array.from(ids).some((id) => claimed.has(id))) return true;
     // 不同 issue 也可能落在同一文件：按 location 的文件路径判断重叠。
@@ -499,29 +523,57 @@ function createEngine(api) {
   }
 
   // 脚本级设置与项目 issue 分开存储：读取失败时保留默认值，不打断工作台启动。
+  async function readSettingsFromStorage() {
+    return normalizeSettings(await api.storage.getJson(SETTINGS_KEY));
+  }
+
   async function loadSettings() {
     try {
-      const raw = await api.storage.getJson(SETTINGS_KEY);
-      store.set({ settings: normalizeSettings(raw) });
+      store.set({ settings: await readSettingsFromStorage(), settingsLoadFailed: false });
     } catch {
-      store.set({ settings: DEFAULT_SETTINGS });
+      store.set({ settings: DEFAULT_SETTINGS, settingsLoadFailed: true });
     }
   }
 
   async function setSettings(patch) {
-    const next = normalizeSettings({ ...store.get().settings, ...patch });
+    const before = store.get();
+    let base = before.settings;
+    let loaded = !before.settingsLoadFailed;
+    // 读取失败时内存里是默认值：写盘前再读一次，避免把默认值整份覆盖用户配置。
+    if (!loaded) {
+      try {
+        base = await readSettingsFromStorage();
+        loaded = true;
+        store.set({ settings: base, settingsLoadFailed: false });
+      } catch {
+        // 仍读不到：本次只更新内存，不落盘，保留读取失败标记。
+      }
+    }
+    const next = normalizeSettings({ ...base, ...patch });
+    // 调用方显式改写开关（设置弹窗或确认流程）即视为用户确认，之后不再重复询问。
+    if (Object.prototype.hasOwnProperty.call(patch || {}, "autoFixAfterReview")) {
+      next.autoFixOptIn = true;
+    }
+    if (!loaded) {
+      store.set({ settings: next });
+      return { ok: false, persisted: false, settings: next };
+    }
     store.set({ settings: next });
     try {
       await api.storage.setJson(SETTINGS_KEY, next);
-      return { ok: true, settings: next };
+      // 设置已成功落盘，读取失败的降级状态随之解除。
+      store.set({ settingsLoadFailed: false });
+      return { ok: true, persisted: true, settings: next };
     } catch (error) {
+      // 写盘失败时回滚到本次合并前的可信基底，避免未保存的值继续参与后续逻辑。
+      store.set({ settings: base });
       setToast(
         "error",
         t("fx.settings.failed", {
           error: String(error?.cause?.message || error?.message || error),
         }),
       );
-      return { ok: false, error };
+      return { ok: false, persisted: false, error };
     }
   }
 
@@ -833,6 +885,11 @@ function createEngine(api) {
     }
   }
 
+  // 活动 / 会话类型与 state.sessions 的键一一对应。
+  function sessionKeyOf(kind) {
+    return kind === "verify" ? "verify" : kind === "fix" ? "fix" : "review";
+  }
+
   function sessionActivityBase(kind, session) {
     return {
       kind,
@@ -850,6 +907,9 @@ function createEngine(api) {
   function describeSessionError(lastError) {
     if (!lastError || lastError === "timeout") return "";
     if (lastError === "parse-failed") return t("fx.toast.fixParseFailed");
+    if (lastError === "verify-parse-failed") return t("fx.toast.verifyParseFailed");
+    if (lastError === "verify-expired") return t("fx.toast.verifyExpired");
+    if (lastError === "verify-batch-create-failed") return t("fx.activity.verifyBatchFailed");
     if (lastError === "review-parse-failed") return t("fx.toast.reviewParseFailed");
     if (lastError === "session-interrupted") return t("fx.activity.sessionInterrupted");
     if (lastError === "session-empty-response") return t("fx.activity.sessionEmptyResponse");
@@ -861,7 +921,11 @@ function createEngine(api) {
   function buildActivityFromState(state) {
     const fix = state?.sessions?.fix;
     const review = state?.sessions?.review;
+    const verify = state?.sessions?.verify;
     if (fix && fix.status === "running") return { ...sessionActivityBase("fix", fix), phase: "waiting" };
+    if (verify && verify.status === "running") {
+      return { ...sessionActivityBase("verify", verify), phase: "waiting" };
+    }
     if (review && review.status === "running") return { ...sessionActivityBase("review", review), phase: "waiting" };
     if (fix && (fix.status === "detached" || fix.status === "error") && !fix.activityDismissed) {
       return {
@@ -869,6 +933,14 @@ function createEngine(api) {
         phase: fix.status === "detached" ? "detached" : "error",
         error: describeSessionError(fix.lastError),
         timedOut: fix.lastError === "timeout",
+      };
+    }
+    if (verify && (verify.status === "detached" || verify.status === "error") && !verify.activityDismissed) {
+      return {
+        ...sessionActivityBase("verify", verify),
+        phase: verify.status === "detached" ? "detached" : "error",
+        error: describeSessionError(verify.lastError),
+        timedOut: verify.lastError === "timeout",
       };
     }
     if (review && (review.status === "detached" || review.status === "error") && !review.activityDismissed) {
@@ -948,10 +1020,12 @@ function createEngine(api) {
       status: "ready",
       error: "",
       selected: [],
-      showArchived: false,
+      statusFilter: "all",
       severityFilter: "all",
+      searchQuery: "",
       dialog: null,
       activity: buildActivityFromState(state),
+      pendingAutoFix: null,
       tree: { root: project.path, nodes: [], expanded: {}, loading: {}, error: "", unavailable: false },
       git: {
         loading: true,
@@ -1095,12 +1169,24 @@ function createEngine(api) {
     await init();
   }
 
-  function setShowArchived(value) {
-    store.set({ showArchived: Boolean(value), selected: [] });
+  function setStatusFilter(value) {
+    const next = normalizeStatusFilter(value);
+    if (next === store.get().statusFilter) return;
+    // 筛选条件变化会改变可见集合，清空选择，避免对隐藏项执行修复或删除；
+    // 重复设置同一值不算变化，不能悄悄清掉已有勾选。
+    store.set({ statusFilter: next, selected: [] });
   }
 
   function setSeverityFilter(value) {
-    store.set({ severityFilter: value || "all", selected: [] });
+    const next = normalizeSeverityFilter(value);
+    if (next === store.get().severityFilter) return;
+    store.set({ severityFilter: next, selected: [] });
+  }
+
+  function setSearchQuery(value) {
+    const next = String(value || "").slice(0, 200);
+    if (next === store.get().searchQuery) return;
+    store.set({ searchQuery: next, selected: [] });
   }
 
   function toggleSelected(issueId) {
@@ -1111,8 +1197,25 @@ function createEngine(api) {
     store.set({ selected });
   }
 
+  // 全选当前结果与已有选择取并集：筛选之外的已选项保持不变，清空选择走 clearSelection。
   function selectMany(issueIds) {
-    store.set({ selected: Array.from(new Set(issueIds)) });
+    const ids = Array.isArray(issueIds) ? issueIds.map(String) : [];
+    if (!ids.length) return;
+    const selected = new Set(store.get().selected.map(String));
+    for (const id of ids) selected.add(id);
+    store.set({ selected: Array.from(selected) });
+  }
+
+  // 反选只翻转当前筛选结果；不在结果中的已选项保持不变。
+  function invertSelection(issueIds) {
+    const ids = Array.from(new Set((Array.isArray(issueIds) ? issueIds : []).map(String)));
+    if (!ids.length) return;
+    const selected = new Set(store.get().selected.map(String));
+    for (const id of ids) {
+      if (selected.has(id)) selected.delete(id);
+      else selected.add(id);
+    }
+    store.set({ selected: Array.from(selected) });
   }
 
   function clearSelection() {
@@ -1247,6 +1350,8 @@ function createEngine(api) {
     }
 
     const currentCode = sections.length === 0 && scopeFiles.length === 0;
+    // 提示词与完成解析共用同一份范围快照：运行中改设置不能改变本次审查的合法结论。
+    const severities = normalizeSeverityScope(store.get().settings.issueSeverities);
     const prompt = buildReviewPrompt({
       locale: api.locale,
       repoPath: project.path,
@@ -1257,9 +1362,11 @@ function createEngine(api) {
       note: dialog?.note || "",
       currentCode,
       scopeTruncated,
+      severities,
     });
     return {
       prompt,
+      severities: [...severities],
       scopeLabel,
       summary: `${t("fx.review.title")} · ${scopeLabel}`,
       currentCode,
@@ -1325,6 +1432,8 @@ function createEngine(api) {
             startedAt: at,
             status: "running",
             scopeLabel: built.scopeLabel,
+            // 冻结本次审查实际使用的严重度范围，完成解析时不读取可能已改动的设置。
+            issueSeverities: [...built.severities],
             issueIds: [],
             lastError: "",
           },
@@ -1465,9 +1574,9 @@ function createEngine(api) {
     // 不能因为参数问题让空闲 / 绝对超时检查静默失效。
     const watchTimeouts = normalizeWatchTimeouts(
       timeouts,
-      token.kind === "review"
-        ? { idleMs: REVIEW_IDLE_TIMEOUT_MS, maxMs: REVIEW_MAX_TIMEOUT_MS }
-        : { idleMs: FIX_IDLE_TIMEOUT_MS, maxMs: FIX_MAX_TIMEOUT_MS },
+      token.kind === "fix"
+        ? { idleMs: FIX_IDLE_TIMEOUT_MS, maxMs: FIX_MAX_TIMEOUT_MS }
+        : { idleMs: REVIEW_IDLE_TIMEOUT_MS, maxMs: REVIEW_MAX_TIMEOUT_MS },
     );
     if (watchTimeouts.usedFallback) {
       console.warn("[snow-fix-bench] invalid watch timeouts, fallback applied", {
@@ -1766,7 +1875,13 @@ function createEngine(api) {
     if (token && (!isCurrentToken(token) || !isProjectCurrent(token))) return false;
     const session = snapshot.state.sessions.review;
     if (!session || session.conversationId !== conversationId) return false;
-    const parsedResult = parseReviewResult(text);
+    const parsedResult = parseReviewResult(text, {
+      // 旧会话没有范围快照时回退当前设置，保持升级前的行为。
+      severities:
+        Array.isArray(session.issueSeverities) && session.issueSeverities.length
+          ? session.issueSeverities
+          : snapshot.settings.issueSeverities,
+    });
     // 只有显式空结果才是「未发现问题」；缺少结构化块或内容无法解析必须显式报错，
     // 否则真实缺陷会被静默丢弃，工作台给出错误的干净结论。
     if (parsedResult.status === "failed") {
@@ -1820,12 +1935,25 @@ function createEngine(api) {
       setToast("success", t("fx.toast.reviewDone", { added, updated, reopened }));
     } else {
       store.set({ state: nextState, activity: activityDone });
-      setToast("info", t("fx.toast.reviewEmpty"));
+      // 有合法结论但全部落在范围外时，不能与「确实没有发现问题」共用同一提示。
+      setToast(
+        "info",
+        parsedResult.filtered
+          ? t("fx.toast.reviewFiltered", { count: parsedResult.filtered })
+          : t("fx.toast.reviewEmpty"),
+      );
     }
     await saveState({ projectId: snapshot.project?.directoryId, state: nextState });
-    // 自动修复：用户显式开启后，仅修复本次审查新增或重开的 issue；
-    // 保存期间可能被归档 / 删除，因此以最新状态复核后仍为 open 才启动。
-    if (autoFixIds.length && store.get().settings.autoFixAfterReview && (!token || isProjectCurrent(token))) {
+    // 自动修复：默认开启，但未确认过 opt-in 时先等待确认，避免升级后静默修改工作区。
+    // 设置读取失败时内存值为默认 true，内层确认分支会拦住静默修改；
+    // 外层只看开关本身，用户在会话内关闭后不再重复弹确认框。
+    // 仅修复本次审查新增或重开的 issue；保存期间可能被归档 / 删除，
+    // 因此以最新状态复核后仍为 open 才启动。
+    if (
+      autoFixIds.length &&
+      store.get().settings.autoFixAfterReview &&
+      (!token || isProjectCurrent(token))
+    ) {
       const current = store.get();
       const openIds = new Set(
         current.state.issues
@@ -1834,9 +1962,41 @@ function createEngine(api) {
       );
       const targets = autoFixIds.filter((id) => openIds.has(id));
       if (targets.length) {
-        void startFix(targets, { auto: true }).catch((error) => {
-          setToast("error", String(error?.message || error));
-        });
+        const notice = t("fx.toast.autoFixConfirm");
+        if (current.settingsLoadFailed || !current.settings.autoFixOptIn) {
+          // 设置读取失败或用户尚未确认自动修复：只预选本次范围，等待确认后再修改工作区。
+          const verifyUnsettled = isSessionUnsettled(current.state.sessions.verify, current.activity);
+          if (!current.dialog && !verifyUnsettled) {
+            // 打开失败说明存在修复冲突：同样把范围留在列表中，避免关闭提示后无从恢复。
+            if (!openFixDialog(targets, { notice, autoFixOptIn: true })) {
+              holdPendingAutoFix(targets, notice);
+            }
+          } else {
+            // 用户正在使用设置 / 清理 / 删除弹窗，或复审尚未结束：不覆盖现有界面，改为保留范围并在列表提供入口。
+            holdPendingAutoFix(targets, notice);
+            setToast(
+              "info",
+              current.dialog
+                ? t("fx.toast.autoFixPending", { count: targets.length })
+                : t("fx.toast.autoFixDeferred", { count: targets.length }),
+            );
+          }
+        } else {
+          void startFix(targets, { auto: true })
+            .then((started) => {
+              if (started) return;
+              if (token && !isProjectCurrent(token)) return;
+              // 启动被复审 / 修复互斥拒绝时保留本轮范围，用户可在列表入口稍后重试。
+              const latest = store.get();
+              const stillFixable = targets.filter((id) =>
+                latest.state.issues.some((issue) => issue.id === id && isFixSelectable(issue)),
+              );
+              holdPendingAutoFix(stillFixable, notice);
+            })
+            .catch((error) => {
+              setToast("error", String(error?.message || error));
+            });
+        }
       }
     }
     return true;
@@ -2142,7 +2302,7 @@ function createEngine(api) {
     return "started";
   }
 
-  // 全部批次完成：收尾会话状态，并按需执行自动清理。
+  // 全部批次完成：收尾会话状态；开启复审时先只读复核，再按需自动清理。
   async function finishFixRun(session) {
     const snapshot = store.get();
     const projectId = snapshot.project?.directoryId;
@@ -2158,7 +2318,604 @@ function createEngine(api) {
     store.set({ state: doneState });
     setToast("success", t("fx.toast.fixAllDone", { batches: session.batchTotal }));
     await saveState({ projectId, state: doneState });
+    if (store.get().settings?.verifyAfterFix) {
+      const outcome = await startVerify(session);
+      // 复审已启动、已有复审在运行，或启动失败需要用户重试时，都不能先自动清理：
+      // 未完成复核的修复结论不能被自动归档 / 删除。
+      if (outcome !== "empty") return;
+    }
     if (session.autoCleanup) await autoCleanupFixRun(session);
+  }
+
+  // 复审启动互斥：检查与创建之间没有 await，先用预约同步占位，避免重复创建会话。
+  async function startVerify(scope) {
+    const manual = scope?.manual === true;
+    if (manual && (!Array.isArray(scope.issueIds) || !scope.issueIds.length)) return "empty";
+    if (!manual && !scope?.conversationId) return "empty";
+    if (!manual && !store.get().settings?.verifyAfterFix) return "empty";
+    // 复审读取期间不允许修复会话改写工作区：结论可能建立在半成品代码上。
+    // finishFixRun 会先把 fix 置为 done，因此正常的“修复结束立即复审”不受影响。
+    const before = store.get();
+    if (isSessionUnsettled(before.state.sessions.fix, before.activity)) {
+      setToast("error", t("fx.toast.verifyWaitFix"));
+      return "error";
+    }
+    const reservation = reserveStart("verify");
+    if (!reservation) {
+      setToast("error", t("fx.toast.verifyBusy"));
+      return "error";
+    }
+    try {
+      return await runVerifyStart(scope, { manual });
+    } finally {
+      releaseStart("verify", reservation);
+    }
+  }
+
+  // 手动复审入口：针对已修复且复审未确认的条目重新发起只读复核。
+  function retryVerify(issueIds) {
+    const snapshot = store.get();
+    const ids =
+      Array.isArray(issueIds) && issueIds.length
+        ? issueIds
+        : snapshot.state.issues.filter(isVerifySelectable).map((issue) => issue.id);
+    const unique = Array.from(new Set(ids.map(String))).filter(Boolean);
+    if (!unique.length) {
+      setToast("error", t("fx.toast.verifyNoTarget"));
+      return Promise.resolve("empty");
+    }
+    return startVerify({ manual: true, issueIds: unique });
+  }
+
+  // 复审预算与批次规划：确认框与实际启动共用同一口径，避免展示的批次与实际不一致。
+  function planVerifyScope(issues) {
+    const headerChars = buildVerifyPrompt({ locale: api.locale, issues: [] }).length;
+    return planVerifyBatches(issues, {
+      maxIssues: MAX_VERIFY_BATCH_ISSUES,
+      maxChars: MAX_VERIFY_PROMPT_CHARS,
+      headerChars,
+      estimate: (issue) => estimateVerifyIssueChars(issue, api.locale),
+    });
+  }
+
+  // 列表「复审 / 重新复审」入口：先确认条数与批次数，再创建会话，避免一键批量消耗模型调用。
+  function openVerifyDialog(issueIds) {
+    const snapshot = store.get();
+    if (snapshot.dialog) return false;
+    const fallback = Array.isArray(snapshot.selected) ? snapshot.selected : [];
+    const ids = new Set(
+      (Array.isArray(issueIds) && issueIds.length ? issueIds : fallback).map(String).filter(Boolean),
+    );
+    if (!ids.size) {
+      setToast("error", t("fx.toast.verifyNoTarget"));
+      return false;
+    }
+    const issues = snapshot.state.issues.filter(
+      (issue) => ids.has(issue.id) && isVerifySelectable(issue),
+    );
+    if (!issues.length) {
+      setToast("error", t("fx.toast.verifyNoTarget"));
+      return false;
+    }
+    const batches = planVerifyScope(issues);
+    store.set({
+      dialog: {
+        type: "verify",
+        issueIds: issues.map((issue) => issue.id),
+        batchTotal: Math.max(1, batches.length),
+        error: "",
+      },
+    });
+    return true;
+  }
+
+  // 全部批次修复完成后启动只读复审：只复核本轮最终为「已修复」的条目。
+  async function runVerifyStart(fixSession, options = {}) {
+    const manual = options.manual === true;
+    const guard = captureProject();
+    const snapshot = store.get();
+    const project = snapshot.project;
+    if (!guard?.directoryId || !project?.directoryId || project.directoryId !== guard.directoryId) {
+      return "error";
+    }
+    if (!manual && !store.get().settings?.verifyAfterFix) return "empty";
+    if (store.get().state.sessions.verify?.status === "running") {
+      setToast("error", t("fx.toast.verifyBusy"));
+      return "error";
+    }
+    let fixSessionIds;
+    let allIssueIds;
+    let issues;
+    if (manual) {
+      // 手动复审从目标 issue 的修复轮次反推白名单，不依赖可能已被清理的 sessions.fix。
+      const manualIds = new Set((Array.isArray(fixSession.issueIds) ? fixSession.issueIds : []).map(String));
+      issues = snapshot.state.issues.filter(
+        (issue) => manualIds.has(issue.id) && isVerifySelectable(issue),
+      );
+      allIssueIds = issues.map((issue) => issue.id);
+      fixSessionIds = new Set(
+        issues.map((issue) => String(issue.fix?.conversationId || "")).filter(Boolean),
+      );
+      const currentFix = snapshot.state.sessions.fix;
+      if (currentFix && fixSessionIds.has(String(currentFix.conversationId || ""))) {
+        for (const id of Array.isArray(currentFix.sessionIds) ? currentFix.sessionIds : []) {
+          fixSessionIds.add(String(id));
+        }
+      }
+    } else {
+      fixSessionIds = new Set(
+        [fixSession.conversationId, ...(Array.isArray(fixSession.sessionIds) ? fixSession.sessionIds : [])]
+          .map(String)
+          .filter(Boolean),
+      );
+      allIssueIds = (
+        Array.isArray(fixSession.allIssueIds) && fixSession.allIssueIds.length
+          ? fixSession.allIssueIds
+          : Array.isArray(fixSession.issueIds)
+            ? fixSession.issueIds
+            : []
+      ).map(String);
+      const targetIds = new Set(allIssueIds);
+      issues = snapshot.state.issues.filter(
+        (issue) =>
+          targetIds.has(issue.id) &&
+          // 已确认的条目不再重复送审：遗漏结论不能把 confirmed 降级为 uncertain。
+          isVerifySelectable(issue) &&
+          fixSessionIds.has(String(issue.fix?.conversationId || "")),
+      );
+    }
+    if (!issues.length) return "empty";
+    // 复审按条数与字符预算拆批：单会话容纳全部 issue 会先撞上模型输出上限。
+    const batches = planVerifyScope(issues);
+    const firstBatch = batches[0] || [];
+    const queue = batches.slice(1).flat().map((issue) => issue.id);
+    const batchTotal = Math.max(1, batches.length);
+    const prompt = buildVerifyPrompt({ locale: api.locale, issues: firstBatch });
+    const title = t(batchTotal > 1 ? "fx.title.verifyBatch" : "fx.title.verify", {
+      project: project.name || project.path,
+      count: firstBatch.length,
+      batch: 1,
+      total: batchTotal,
+      time: formatStamp(new Date()),
+    });
+    const created = await runWrite("conversations.create", {
+      directoryId: project.directoryId,
+      title,
+      text: prompt,
+      autoReply: true,
+    });
+    if (!created.ok) {
+      setToast(
+        "error",
+        t("fx.toast.verifyFailed", { error: created.error || "conversations.create failed" }),
+      );
+      return "error";
+    }
+    const conversationId = created.data?.conversationId;
+    if (!conversationId) {
+      setToast("error", t("fx.toast.verifyFailed", { error: "conversations.create returned no id" }));
+      return "error";
+    }
+    if (!isProjectCurrent(guard)) {
+      await closeConversation(conversationId);
+      return "error";
+    }
+    await activateConversation(conversationId);
+    if (!isProjectCurrent(guard)) {
+      await closeConversation(conversationId);
+      return "error";
+    }
+    const latest = store.get();
+    // 创建 / 切换会话期间可能有新的修复启动：关闭本次复审，避免读取半成品代码。
+    if (isSessionUnsettled(latest.state.sessions.fix, latest.activity)) {
+      await closeConversation(conversationId);
+      setToast("error", t("fx.toast.verifyWaitFix"));
+      return "error";
+    }
+    // 创建期间可能已开始新的修复：旧一轮的复审不再启动。
+    if (!manual && latest.state.sessions.fix?.conversationId !== fixSession.conversationId) {
+      await closeConversation(conversationId);
+      return "error";
+    }
+    // 创建期间目标可能已被归档、重开或新一轮修复接管：以最新状态复核后再写入会话。
+    const firstBatchIds = new Set(firstBatch.map((issue) => issue.id));
+    const stillIssues = latest.state.issues.filter(
+      (issue) =>
+        firstBatchIds.has(issue.id) &&
+        isVerifySelectable(issue) &&
+        (!fixSessionIds.size || fixSessionIds.has(String(issue.fix?.conversationId || ""))),
+    );
+    if (!stillIssues.length) {
+      await closeConversation(conversationId);
+      return "error";
+    }
+    // 队列同样按最新状态过滤：期间被归档 / 重开 / 接管的目标不再派发。
+    const queuedIds = new Set(queue);
+    const liveQueue = latest.state.issues
+      .filter(
+        (issue) =>
+          queuedIds.has(issue.id) &&
+          isVerifySelectable(issue) &&
+          (!fixSessionIds.size || fixSessionIds.has(String(issue.fix?.conversationId || ""))),
+      )
+      .map((issue) => issue.id);
+    const liveTotal = liveQueue.length ? batchTotal : 1;
+    const at = nowMs();
+    const verifySession = {
+      conversationId,
+      title,
+      startedAt: at,
+      status: "running",
+      scopeLabel:
+        liveTotal > 1
+          ? t("fx.verify.scopeBatch", { count: stillIssues.length, batch: 1, total: liveTotal })
+          : t("fx.verify.scope", { count: stillIssues.length }),
+      issueIds: stillIssues.map((issue) => issue.id),
+      sessionIds: [conversationId],
+      batchNumber: 1,
+      batchTotal: liveTotal,
+      batchSize: MAX_VERIFY_BATCH_ISSUES,
+      queue: liveQueue,
+      // 复审完成后据此恢复本轮修复的自动清理目标；手动复审不参与自动清理。
+      fixConversationId: manual ? "" : fixSession.conversationId,
+      fixSessionIds: Array.from(fixSessionIds),
+      fixIssueIds: manual ? stillIssues.map((issue) => issue.id) : allIssueIds,
+      autoCleanup: manual ? false : Boolean(fixSession.autoCleanup),
+      cleanupAction: manual ? "archive" : fixSession.cleanupAction === "delete" ? "delete" : "archive",
+      confirmedCount: 0,
+      stillPresentCount: 0,
+      uncertainCount: 0,
+      lastError: "",
+    };
+    const nextState = {
+      ...latest.state,
+      sessions: { ...latest.state.sessions, verify: verifySession },
+      conversationLog: appendConversationLog(latest.state.conversationLog, {
+        conversationId,
+        kind: "verify",
+        title,
+        createdAt: at,
+      }),
+    };
+    store.set({
+      state: nextState,
+      activity: {
+        kind: "verify",
+        conversationId,
+        startedAt: at,
+        phase: "waiting",
+        message: "",
+        error: "",
+        issueIds: verifySession.issueIds,
+        batchNumber: 1,
+        batchTotal: liveTotal,
+      },
+    });
+    setToast(
+      "info",
+      liveTotal > 1
+        ? t("fx.toast.verifyBatchStarted", { batch: 1, total: liveTotal, count: stillIssues.length })
+        : manual
+          ? t("fx.toast.verifyRestarted", { count: stillIssues.length })
+          : t("fx.toast.verifyStarted", { count: stillIssues.length }),
+    );
+    await saveState({ projectId: project.directoryId, state: nextState });
+    if (!isProjectCurrent(guard)) return "error";
+    void track({
+      kind: "verify",
+      conversationId,
+      projectId: project.directoryId,
+      epoch: guard.epoch ?? projectEpoch,
+    });
+    return "started";
+  }
+
+  // 复审批次续跑：当前批完成后按同一预算取下一批，只创建新会话，不修改修复结论。
+  // 返回 started（已启动下一批）/ empty（没有可继续的目标）/ error（已保留队列并报错）。
+  async function continueVerifyQueue(snapshot, session, token) {
+    const guard = token || captureProject();
+    const project = snapshot.project;
+    if (
+      !guard?.directoryId ||
+      !project?.directoryId ||
+      project.directoryId !== guard.directoryId ||
+      !isProjectCurrent(guard)
+    ) {
+      return "error";
+    }
+    const fixSessionIds = new Set(
+      (Array.isArray(session.fixSessionIds) ? session.fixSessionIds : []).map(String).filter(Boolean),
+    );
+    const inFixRound = (issue) =>
+      !fixSessionIds.size || fixSessionIds.has(String(issue.fix?.conversationId || ""));
+    const queuedIds = new Set((Array.isArray(session.queue) ? session.queue : []).map(String));
+    const candidates = snapshot.state.issues.filter(
+      (issue) => queuedIds.has(issue.id) && isVerifySelectable(issue) && inFixRound(issue),
+    );
+    if (!candidates.length) return "empty";
+    const headerChars = buildVerifyPrompt({ locale: api.locale, issues: [] }).length;
+    const batches = planVerifyBatches(candidates, {
+      maxIssues: MAX_VERIFY_BATCH_ISSUES,
+      maxChars: MAX_VERIFY_PROMPT_CHARS,
+      headerChars,
+      estimate: (issue) => estimateVerifyIssueChars(issue, api.locale),
+    });
+    const batch = batches[0] || [];
+    if (!batch.length) return "empty";
+    const remainingIds = batches.slice(1).flat().map((issue) => issue.id);
+    const batchNumber = Math.max(1, Number(session.batchNumber) || 1) + 1;
+    const batchTotal = batchNumber + Math.max(0, batches.length - 1);
+    const prompt = buildVerifyPrompt({ locale: api.locale, issues: batch });
+    const title = t(batchTotal > 1 ? "fx.title.verifyBatch" : "fx.title.verify", {
+      project: project.name || project.path,
+      count: batch.length,
+      batch: batchNumber,
+      total: batchTotal,
+      time: formatStamp(new Date()),
+    });
+    const created = await runWrite("conversations.create", {
+      directoryId: project.directoryId,
+      title,
+      text: prompt,
+      autoReply: true,
+    });
+    if (!created.ok) {
+      await failVerify(
+        snapshot,
+        session,
+        session.conversationId,
+        "verify-batch-create-failed",
+        t("fx.toast.verifyBatchCreateFailed", { error: created.error || "conversations.create failed" }),
+      );
+      return "error";
+    }
+    const conversationId = created.data?.conversationId;
+    if (!conversationId) {
+      await failVerify(
+        snapshot,
+        session,
+        session.conversationId,
+        "verify-batch-create-failed",
+        t("fx.toast.verifyBatchCreateFailed", { error: "conversations.create returned no id" }),
+      );
+      return "error";
+    }
+    if (!isProjectCurrent(guard)) {
+      await closeConversation(conversationId);
+      return "error";
+    }
+    await activateConversation(conversationId);
+    if (!isProjectCurrent(guard)) {
+      await closeConversation(conversationId);
+      return "error";
+    }
+    const latest = store.get();
+    const current = latest.state.sessions.verify;
+    // 创建期间可能被新一轮修复 / 复审接管：不覆盖已更新的会话状态。
+    if (
+      !current ||
+      current.conversationId !== session.conversationId ||
+      current.status !== "running"
+    ) {
+      await closeConversation(conversationId);
+      return "error";
+    }
+    const batchIds = new Set(batch.map((issue) => issue.id));
+    const liveIssues = latest.state.issues.filter(
+      (issue) => batchIds.has(issue.id) && isVerifySelectable(issue) && inFixRound(issue),
+    );
+    if (!liveIssues.length) {
+      await closeConversation(conversationId);
+      await failVerify(
+        latest,
+        current,
+        session.conversationId,
+        "verify-batch-create-failed",
+        t("fx.toast.verifyBatchEmpty"),
+      );
+      return "error";
+    }
+    const at = nowMs();
+    const nextSession = {
+      ...current,
+      conversationId,
+      title,
+      startedAt: at,
+      status: "running",
+      scopeLabel:
+        batchTotal > 1
+          ? t("fx.verify.scopeBatch", { count: liveIssues.length, batch: batchNumber, total: batchTotal })
+          : t("fx.verify.scope", { count: liveIssues.length }),
+      issueIds: liveIssues.map((issue) => issue.id),
+      sessionIds: [
+        ...(Array.isArray(current.sessionIds) ? current.sessionIds : [current.conversationId]),
+        conversationId,
+      ],
+      batchNumber,
+      batchTotal,
+      batchSize: MAX_VERIFY_BATCH_ISSUES,
+      queue: remainingIds,
+      activityDismissed: false,
+      lastError: "",
+    };
+    const nextState = {
+      ...latest.state,
+      sessions: { ...latest.state.sessions, verify: nextSession },
+      conversationLog: appendConversationLog(latest.state.conversationLog, {
+        conversationId,
+        kind: "verify",
+        title,
+        createdAt: at,
+      }),
+    };
+    store.set({
+      state: nextState,
+      activity: {
+        kind: "verify",
+        conversationId,
+        startedAt: at,
+        phase: "waiting",
+        message: "",
+        error: "",
+        issueIds: nextSession.issueIds,
+        batchNumber,
+        batchTotal,
+      },
+    });
+    setToast(
+      "info",
+      t("fx.toast.verifyBatchStarted", { batch: batchNumber, total: batchTotal, count: liveIssues.length }),
+    );
+    await saveState({ projectId: project.directoryId, state: nextState });
+    if (!isProjectCurrent(guard)) return "error";
+    void track({
+      kind: "verify",
+      conversationId,
+      projectId: project.directoryId,
+      epoch: guard.epoch ?? projectEpoch,
+    });
+    return "started";
+  }
+
+  // 复审失败收尾：保留会话与重解析入口，不标记完成、不触发自动清理。
+  async function failVerify(snapshot, session, conversationId, lastError, message) {
+    const nextState = {
+      ...snapshot.state,
+      sessions: {
+        ...snapshot.state.sessions,
+        verify: { ...session, status: "error", lastError },
+      },
+    };
+    store.set({
+      state: nextState,
+      activity:
+        snapshot.activity?.conversationId === conversationId
+          ? { ...snapshot.activity, phase: "error", error: message }
+          : snapshot.activity,
+    });
+    setToast("error", message);
+    await saveState({ projectId: snapshot.project?.directoryId, state: nextState });
+    return true;
+  }
+
+  // 复审完成：回写结论；解析失败时保留修复结论，不自动清理，等待用户重试。
+  // 分批时每批只回写本批白名单，队列清空后才标记完成并触发自动清理。
+  async function finishVerify(conversationId, text, token) {
+    const snapshot = store.get();
+    if (token && (!isCurrentToken(token) || !isProjectCurrent(token))) return false;
+    const session = snapshot.state.sessions.verify;
+    if (!session || session.conversationId !== conversationId) return false;
+    const results = parseVerifyResults(text);
+    // 至少一条结论必须命中本次复审的 issue 白名单；全部不匹配时按解析失败处理，
+    // 保留会话与重解析入口，避免把无效输出当成复审完成并触发自动清理。
+    const allowedIds = new Set(
+      (Array.isArray(session.issueIds) ? session.issueIds : []).map(String),
+    );
+    const matched = results.filter((result) => allowedIds.has(String(result.issueId)));
+    if (!matched.length) {
+      return failVerify(
+        snapshot,
+        session,
+        conversationId,
+        "verify-parse-failed",
+        t("fx.toast.verifyParseFailed"),
+      );
+    }
+    // 续批创建失败后重新解析同一批：结论已经写过，不能再按“过期”拒绝，否则队列无法继续。
+    const alreadyApplied =
+      allowedIds.size > 0 &&
+      Array.from(allowedIds).every((id) => {
+        const issue = snapshot.state.issues.find((item) => item.id === id);
+        return Boolean(issue) && issue.verify?.conversationId === conversationId;
+      });
+    const applied = applyVerifyResults(snapshot.state.issues, matched, {
+      conversationId,
+      issueIds: session.issueIds,
+      // 只回写被复审那一轮修复产生的结论，忽略期间新一轮修复的结果。
+      fixSessionIds: session.fixSessionIds,
+    });
+    if (!applied.applied && !alreadyApplied) {
+      // 结果可解析但全部属于过期轮次或被新审查重开：保留会话等待重新解析，不能标记完成。
+      return failVerify(
+        snapshot,
+        session,
+        conversationId,
+        "verify-expired",
+        t("fx.toast.verifyExpired"),
+      );
+    }
+    const countedSession = {
+      ...session,
+      confirmedCount: (Number(session.confirmedCount) || 0) + (alreadyApplied ? 0 : applied.confirmed),
+      stillPresentCount:
+        (Number(session.stillPresentCount) || 0) + (alreadyApplied ? 0 : applied.stillPresent),
+      uncertainCount: (Number(session.uncertainCount) || 0) + (alreadyApplied ? 0 : applied.uncertain),
+      lastError: "",
+    };
+    const countedState = {
+      ...snapshot.state,
+      issues: applied.issues,
+      sessions: { ...snapshot.state.sessions, verify: countedSession },
+    };
+    store.set({
+      state: countedState,
+      activity:
+        snapshot.activity?.conversationId === conversationId
+          ? { ...snapshot.activity, phase: "done", message: "" }
+          : snapshot.activity,
+    });
+    await saveState({ projectId: snapshot.project?.directoryId, state: countedState });
+    // 还有后续批次时继续创建会话；只有队列耗尽或无可继续目标才收尾。
+    const latest = store.get();
+    const current = latest.state.sessions.verify;
+    if (!current || current.conversationId !== conversationId) return true;
+    if (Array.isArray(current.queue) && current.queue.length) {
+      const outcome = await continueVerifyQueue(latest, current, token);
+      if (outcome !== "empty") return true;
+    }
+    const finalSnapshot = store.get();
+    const finishedBase = finalSnapshot.state.sessions.verify;
+    if (!finishedBase || finishedBase.conversationId !== conversationId) return true;
+    const finishedSession = { ...finishedBase, status: "done", queue: [], lastError: "" };
+    const doneState = {
+      ...finalSnapshot.state,
+      sessions: { ...finalSnapshot.state.sessions, verify: finishedSession },
+    };
+    store.set({
+      state: doneState,
+      activity:
+        finalSnapshot.activity?.conversationId === conversationId
+          ? { ...finalSnapshot.activity, phase: "done", message: "" }
+          : finalSnapshot.activity,
+    });
+    setToast(
+      finishedSession.stillPresentCount ? "error" : "success",
+      t("fx.toast.verifyDone", {
+        confirmed: finishedSession.confirmedCount,
+        still: finishedSession.stillPresentCount,
+        uncertain: finishedSession.uncertainCount,
+      }),
+    );
+    await saveState({ projectId: finalSnapshot.project?.directoryId, state: doneState });
+    if (finishedSession.autoCleanup) await autoCleanupAfterVerify(finishedSession);
+    return true;
+  }
+
+  // 复审结束后恢复本轮修复的自动清理：fix 会话必须仍是同一轮，避免清理新一轮的结果。
+  async function autoCleanupAfterVerify(verifySession) {
+    // 仍有未派发的复审批次时不能清理：未复核的修复结论不能被归档 / 删除。
+    if (Array.isArray(verifySession.queue) && verifySession.queue.length) return;
+    const snapshot = store.get();
+    const fixSession = snapshot.state.sessions.fix;
+    if (!fixSession || fixSession.conversationId !== verifySession.fixConversationId) return;
+    await autoCleanupFixRun({
+      ...fixSession,
+      conversationId: verifySession.fixConversationId,
+      sessionIds: verifySession.fixSessionIds,
+      allIssueIds: verifySession.fixIssueIds,
+      autoCleanup: verifySession.autoCleanup,
+      cleanupAction: verifySession.cleanupAction,
+    });
   }
 
   // 自动清理本轮已修复 issue 与本轮全部修复会话，动作为归档或删除。
@@ -2172,11 +2929,16 @@ function createEngine(api) {
         ? session.allIssueIds
         : session.issueIds) || [],
     );
+    // 复审会话也属于本轮，自动清理时一并归档 / 删除。
+    const verifySession = snapshot.state.sessions.verify;
+    const verifyForRun =
+      verifySession && verifySession.fixConversationId === session.conversationId ? verifySession : null;
     const sessionIds = Array.from(
       new Set(
-        (Array.isArray(session.sessionIds) ? session.sessionIds : [session.conversationId]).filter(
-          Boolean,
-        ),
+        [
+          ...(Array.isArray(session.sessionIds) ? session.sessionIds : [session.conversationId]),
+          ...(verifyForRun?.sessionIds || []),
+        ].filter(Boolean),
       ),
     );
     const sessionIdSet = new Set(sessionIds.map((conversationId) => String(conversationId)));
@@ -2206,7 +2968,9 @@ function createEngine(api) {
     const fixedIssues = latest.state.issues.filter(
       (issue) =>
         targetIds.has(issue.id) &&
-        (issue.status === ISSUE_STATUS.fixed || issue.status === ISSUE_STATUS.notFound) &&
+        // 复审未通过的条目已退回待修复；待确认的条目保留，避免把未验证的结论自动归档。
+        ((issue.status === ISSUE_STATUS.fixed && issue.verify?.status !== "uncertain") ||
+          issue.status === ISSUE_STATUS.notFound) &&
         sessionIdSet.has(String(issue.fix?.conversationId || "")),
     );
     const fixedIds = new Set(fixedIssues.map((issue) => issue.id));
@@ -2224,6 +2988,10 @@ function createEngine(api) {
       sessions.fix = null;
     } else {
       sessions.fix = { ...fixSession, sessionIds: pendingIds };
+    }
+    // 复审会话同样只在确认清理成功后才移除，失败时保留供下一次清理重试。
+    if (verifyForRun && cleanedIds.has(String(verifyForRun.conversationId))) {
+      sessions.verify = null;
     }
     const nextState = {
       ...latest.state,
@@ -2260,7 +3028,7 @@ function createEngine(api) {
     // 启动路径在 await saveState 之后才调用 track：保存窗口内用户可能已停止跟踪
     // 或关闭卡片。进入轮询前复核最新状态，避免把结果写回已放弃的会话。
     const latest = store.get();
-    const trackedSession = latest.state.sessions[token.kind === "review" ? "review" : "fix"];
+    const trackedSession = latest.state.sessions[sessionKeyOf(token.kind)];
     const trackedActivity = latest.activity;
     const stoppedByActivity =
       trackedActivity &&
@@ -2283,22 +3051,23 @@ function createEngine(api) {
       return;
     }
     const timeouts =
-      job.kind === "review"
-        ? { idleMs: REVIEW_IDLE_TIMEOUT_MS, maxMs: REVIEW_MAX_TIMEOUT_MS }
-        : { idleMs: FIX_IDLE_TIMEOUT_MS, maxMs: FIX_MAX_TIMEOUT_MS };
+      job.kind === "fix"
+        ? { idleMs: FIX_IDLE_TIMEOUT_MS, maxMs: FIX_MAX_TIMEOUT_MS }
+        : { idleMs: REVIEW_IDLE_TIMEOUT_MS, maxMs: REVIEW_MAX_TIMEOUT_MS };
     try {
       const text = await watchConversation(job.conversationId, timeouts, token, {
         resumed: Boolean(job.resumed),
       });
       if (!isCurrentToken(token) || !isProjectCurrent(token)) return;
       if (job.kind === "review") await finishReview(job.conversationId, text, token);
+      else if (job.kind === "verify") await finishVerify(job.conversationId, text, token);
       else await finishFix(job.conversationId, text, token);
     } catch (error) {
       if (!isCurrentToken(token) || !isProjectCurrent(token)) return;
       const message = String(error?.message || error);
       const timedOut = message === "timeout";
       const snapshot = store.get();
-      const sessionKey = job.kind === "review" ? "review" : "fix";
+      const sessionKey = sessionKeyOf(job.kind);
       const session = snapshot.state.sessions[sessionKey];
       const nextState = { ...snapshot.state };
       if (session && session.conversationId === job.conversationId) {
@@ -2348,7 +3117,7 @@ function createEngine(api) {
     const snapshot = store.get();
     const project = snapshot.project;
     if (!project?.directoryId) return;
-    for (const kind of ["review", "fix"]) {
+    for (const kind of ["review", "fix", "verify"]) {
       const session = snapshot.state.sessions[kind];
       if (!session || session.status !== "running") continue;
       const activity = snapshot.activity;
@@ -2377,7 +3146,7 @@ function createEngine(api) {
     if (!activity) return;
     const token = tracking.get(activity.kind);
     if (token && token.conversationId === activity.conversationId) cancelToken(token);
-    const sessionKey = activity.kind === "review" ? "review" : "fix";
+    const sessionKey = sessionKeyOf(activity.kind);
     const session = snapshot.state.sessions[sessionKey];
     if (session && session.conversationId === activity.conversationId && session.status === "running") {
       const state = {
@@ -2398,7 +3167,7 @@ function createEngine(api) {
     const snapshot = store.get();
     const activity = snapshot.activity;
     if (!activity) return;
-    const sessionKey = activity.kind === "review" ? "review" : "fix";
+    const sessionKey = sessionKeyOf(activity.kind);
     const session = snapshot.state.sessions[sessionKey];
     if (!session || session.conversationId !== activity.conversationId) {
       setToast("error", t("fx.activity.sessionError"));
@@ -2434,7 +3203,13 @@ function createEngine(api) {
       if (!text) {
         setToast(
           "error",
-          t(activity.kind === "review" ? "fx.toast.reviewParseFailed" : "fx.toast.fixParseFailed"),
+          t(
+            activity.kind === "review"
+              ? "fx.toast.reviewParseFailed"
+              : activity.kind === "verify"
+                ? "fx.toast.verifyParseFailed"
+                : "fx.toast.fixParseFailed",
+          ),
         );
         return;
       }
@@ -2449,6 +3224,7 @@ function createEngine(api) {
         store.set({ state: nextState });
       }
       if (activity.kind === "review") await finishReview(activity.conversationId, text);
+      else if (activity.kind === "verify") await finishVerify(activity.conversationId, text);
       else {
         // 手动重新解析只回写本批结果，不自动新建下一批会话。
         // 队列没有可派发的 issue 时仍交给 finishFix 收尾，保留自动清理路径。
@@ -2479,7 +3255,7 @@ function createEngine(api) {
     if (activity.phase === "done" || activity.phase === "dismissed") return;
     const project = snapshot.project;
     if (!project?.directoryId) return;
-    const sessionKey = activity.kind === "review" ? "review" : "fix";
+    const sessionKey = sessionKeyOf(activity.kind);
     const session = snapshot.state.sessions[sessionKey];
     if (!session || session.conversationId !== activity.conversationId) {
       setToast("error", t("fx.activity.sessionError"));
@@ -2515,13 +3291,14 @@ function createEngine(api) {
   }
 
   async function startFix(issueIds, options = {}) {
+    // 返回 true 表示首批会话已创建；false 表示在创建前被互斥条件拒绝（原因已写入 toast / 弹窗）。
     const token = captureProject();
     if (!token) throw new Error(t("fx.toast.noProject"));
     const reservation = reserveStart("fix");
     if (!reservation) {
       setToast("error", t("fx.toast.fixBusy"));
       setDialogError("fix", t("fx.toast.fixBusy"));
-      return;
+      return false;
     }
     try {
       const selectedIds = Array.isArray(issueIds) ? issueIds.map(String) : [];
@@ -2530,12 +3307,18 @@ function createEngine(api) {
         (issue) => selectedIds.includes(issue.id) && isFixSelectable(issue),
       );
       if (!issues.length) throw new Error(t("fx.toast.noSelection"));
+      // 复审读取期间启动修复会让结论建立在半成品代码上：先串行。
+      if (isSessionUnsettled(snapshot.state.sessions.verify, snapshot.activity)) {
+        setToast("error", t("fx.toast.fixWaitVerify"));
+        setDialogError("fix", t("fx.toast.fixWaitVerify"));
+        return false;
+      }
       // 同一批 issue 仍在修复中（含停止跟踪后旧会话可能继续运行）时拒绝新建会话，
       // 否则两个 AI 会话会并发修改同一批文件。
       if (hasFixConflict(issues.map((issue) => issue.id))) {
         setToast("error", t("fx.toast.fixConflict"));
         setDialogError("fix", t("fx.toast.fixConflict"));
-        return;
+        return false;
       }
       // 并行上限同时决定单会话的 issue 条数：超出的 issue 进入后续批次。
       const batchSize = Math.max(1, Number(snapshot.settings?.parallelLimit) || 1);
@@ -2595,6 +3378,13 @@ function createEngine(api) {
         await closeConversation(conversationId);
         throw new Error(t("fx.toast.noSelection"));
       }
+      // create / activate 期间可能已有复审启动：关闭本次会话，避免与新复审并存。
+      if (isSessionUnsettled(current.state.sessions.verify, current.activity)) {
+        await closeConversation(conversationId);
+        setToast("error", t("fx.toast.fixWaitVerify"));
+        setDialogError("fix", t("fx.toast.fixWaitVerify"));
+        return false;
+      }
       const at = nowMs();
       // 覆盖已结束的旧修复会话前，释放其残留的修复中状态；可能仍在运行的旧会话
       // 由 hasFixConflict 阻挡，不能在这里提前解锁，否则会允许并发修改同一批文件。
@@ -2647,6 +3437,7 @@ function createEngine(api) {
         state: nextState,
         selected: [],
         dialog: null,
+        pendingAutoFix: null,
         activity: {
           kind: "fix",
           conversationId,
@@ -2672,6 +3463,7 @@ function createEngine(api) {
         projectId: token.directoryId,
         epoch: token.epoch,
       });
+      return true;
     } finally {
       releaseStart("fix", reservation);
     }
@@ -2684,7 +3476,7 @@ function createEngine(api) {
     const issueIds = Array.isArray(options?.issueIds) ? options.issueIds : [];
     const issueAction = options?.issueAction === "delete" ? "delete" : "archive";
     const sessionActions = options?.sessions || {};
-    const sessionKeys = ["review", "fix"];
+    const sessionKeys = ["review", "fix", "verify"];
     const cleanedByKey = new Map();
     const ackIds = new Set();
     // 开始时只确定清理意图：busy 拦截与待清理会话 id。
@@ -2942,7 +3734,7 @@ function createEngine(api) {
     // error / detached 卡片会在重开工作台时由 buildActivityFromState 重建：
     // 必须把「已关闭」写入会话状态并持久化，否则用户点关闭看起来无效。
     if (activity.phase === "error" || activity.phase === "detached") {
-      const sessionKey = activity.kind === "review" ? "review" : "fix";
+      const sessionKey = sessionKeyOf(activity.kind);
       const session = snapshot.state.sessions[sessionKey];
       if (session && session.conversationId === activity.conversationId) {
         // 终态错误也可能残留 fixing（旧数据或异常中断），关闭时统一释放。
@@ -2974,7 +3766,7 @@ function createEngine(api) {
     }
     const token = tracking.get(activity.kind);
     if (token && token.conversationId === activity.conversationId) cancelToken(token);
-    const sessionKey = activity.kind === "review" ? "review" : "fix";
+    const sessionKey = sessionKeyOf(activity.kind);
     const session = snapshot.state.sessions[sessionKey];
     let state = snapshot.state;
     if (session && session.conversationId === activity.conversationId && session.status === "running") {
@@ -3016,12 +3808,12 @@ function createEngine(api) {
     void loadGit();
   }
 
-  function openFixDialog(issueIds) {
+  function openFixDialog(issueIds, options = {}) {
     const snapshot = store.get();
     const ids = Array.isArray(issueIds) && issueIds.length ? issueIds : snapshot.selected;
     if (!ids.length) {
       setToast("error", t("fx.toast.noSelection"));
-      return;
+      return false;
     }
     // 归档项可以勾选用于批量删除，但不能进入修复；已修复与已确认不存在的条目同理。
     // 这里与 startFix 一样过滤掉，确保弹窗展示的条目与实际修复范围一致。
@@ -3030,19 +3822,71 @@ function createEngine(api) {
     );
     if (!issues.length) {
       setToast("error", t("fx.toast.noSelection"));
-      return;
+      return false;
     }
     if (hasFixConflict(issues.map((issue) => issue.id))) {
       setToast("error", t("fx.toast.fixConflict"));
-      return;
+      return false;
     }
-    store.set({ dialog: { type: "fix", issueIds: issues.map((issue) => issue.id), error: "" } });
+    store.set({
+      dialog: {
+        type: "fix",
+        issueIds: issues.map((issue) => issue.id),
+        error: "",
+        notice: String(options.notice || ""),
+        // 来自自动修复的确认框：用户点开始后记住这次确认。
+        autoFixOptIn: options.autoFixOptIn === true,
+      },
+    });
+    return true;
+  }
+
+  // 自动修复被复审 / 修复互斥拒绝时保留本轮范围：toast 会消失，列表入口必须能重新打开。
+  function holdPendingAutoFix(issueIds, notice) {
+    const ids = Array.from(
+      new Set((Array.isArray(issueIds) ? issueIds : []).map(String).filter(Boolean)),
+    );
+    if (!ids.length) return;
+    store.set({ pendingAutoFix: { issueIds: ids, notice: String(notice || "") } });
+  }
+
+  // 审查完成时若用户正在使用其它弹窗，自动修复范围暂存在 pendingAutoFix，由列表入口重新打开确认框。
+  function openPendingAutoFix() {
+    const snapshot = store.get();
+    const pending = snapshot.pendingAutoFix;
+    if (!pending) return false;
+    if (snapshot.dialog) return false;
+    // 复审仍在进行时先不打开无法执行的确认框，保留入口等待其结束。
+    if (isSessionUnsettled(snapshot.state.sessions.verify, snapshot.activity)) {
+      setToast("info", t("fx.toast.autoFixDeferred", { count: pending.issueIds.length }));
+      return false;
+    }
+    const opened = openFixDialog(pending.issueIds, {
+      notice: pending.notice,
+      autoFixOptIn: true,
+    });
+    if (opened) {
+      store.set({ pendingAutoFix: null });
+      return true;
+    }
+    // 打开失败：目标全部失效时清空入口；修复冲突等临时原因保留，冲突解除后可重试。
+    const latest = store.get();
+    const stillFixable = pending.issueIds.some((id) =>
+      latest.state.issues.some((issue) => issue.id === id && isFixSelectable(issue)),
+    );
+    if (!stillFixable) store.set({ pendingAutoFix: null });
+    return false;
   }
 
   function openCleanupDialog() {
     const snapshot = store.get();
     const fixedIds = snapshot.state.issues
-      .filter((issue) => issue.status === ISSUE_STATUS.fixed || issue.status === ISSUE_STATUS.notFound)
+      // 复审待确认的条目默认不选中，避免一键清理把未验证的结论归档或删除。
+      .filter(
+        (issue) =>
+          issue.status === ISSUE_STATUS.notFound ||
+          (issue.status === ISSUE_STATUS.fixed && issue.verify?.status !== "uncertain"),
+      )
       .map((issue) => issue.id);
     const sessions = snapshot.state.sessions;
     // 运行中或跟踪超时后可能仍在运行的会话不能清理：默认保持，避免用户确认后才被引擎拒绝。
@@ -3062,38 +3906,81 @@ function createEngine(api) {
         sessions: {
           review: defaultAction(sessions.review),
           fix: defaultAction(sessions.fix),
+          verify: defaultAction(sessions.verify),
         },
       },
     });
   }
 
   function openSettingsDialog() {
-    const settings = store.get().settings || DEFAULT_SETTINGS;
+    const snapshot = store.get();
+    const settings = snapshot.settings || DEFAULT_SETTINGS;
+    // 记录弹窗打开时的基线：设置读取失败时内存里是默认值，保存时只提交相对基线改动过的字段，
+    // 否则未改动字段会带着默认值写回，静默重置本地存储里用户已保存的配置。
+    const baseline = {
+      parallelLimit: settings.parallelLimit,
+      autoFixAfterReview: settings.autoFixAfterReview,
+      autoCleanupAfterFix: settings.autoCleanupAfterFix,
+      autoCleanupAction: settings.autoCleanupAction,
+      verifyAfterFix: settings.verifyAfterFix,
+      issueSeverities: [...settings.issueSeverities],
+    };
     store.set({
       dialog: {
         type: "settings",
         error: "",
-        parallelLimit: settings.parallelLimit,
-        autoFixAfterReview: settings.autoFixAfterReview,
-        autoCleanupAfterFix: settings.autoCleanupAfterFix,
-        autoCleanupAction: settings.autoCleanupAction,
+        // 读取失败标记随弹窗保存：UI 据此提示「当前显示默认值、只写入改动项」。
+        loadFailed: Boolean(snapshot.settingsLoadFailed),
+        baseline,
+        parallelLimit: baseline.parallelLimit,
+        autoFixAfterReview: baseline.autoFixAfterReview,
+        autoCleanupAfterFix: baseline.autoCleanupAfterFix,
+        autoCleanupAction: baseline.autoCleanupAction,
+        verifyAfterFix: baseline.verifyAfterFix,
+        issueSeverities: [...baseline.issueSeverities],
       },
     });
   }
 
   async function saveSettingsDialog(dialog) {
-    const result = await setSettings({
-      parallelLimit: dialog.parallelLimit,
-      autoFixAfterReview: dialog.autoFixAfterReview,
-      autoCleanupAfterFix: dialog.autoCleanupAfterFix,
-      autoCleanupAction: dialog.autoCleanupAction,
-    });
+    // 只提交用户相对打开弹窗时的基线真正改动过的字段：读取失败后重读成功时，
+    // 未改动字段保持存储里的原值，而不是被弹窗展示的默认值覆盖。
+    const baseline = dialog.baseline || store.get().settings;
+    const patch = {};
+    if (normalizeParallelLimit(dialog.parallelLimit) !== baseline.parallelLimit) {
+      patch.parallelLimit = dialog.parallelLimit;
+    }
+    if (dialog.autoCleanupAfterFix !== baseline.autoCleanupAfterFix) {
+      patch.autoCleanupAfterFix = dialog.autoCleanupAfterFix;
+    }
+    if (dialog.autoCleanupAction !== baseline.autoCleanupAction) {
+      patch.autoCleanupAction = dialog.autoCleanupAction;
+    }
+    if (dialog.verifyAfterFix !== baseline.verifyAfterFix) {
+      patch.verifyAfterFix = dialog.verifyAfterFix;
+    }
+    if (!sameSeverityScope(dialog.issueSeverities, baseline.issueSeverities)) {
+      patch.issueSeverities = dialog.issueSeverities;
+    }
+    // 只有用户确实改动了自动修复开关才算显式确认；保存其它设置不改动 opt-in。
+    if (dialog.autoFixAfterReview !== baseline.autoFixAfterReview) {
+      patch.autoFixAfterReview = dialog.autoFixAfterReview;
+    }
+    if (!Object.keys(patch).length) {
+      // 没有任何改动：不写盘，避免拿弹窗里的值制造一次无意义的存储写入。
+      store.set({ dialog: null });
+      setToast("success", t("fx.settings.unchanged"));
+      return;
+    }
+    const result = await setSettings(patch);
     if (!result.ok) {
       setDialogError(
         "settings",
-        t("fx.settings.failed", {
-          error: String(result.error?.cause?.message || result.error?.message || result.error),
-        }),
+        result.persisted === false && !result.error
+          ? t("fx.settings.readFailed")
+          : t("fx.settings.failed", {
+              error: String(result.error?.cause?.message || result.error?.message || result.error),
+            }),
       );
       return;
     }
@@ -3116,7 +4003,22 @@ function createEngine(api) {
       if (dialog.type === "review") {
         await startReview(dialog);
       } else if (dialog.type === "fix") {
-        await startFix(dialog.issueIds);
+        if (dialog.autoFixOptIn) {
+          // 用户在自动修复确认框中点了开始：记住这次确认，后续不再重复询问。
+          await setSettings({ autoFixOptIn: true });
+        }
+        const started = await startFix(dialog.issueIds);
+        if (!started && dialog.autoFixOptIn) {
+          // 复审 / 修复互斥导致启动失败：关闭弹窗后仍可从列表恢复本轮范围。
+          holdPendingAutoFix(dialog.issueIds, dialog.notice || t("fx.toast.autoFixConfirm"));
+        }
+      } else if (dialog.type === "verify") {
+        const outcome = await retryVerify(dialog.issueIds);
+        if (outcome !== "error") {
+          // 启动成功或目标已全部失效时关闭确认框；被互斥拒绝时保留，便于用户重试或取消。
+          const current = store.get().dialog;
+          if (current && current.type === "verify") store.set({ dialog: null });
+        }
       } else if (dialog.type === "cleanup") {
         await applyCleanup(dialog);
       } else if (dialog.type === "delete") {
@@ -3144,10 +4046,12 @@ function createEngine(api) {
     clearToast,
     activateProject,
     loadProjects,
-    setShowArchived,
+    setStatusFilter,
     setSeverityFilter,
+    setSearchQuery,
     toggleSelected,
     selectMany,
+    invertSelection,
     clearSelection,
     deleteSelectedIssues,
     openDialog,
@@ -3155,6 +4059,8 @@ function createEngine(api) {
     toggleDirectory,
     startReview,
     startFix,
+    startVerify,
+    retryVerify,
     applyCleanup,
     archiveIssue,
     restoreIssue,
@@ -3165,6 +4071,8 @@ function createEngine(api) {
     dismissActivity,
     openReviewDialog,
     openFixDialog,
+    openVerifyDialog,
+    openPendingAutoFix,
     openCleanupDialog,
     openSettingsDialog,
     setSettings,

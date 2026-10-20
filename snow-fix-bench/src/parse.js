@@ -1,5 +1,5 @@
 // 结构化结果解析：从审查 / 修复会话的最终回复中提取 JSON 块。
-import { ISSUE_STATUS, SEVERITY } from "./constants.js";
+import { ISSUE_STATUS, SEVERITY, ISSUE_SEVERITIES, DEFAULT_ISSUE_SEVERITIES } from "./constants.js";
 import { escapeRegExp, normalizeText, truncate } from "./util.js";
 
 function extractFence(text, tag) {
@@ -79,6 +79,19 @@ function normalizeSeverity(raw) {
   if (/一般|中|major|medium|moderate|normal|p2/.test(text)) return SEVERITY.major;
   if (/建议|低|minor|low|suggestion|info|trivial|p3/.test(text)) return SEVERITY.minor;
   return "";
+}
+
+// 纳入修复范围的严重程度：过滤非法值并按「严重 / 一般 / 建议」固定顺序去重；
+// 空数组或全部非法时回退默认范围，避免设置损坏导致审查结果无处可去。
+function normalizeSeverityScope(value) {
+  const source = Array.isArray(value) ? value : [];
+  const picked = new Set();
+  for (const item of source) {
+    const severity = normalizeSeverity(item);
+    if (severity) picked.add(severity);
+  }
+  if (!picked.size) return [...DEFAULT_ISSUE_SEVERITIES];
+  return ISSUE_SEVERITIES.filter((severity) => picked.has(severity));
 }
 
 function severityRank(severity) {
@@ -220,8 +233,9 @@ function parseFallbackIssueLines(text) {
 }
 
 // 审查结果三态：issues 有条目；empty 是可信的空结论；failed 表示缺少结构化块或内容无法解析。
-function parseReviewResult(text) {
+function parseReviewResult(text, options) {
   const source = String(text || "");
+  const scope = new Set(normalizeSeverityScope(options?.severities));
   const tagged = readTaggedFence(source, "snow-issues", isIssueArray);
   let rows = null;
   if (tagged.present) {
@@ -239,23 +253,24 @@ function parseReviewResult(text) {
   }
   if (!Array.isArray(rows)) return { issues: [], status: "failed" };
   const normalized = [];
-  // 可用行数在过滤建议级之前统计：用于区分「合法但只有建议级」与「整组行都缺正文字段」。
+  // 可用行数在范围过滤之前统计：用于区分「合法但都不在范围内」与「整组行都缺正文字段」。
   let usable = 0;
   for (const row of rows) {
     const issue = normalizeIssueRow(row);
     if (!issue) continue;
     usable += 1;
-    if (issue.severity === SEVERITY.minor) continue;
+    if (!scope.has(issue.severity)) continue;
     normalized.push(issue);
   }
   // 非空数组却没有任何可用行（如 [{"severity":"严重"}]）属于格式异常，必须报解析失败，
-  // 不能当成「未发现问题」；只有真正的空数组或仅含可用建议级行才是 empty。
+  // 不能当成「未发现问题」；真正的空数组与「都落在范围外」才是 empty。
   const status = normalized.length ? "issues" : rows.length > 0 && usable === 0 ? "failed" : "empty";
-  return { issues: normalized, status };
+  // filtered 只统计「合法但落在范围外」的条目，供调用方区分可信空结果与被范围过滤。
+  return { issues: normalized, status, filtered: usable - normalized.length };
 }
 
-function parseReviewIssues(text) {
-  return parseReviewResult(text).issues;
+function parseReviewIssues(text, options) {
+  return parseReviewResult(text, options).issues;
 }
 
 function isFixResultArray(value) {
@@ -308,6 +323,100 @@ function normalizeFixStatus(raw) {
   return "blocked";
 }
 
+function isVerifyResultArray(value) {
+  return (
+    Array.isArray(value) &&
+    (value.length === 0 ||
+      value.some(
+        (item) =>
+          item &&
+          typeof item === "object" &&
+          (item.issueId || item.issue_id || item.id) &&
+          normalizeVerifyStatusStrict(item.status ?? item.result ?? item.verdict ?? item.outcome),
+      ))
+  );
+}
+
+function isStrictVerifyResultArray(value) {
+  return (
+    Array.isArray(value) &&
+    (value.length === 0 ||
+      value.some(
+        (item) =>
+          item &&
+          typeof item === "object" &&
+          (item.issueId || item.issue_id) &&
+          (item.status || item.result || item.verdict || item.outcome),
+      ))
+  );
+}
+
+// 复审状态归一化：明确肯定 → confirmed，明确否定 → still_present，其余一律 uncertain。
+// strict 版本对缺失或无法识别的状态返回空串，供解析器判定输出是否满足契约。
+function normalizeVerifyStatusStrict(raw) {
+  const text = normalizeText(raw)
+    .toLowerCase()
+    .replace(/^[\s"'`“‘「『]+|[\s"'`”’」』]+$/g, "")
+    .replace(/[\s。．.!！,，;；]+$/g, "")
+    .replace(/[\s-]+/g, "_");
+  if (!text) return "";
+  if (
+    /^(confirmed|verified|fixed|pass|passed|resolved|已修复|确认修复|通过|验证通过|不存在|已不存在|not_found|notfound|no_issue)$/.test(
+      text,
+    )
+  ) {
+    return "confirmed";
+  }
+  if (
+    /^(still_present|present|exists|still_exists|unfixed|not_fixed|failed|fail|remaining|仍存在|依然存在|未修复|未通过|问题存在|仍复现)$/.test(
+      text,
+    )
+  ) {
+    return "still_present";
+  }
+  if (
+    /^(uncertain|unknown|unsure|inconclusive|cannot_confirm|cannot_verify|不确定|无法确认|无法确定|无法判断|待确认|未确认)$/.test(
+      text,
+    )
+  ) {
+    return "uncertain";
+  }
+  return "";
+}
+
+// 复审结果只认专用围栏（或带 issueId + status 的 json 回退），不做自然语言兜底。
+// 缺少合法状态的记录不进入结果；同一 issueId 只保留第一条，避免重复计数或后写覆盖。
+function parseVerifyResults(text) {
+  const source = String(text || "");
+  const tagged = readTaggedFence(source, "snow-verify-results", isVerifyResultArray);
+  let rows = null;
+  if (tagged.present) {
+    rows = tagged.ok ? tagged.value : null;
+  } else {
+    const jsonTagged = readTaggedFence(source, "json", isStrictVerifyResultArray);
+    if (jsonTagged.present) rows = jsonTagged.ok ? jsonTagged.value : null;
+  }
+  if (!Array.isArray(rows)) return [];
+  const results = [];
+  const seen = new Set();
+  for (const row of rows) {
+    if (!row || typeof row !== "object") continue;
+    const issueId = normalizeText(row.issueId ?? row.issue_id ?? row.id);
+    if (!issueId) continue;
+    const status = normalizeVerifyStatusStrict(row.status ?? row.result ?? row.verdict ?? row.outcome);
+    if (!status) continue;
+    if (seen.has(issueId)) continue;
+    seen.add(issueId);
+    results.push({
+      issueId,
+      status,
+      summary: normalizeText(row.summary ?? row.message ?? row.note),
+      evidence: normalizeText(row.evidence ?? row.proof ?? row.reason),
+    });
+  }
+  return results;
+}
+
 function parseFixResults(text) {
   const source = String(text || "");
   const tagged = readTaggedFence(source, "snow-fix-results", isFixResultArray);
@@ -341,4 +450,13 @@ function parseFixResults(text) {
   return results;
 }
 
-export { normalizeSeverity, severityRank, statusRank, parseReviewResult, parseReviewIssues, parseFixResults };
+export {
+  normalizeSeverity,
+  normalizeSeverityScope,
+  severityRank,
+  statusRank,
+  parseReviewResult,
+  parseReviewIssues,
+  parseFixResults,
+  parseVerifyResults,
+};

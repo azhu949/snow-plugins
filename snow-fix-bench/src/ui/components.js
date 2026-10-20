@@ -1,10 +1,12 @@
 // 面板展示组件：流程条、文件树、issue 卡片与活动卡片。
 import { h, iconEl, STEP_KEYS, formatElapsed, formatDateTime, statusLabel, severityLabel, severityClass, useEffect, useState } from "./host.js";
 import { ISSUE_STATUS, SEVERITY } from "../constants.js";
-import { statusCounts, isFixSelectable } from "../issues.js";
+import { statusCounts, isFixSelectable, isVerifySelectable } from "../issues.js";
 
-function Stepper({ current, t, api }) {
+function Stepper({ current, snapshot, t, api }) {
   const currentIndex = STEP_KEYS.indexOf(current);
+  // 复审属于修复阶段的内部状态：不新增步骤，只在修复节点上显示副标。
+  const verifying = snapshot?.state?.sessions?.verify?.status === "running";
   return h(
     "nav",
     { className: "fx-steps", "aria-label": t("fx.name") },
@@ -19,6 +21,9 @@ function Stepper({ current, t, api }) {
           index < currentIndex ? iconEl(api, "Check", 11) : String(index + 1),
         ),
         h("span", { className: "fx-step-label" }, t(`fx.step.${key}`)),
+        key === "fix" && verifying
+          ? h("span", { className: "fx-step-sub" }, t("fx.step.verifying"))
+          : null,
       );
     }),
   );
@@ -210,6 +215,11 @@ function IssueCard({ issue, selected, engine, api, t }) {
         issue.title,
       ),
       h("span", { className: `fx-status is-${issue.status}` }, statusLabel(t, issue.status)),
+      issue.verify?.status === "still_present"
+        ? h("span", { className: "fx-verify-badge is-failed" }, t("fx.issues.verifyFailed"))
+        : issue.verify?.status === "uncertain"
+          ? h("span", { className: "fx-verify-badge" }, t("fx.issues.verifyUncertain"))
+          : null,
     ),
     h(
       "div",
@@ -245,6 +255,28 @@ function IssueCard({ issue, selected, engine, api, t }) {
                 h("b", null, t("fx.issues.fixNote")),
                 h("span", null, issue.fix.summary),
                 issue.fix.verification ? h("span", { className: "fx-muted" }, ` · ${issue.fix.verification}`) : null,
+              )
+            : null,
+          issue.verify
+            ? h(
+                "p",
+                { className: issue.verify.status === "still_present" ? "fx-regressed" : "" },
+                h("b", null, t("fx.issues.verify")),
+                h(
+                  "span",
+                  null,
+                  [
+                    issue.verify.status === "confirmed"
+                      ? t("fx.issues.verifyConfirmed")
+                      : issue.verify.status === "still_present"
+                        ? t("fx.issues.verifyFailed")
+                        : t("fx.issues.verifyUncertain"),
+                    issue.verify.summary,
+                    issue.verify.evidence,
+                  ]
+                    .filter(Boolean)
+                    .join(" · "),
+                ),
               )
             : null,
           issue.regression
@@ -288,17 +320,49 @@ function IssuesSection({ snapshot, visible, engine, api, t }) {
   const selected = snapshot.selected;
   // 清理入口同时覆盖已修复与已确认不存在的条目：两者都已定论，不再需要修复。
   const settledCount = counts.fixed + counts.not_found;
-  const toggleFilters = [
+  // 标题与「当前 x / y」共用同一状态口径：全部=非归档总量，其余=该状态总量；
+  // 非法状态值按「全部」处理，与 listVisibleIssues 的归一规则保持一致。
+  const statusFilter = snapshot.statusFilter || "all";
+  const statusScopeCount =
+    statusFilter === "all" || counts[statusFilter] === undefined
+      ? counts.open + counts.fixing + settledCount
+      : counts[statusFilter];
+  const statusFilters = [
+    { key: "all", label: t("fx.issues.filterAll") },
+    { key: ISSUE_STATUS.open, label: t("fx.status.open") },
+    { key: ISSUE_STATUS.fixing, label: t("fx.status.fixing") },
+    { key: ISSUE_STATUS.fixed, label: t("fx.status.fixed") },
+    { key: ISSUE_STATUS.notFound, label: t("fx.status.not_found") },
+    { key: ISSUE_STATUS.archived, label: t("fx.status.archived") },
+  ];
+  const severityFilters = [
     { key: "all", label: t("fx.issues.filterAll") },
     { key: SEVERITY.critical, label: t("fx.issues.filterCritical") },
     { key: SEVERITY.major, label: t("fx.issues.filterMajor") },
+    { key: SEVERITY.minor, label: t("fx.issues.filterMinor") },
   ];
   // 归档项也能勾选（用于批量删除），但「修复选中项」只统计仍可修复的条目：
   // 已修复与已确认不存在都已定论，再次投入修复会在会话失败时覆盖结论。
-  const selectableIds = visible.map((issue) => issue.id);
+  const visibleIds = visible.map((issue) => issue.id);
+  const hasFilter =
+    snapshot.statusFilter !== "all" ||
+    snapshot.severityFilter !== "all" ||
+    Boolean(String(snapshot.searchQuery || "").trim());
   const fixableSelectedCount = snapshot.state.issues.filter(
     (issue) => selected.includes(issue.id) && isFixSelectable(issue),
   ).length;
+  // 复审入口只处理当前勾选或当前可见的条目：按钮计数与实际启动范围共用同一份 id 列表。
+  const verifyScopeIssues = (
+    selected.length
+      ? snapshot.state.issues.filter((issue) => selected.includes(issue.id))
+      : visible
+  ).filter(isVerifySelectable);
+  const verifyScopeIds = verifyScopeIssues.map((issue) => issue.id);
+  const reverifyCount = verifyScopeIssues.length;
+  // 已有历史复审结论时用「重新复审」，首次复审用「复审」。
+  const verifyLabelKey = verifyScopeIssues.some((issue) => Boolean(issue.verify))
+    ? "fx.issues.reverifyCount"
+    : "fx.issues.verifyCount";
   // 清理入口也要覆盖没有当前跟踪会话、但存在历史会话台账的情况。
   const hasSessionLog =
     (snapshot.state.conversationLog || []).length > 0 ||
@@ -314,7 +378,7 @@ function IssuesSection({ snapshot, visible, engine, api, t }) {
         "div",
         { className: "fx-section-title" },
         t("fx.issues.title"),
-        h("span", { className: "fx-count" }, t("fx.issues.count", { count: counts.open + counts.fixing + settledCount })),
+        h("span", { className: "fx-count" }, t("fx.issues.count", { count: statusScopeCount })),
       ),
       h(
         "div",
@@ -329,6 +393,16 @@ function IssuesSection({ snapshot, visible, engine, api, t }) {
           },
           t("fx.issues.startFix", { count: fixableSelectedCount }),
         ),
+        snapshot.pendingAutoFix?.issueIds?.length
+          ? h(
+              "button",
+              {
+                className: "fx-btn small primary",
+                onClick: () => void engine.openPendingAutoFix(),
+              },
+              t("fx.issues.startAutoFix", { count: snapshot.pendingAutoFix.issueIds.length }),
+            )
+          : null,
         h(
           "button",
           {
@@ -338,6 +412,16 @@ function IssuesSection({ snapshot, visible, engine, api, t }) {
           },
           t("fx.issues.deleteSelected", { count: selected.length }),
         ),
+        reverifyCount > 0
+          ? h(
+              "button",
+              {
+                className: "fx-btn small",
+                onClick: () => void engine.openVerifyDialog(verifyScopeIds),
+              },
+              t(verifyLabelKey, { count: reverifyCount }),
+            )
+          : null,
         settledCount > 0 || hasSessionLog
           ? h(
               "button",
@@ -350,7 +434,24 @@ function IssuesSection({ snapshot, visible, engine, api, t }) {
     h(
       "div",
       { className: "fx-filters" },
-      toggleFilters.map((item) =>
+      h("span", { className: "fx-filter-label" }, t("fx.issues.filterStatus")),
+      statusFilters.map((item) =>
+        h(
+          "button",
+          {
+            key: item.key,
+            className: `fx-chip ${snapshot.statusFilter === item.key ? "is-active" : ""}`,
+            onClick: () => engine.setStatusFilter(item.key),
+          },
+          item.label,
+        ),
+      ),
+    ),
+    h(
+      "div",
+      { className: "fx-filters" },
+      h("span", { className: "fx-filter-label" }, t("fx.issues.filterSeverity")),
+      severityFilters.map((item) =>
         h(
           "button",
           {
@@ -361,20 +462,35 @@ function IssuesSection({ snapshot, visible, engine, api, t }) {
           item.label,
         ),
       ),
+      h("input", {
+        className: "fx-search",
+        type: "search",
+        value: snapshot.searchQuery || "",
+        placeholder: t("fx.issues.searchPlaceholder"),
+        "aria-label": t("fx.issues.searchPlaceholder"),
+        onInput: (event) => engine.setSearchQuery(event.target.value),
+      }),
+    ),
+    h(
+      "div",
+      { className: "fx-filters" },
       h(
-        "label",
-        { className: "fx-check" },
-        h("input", {
-          type: "checkbox",
-          checked: snapshot.showArchived,
-          onChange: (event) => engine.setShowArchived(event.target.checked),
-        }),
-        h("span", null, snapshot.showArchived ? t("fx.issues.hideArchived") : t("fx.issues.showArchived")),
+        "button",
+        {
+          className: "fx-link",
+          disabled: visibleIds.length === 0,
+          onClick: () => engine.selectMany(visibleIds),
+        },
+        t("fx.issues.selectAll"),
       ),
       h(
         "button",
-        { className: "fx-link", onClick: () => engine.selectMany(selectableIds) },
-        t("fx.issues.selectAll"),
+        {
+          className: "fx-link",
+          disabled: visibleIds.length === 0,
+          onClick: () => engine.invertSelection(visibleIds),
+        },
+        t("fx.issues.invertSelection"),
       ),
       selected.length > 0
         ? h(
@@ -384,6 +500,16 @@ function IssuesSection({ snapshot, visible, engine, api, t }) {
           )
         : null,
       selected.length > 0 ? h("span", { className: "fx-muted" }, t("fx.issues.selected", { count: selected.length })) : null,
+      hasFilter
+        ? h(
+            "span",
+            { className: "fx-muted" },
+            t("fx.issues.filteredCount", {
+              visible: visible.length,
+              total: statusScopeCount,
+            }),
+          )
+        : null,
     ),
     h(
       "div",
@@ -427,7 +553,15 @@ function ActivityCard({ activity, engine, api, t }) {
       "div",
       { className: "fx-activity-head" },
       h("span", { className: `fx-pulse ${running ? "is-running" : ""}` }, running ? null : iconEl(api, "Check", 12)),
-      h("b", null, activity.kind === "review" ? t("fx.activity.review") : t("fx.activity.fix")),
+      h(
+        "b",
+        null,
+        activity.kind === "review"
+          ? t("fx.activity.review")
+          : activity.kind === "verify"
+            ? t("fx.activity.verify")
+            : t("fx.activity.fix"),
+      ),
       elapsed ? h("span", { className: "fx-muted" }, t("fx.activity.elapsed", { time: elapsed })) : null,
       activity.batchTotal > 1
         ? h(

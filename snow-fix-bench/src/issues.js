@@ -1,7 +1,7 @@
 // issue 数据模型：合并、去重、状态流转与筛选排序。
 import { ISSUE_STATUS, SEVERITY, STORE_VERSION, SESSION_MISSING_POLLS, FALLBACK } from "./constants.js";
 import { nowMs, uid, normalizeText } from "./util.js";
-import { normalizeSeverity, severityRank, statusRank } from "./parse.js";
+import { normalizeSeverity, normalizeSeverityScope, severityRank, statusRank } from "./parse.js";
 // ==================== issue 合并与状态 ====================
 
 // 从 issue 位置中提取归一化后的文件路径集合：去掉行号 / 行范围，
@@ -51,6 +51,8 @@ function createIssue(row, meta) {
       scopeLabel: meta?.scopeLabel || "",
     },
     fix: null,
+    // 修复后的只读复审结论：confirmed / still_present / uncertain。
+    verify: null,
     // 进入修复前的状态与取证快照：修复失败或被关闭时按此回滚。
     fixingFrom: null,
     // 最近一次重开的来源：fixed = 修复后回归，not_found = 上次取证结论被推翻。
@@ -96,6 +98,8 @@ function mergeReviewIssues(existing, incoming, meta) {
       // 重开来源决定界面文案：已修复项再次命中是「回归」，已确认不存在的条目再次命中
       // 说明上次取证结论被推翻。保留 fix 供追溯，regression 只统计重开次数。
       current.reopenedFrom = current.status;
+      // 回归意味着旧的复审结论已经失效，清空等待下一轮复审。
+      current.verify = null;
       current.regression = {
         count: Number(current.regression?.count || 0) + 1,
         detectedAt: nowMs(),
@@ -109,6 +113,7 @@ function mergeReviewIssues(existing, incoming, meta) {
       current.status = ISSUE_STATUS.open;
       current.archivedFrom = null;
       current.fix = null;
+      current.verify = null;
       // 归档重开是新的审查命中，不是「修复后回归」，旧回归记录必须一并清除。
       current.regression = null;
       current.reopenedFrom = null;
@@ -146,6 +151,8 @@ function applyFixResults(issues, results, meta) {
       verification: result.verification,
       at: nowMs(),
     };
+    // 新一轮修复会重新进入复审流程，旧的复审结论不再适用。
+    issue.verify = null;
     // 本轮已有结论，进入修复前的快照不再需要，避免之后误回滚。
     issue.fixingFrom = null;
     issue.updatedAt = nowMs();
@@ -166,6 +173,97 @@ function applyFixResults(issues, results, meta) {
   return { issues: list, fixed, notFound, blocked, matched, ignored };
 }
 
+// 复审只读结论：只允许三种状态；旧数据或非法值不保留。
+const VERIFY_STATUSES = new Set(["confirmed", "still_present", "uncertain"]);
+
+function normalizeIssueVerify(raw) {
+  if (!raw || typeof raw !== "object" || !VERIFY_STATUSES.has(raw.status)) return null;
+  return {
+    status: raw.status,
+    summary: String(raw.summary || ""),
+    evidence: String(raw.evidence || ""),
+    conversationId: String(raw.conversationId || ""),
+    at: Number(raw.at) || 0,
+  };
+}
+
+// 回写复审结论：
+// - 只回写当前仍为 fixed 的条目：复审期间被新审查重开或被新修复接管的条目，
+//   其结论已经过期，不能再写入 verify。
+// - confirmed：保持已修复，把证据写入 verify。
+// - still_present：记录结论后退回待修复。
+// - uncertain：保持修复结论，标记待确认，不参与自动清理。
+// 未返回结论的条目同样只在仍为 fixed 时标记 uncertain；
+// 已经确认过的条目不能被“复审遗漏”降级，保留原结论与证据。
+function applyVerifyResults(issues, results, meta) {
+  const list = Array.isArray(issues) ? issues.slice() : [];
+  const byId = new Map(list.map((issue) => [issue.id, issue]));
+  const allowed = Array.isArray(meta?.issueIds) ? new Set(meta.issueIds.map(String)) : null;
+  // 复审只对被复审的那一轮修复有效：新一轮修复会改写 issue.fix.conversationId，
+  // 旧复审期间产生的结果不能回写。旧数据没有轮次信息时保持原行为。
+  const fixRounds = new Set(
+    (Array.isArray(meta?.fixSessionIds) ? meta.fixSessionIds : [])
+      .map((conversationId) => String(conversationId || ""))
+      .filter(Boolean),
+  );
+  const belongsToFixRound = (issue) =>
+    !fixRounds.size || fixRounds.has(String(issue?.fix?.conversationId || ""));
+  const seen = new Set();
+  let confirmed = 0;
+  let stillPresent = 0;
+  let uncertain = 0;
+  let applied = 0;
+  const record = (issue, status, row) => {
+    issue.verify = {
+      status,
+      summary: row?.summary || "",
+      evidence: row?.evidence || "",
+      conversationId: meta?.conversationId || "",
+      at: nowMs(),
+    };
+    issue.updatedAt = nowMs();
+  };
+  for (const result of Array.isArray(results) ? results : []) {
+    const issue = byId.get(String(result?.issueId || ""));
+    if (!issue) continue;
+    if (allowed && !allowed.has(issue.id)) continue;
+    if (!belongsToFixRound(issue)) continue;
+    // 复审运行期间 issue 可能被新审查重开或被新修复接管：迟到的结论不再写入。
+    if (issue.status !== ISSUE_STATUS.fixed) continue;
+    // 同一 issueId 的重复行只保留第一条，避免重复计数或后写覆盖。
+    if (seen.has(issue.id)) continue;
+    seen.add(issue.id);
+    const status = VERIFY_STATUSES.has(result.status) ? result.status : "uncertain";
+    record(issue, status, result);
+    applied += 1;
+    if (status === "confirmed") {
+      confirmed += 1;
+    } else if (status === "still_present") {
+      stillPresent += 1;
+      // 用户已归档或删除的条目保持现状，避免复审覆盖用户操作。
+      if (issue.status === ISSUE_STATUS.fixed) issue.status = ISSUE_STATUS.open;
+    } else {
+      uncertain += 1;
+    }
+  }
+  if (allowed) {
+    for (const id of allowed) {
+      if (seen.has(id)) continue;
+      const issue = byId.get(id);
+      // 已被审查重开、已归档或被新修复接管的条目不再补写待确认。
+      if (!issue || issue.status !== ISSUE_STATUS.fixed) continue;
+      // 已确认条目来自上一轮人工复核：本次模型漏答不能把 confirmed 降级为 uncertain。
+      if (issue.verify?.status === "confirmed") continue;
+      // 新一轮修复产生的已修复结果不能因旧复审缺少结论而被标记待确认。
+      if (!belongsToFixRound(issue)) continue;
+      record(issue, "uncertain", null);
+      uncertain += 1;
+      applied += 1;
+    }
+  }
+  return { issues: list, confirmed, stillPresent, uncertain, applied };
+}
+
 // 已定论（已修复 / 已确认不存在）与归档条目不再进入修复：它们没有待修复的问题，
 // 投入修复只会在会话失败时覆盖已有结论。fixing 仍然放行，交给 hasFixConflict
 // 给出「正在修复中」的提示，而不是静默丢弃。
@@ -177,6 +275,11 @@ const FIX_BLOCKED_STATUSES = new Set([
 
 function isFixSelectable(issue) {
   return Boolean(issue) && !FIX_BLOCKED_STATUSES.has(issue.status);
+}
+
+// 已修复但复审未确认的条目允许重新复审；confirmed 已有定论，不再重复消耗会话。
+function isVerifySelectable(issue) {
+  return Boolean(issue) && issue.status === ISSUE_STATUS.fixed && issue.verify?.status !== "confirmed";
 }
 
 function markIssuesFixing(issues, ids, conversationId) {
@@ -196,15 +299,17 @@ function markIssuesFixing(issues, ids, conversationId) {
       ...issue,
       status: ISSUE_STATUS.fixing,
       fixingFrom,
-      fix: {
-        conversationId,
-        result: "",
-        summary: "",
-        files: [],
-        verification: "",
-        at: nowMs(),
-      },
-      updatedAt: nowMs(),
+    fix: {
+      conversationId,
+      result: "",
+      summary: "",
+      files: [],
+      verification: "",
+      at: nowMs(),
+    },
+    // 进入新的修复批次后，上一轮复审结论作废。
+    verify: null,
+    updatedAt: nowMs(),
     };
   });
 }
@@ -310,6 +415,31 @@ function planFixBatches(issueIds, batchSize) {
   return batches;
 }
 
+// 复审批次规划：条数或估算字符数任一超限即换批。
+// 单条自身超预算时独占一批，保证不会产生空批或死循环。
+function planVerifyBatches(issues, options = {}) {
+  const list = Array.isArray(issues) ? issues : [];
+  const maxIssues = Math.max(1, Number(options.maxIssues) || Number.MAX_SAFE_INTEGER);
+  const maxChars = Math.max(1, Number(options.maxChars) || Number.MAX_SAFE_INTEGER);
+  const estimate = typeof options.estimate === "function" ? options.estimate : () => 0;
+  const headerChars = Math.max(0, Number(options.headerChars) || 0);
+  const batches = [];
+  let current = [];
+  let chars = headerChars;
+  for (const issue of list) {
+    const cost = Math.max(0, Number(estimate(issue)) || 0);
+    if (current.length && (current.length >= maxIssues || chars + cost > maxChars)) {
+      batches.push(current);
+      current = [];
+      chars = headerChars;
+    }
+    current.push(issue);
+    chars += cost;
+  }
+  if (current.length) batches.push(current);
+  return batches;
+}
+
 // 从剩余队列取下一批：跳过已删除或已归档的 issue，其余按顺序填充到上限。
 function takeNextFixBatch(queue, issues, batchSize) {
   const list = Array.isArray(issues) ? issues : [];
@@ -355,6 +485,7 @@ function createIssueState(project) {
     sessions: {
       review: null,
       fix: null,
+      verify: null,
     },
     // 会话台账：本插件创建过的全部会话。sessions 只保留当前一轮，
     // 分批修复的中间批次与历史审查会话只有台账能覆盖，清理时按类型统一处理。
@@ -399,8 +530,23 @@ function normalizeSession(raw) {
     sessionIds: Array.isArray(raw.sessionIds)
       ? raw.sessionIds.map(String).filter(Boolean)
       : [String(raw.conversationId)],
+    // 复审会话关联的修复轮次：用于复审结束后触发自动清理，以及重启后恢复清理目标。
+    fixConversationId: String(raw.fixConversationId || ""),
+    fixSessionIds: Array.isArray(raw.fixSessionIds)
+      ? raw.fixSessionIds.map(String).filter(Boolean)
+      : [],
+    fixIssueIds: Array.isArray(raw.fixIssueIds) ? raw.fixIssueIds.map(String).filter(Boolean) : [],
     autoCleanup: Boolean(raw.autoCleanup),
     cleanupAction: raw.cleanupAction === "delete" ? "delete" : "archive",
+    // 审查启动时冻结的严重度范围：完成解析必须使用同一范围，兼容旧会话回退当前设置。
+    issueSeverities:
+      Array.isArray(raw.issueSeverities) && raw.issueSeverities.length
+        ? normalizeSeverityScope(raw.issueSeverities)
+        : null,
+    // 复审批次的累计结论数：分批完成后仍能给出本轮完整统计。
+    confirmedCount: Math.max(0, Number(raw.confirmedCount) || 0),
+    stillPresentCount: Math.max(0, Number(raw.stillPresentCount) || 0),
+    uncertainCount: Math.max(0, Number(raw.uncertainCount) || 0),
     activityDismissed: Boolean(raw.activityDismissed),
     lastError: String(raw.lastError || ""),
   };
@@ -422,7 +568,7 @@ function normalizeConversationEntry(raw) {
   if (!conversationId) return null;
   return {
     conversationId,
-    kind: raw.kind === "fix" ? "fix" : "review",
+    kind: raw.kind === "fix" ? "fix" : raw.kind === "verify" ? "verify" : "review",
     title: String(raw.title || ""),
     createdAt: Number(raw.createdAt) || 0,
   };
@@ -489,7 +635,7 @@ function removeConversationsFromLog(log, ids) {
   return list.filter((entry) => !target.has(entry.conversationId));
 }
 
-const SESSION_KINDS = ["review", "fix"];
+const SESSION_KINDS = ["review", "fix", "verify"];
 
 // 清理分组：区分当前会话与台账中的历史会话。历史条目只有会话 ID，没有独立运行状态，
 // 清理前必须由调用方用宿主 runtime 再核对一次。
@@ -529,6 +675,12 @@ const TERMINAL_SESSION_ERRORS = new Set([
   "session-empty-response",
   "parse-failed",
   "review-parse-failed",
+  // 复审已经返回正文但解析失败：宿主不会再产出新回复，属于可确认结束的终态。
+  "verify-parse-failed",
+  // 复审结果全部属于过期轮次：宿主已返回正文，属于可确认结束的终态。
+  "verify-expired",
+  // 复审批次创建失败：上一批结果已回写，队列保留，宿主没有新的在途会话。
+  "verify-batch-create-failed",
   "batch-create-failed",
 ]);
 
@@ -579,6 +731,7 @@ function normalizeIssue(raw) {
         : null,
     source: raw.source && typeof raw.source === "object" ? raw.source : { conversationId: "", reviewedAt: 0, scopeLabel: "" },
     fix: raw.fix && typeof raw.fix === "object" ? raw.fix : null,
+    verify: normalizeIssueVerify(raw.verify),
     fixingFrom: normalizeFixingFrom(raw.fixingFrom),
     regression:
       raw.regression && typeof raw.regression === "object"
@@ -601,6 +754,7 @@ function normalizeIssueState(raw, project) {
   const sessions = {
     review: normalizeSession(raw.sessions?.review),
     fix: normalizeSession(raw.sessions?.fix),
+    verify: normalizeSession(raw.sessions?.verify),
   };
   // 旧数据没有台账：从当前会话的 conversationId / sessionIds 补齐，
   // 保证分批修复的历史批次也能出现在清理列表里。
@@ -644,13 +798,49 @@ function currentStep(snapshot) {
   return "cleanup";
 }
 
+const STATUS_FILTER_VALUES = new Set(["all", ...Object.values(ISSUE_STATUS)]);
+
+function normalizeStatusFilter(value) {
+  const text = String(value || "");
+  return STATUS_FILTER_VALUES.has(text) ? text : "all";
+}
+
+function normalizeSeverityFilter(value) {
+  return value === SEVERITY.critical || value === SEVERITY.major || value === SEVERITY.minor
+    ? value
+    : "all";
+}
+
+// 关键词只匹配标题、位置与影响文本；多个词按 AND 匹配，空查询不参与过滤。
+function matchesSearchQuery(issue, tokens) {
+  if (!tokens.length) return true;
+  const haystack = [
+    normalizeText(issue?.title),
+    normalizeText(issue?.location),
+    normalizeText(issue?.impact),
+  ]
+    .join("\n")
+    .toLowerCase();
+  return tokens.every((token) => haystack.includes(token));
+}
+
 function listVisibleIssues(issues, options) {
+  const hasStatusFilter = typeof options?.statusFilter === "string";
+  const statusFilter = hasStatusFilter ? normalizeStatusFilter(options.statusFilter) : "";
+  // 旧调用方只传 showArchived 时保留原语义；新调用统一使用 statusFilter。
   const showArchived = Boolean(options?.showArchived);
-  const filter = options?.severityFilter || "all";
+  const filter = normalizeSeverityFilter(options?.severityFilter);
+  const queryTokens = normalizeText(options?.searchQuery).toLowerCase().split(" ").filter(Boolean);
   let list = Array.isArray(issues) ? issues.slice() : [];
-  if (!showArchived) list = list.filter((issue) => issue.status !== ISSUE_STATUS.archived);
-  if (filter === SEVERITY.critical) list = list.filter((issue) => issue.severity === SEVERITY.critical);
-  if (filter === SEVERITY.major) list = list.filter((issue) => issue.severity === SEVERITY.major);
+  if (statusFilter) {
+    // 「全部」保持原列表语义：不显示已归档；查看归档需显式选择「已归档」。
+    if (statusFilter === "all") list = list.filter((issue) => issue.status !== ISSUE_STATUS.archived);
+    else list = list.filter((issue) => issue.status === statusFilter);
+  } else if (!showArchived) {
+    list = list.filter((issue) => issue.status !== ISSUE_STATUS.archived);
+  }
+  if (filter !== "all") list = list.filter((issue) => issue.severity === filter);
+  if (queryTokens.length) list = list.filter((issue) => matchesSearchQuery(issue, queryTokens));
   return sortIssues(list);
 }
 
@@ -660,7 +850,9 @@ export {
   createIssue,
   mergeReviewIssues,
   applyFixResults,
+  applyVerifyResults,
   isFixSelectable,
+  isVerifySelectable,
   markIssuesFixing,
   restoreFixingIssues,
   restoreFixingIssuesForConversations,
@@ -675,6 +867,7 @@ export {
   findConversationInDomain,
   shouldDeclareSessionMissing,
   planFixBatches,
+  planVerifyBatches,
   takeNextFixBatch,
   sortIssues,
   statusCounts,
@@ -684,4 +877,6 @@ export {
   isSessionPossiblyRunning,
   currentStep,
   listVisibleIssues,
+  normalizeStatusFilter,
+  normalizeSeverityFilter,
 };

@@ -129,7 +129,7 @@ function FixBenchView({ api, onClose }) {
           : null,
       ),
     ),
-    h(Stepper, { current: step, t, api }),
+            h(Stepper, { current: step, snapshot, t, api }),
     h(
       "div",
       { className: "fx-body" },

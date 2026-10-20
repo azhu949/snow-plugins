@@ -341,22 +341,449 @@ test("并行上限默认值、区间收敛与持久化", async () => {
   const engine = resolveEngine(api);
   await engine.mount();
   assert.equal(engine.getSnapshot().settings.parallelLimit, 3);
+  assert.equal(engine.getSnapshot().settings.autoFixAfterReview, true);
+  assert.equal(engine.getSnapshot().settings.autoFixOptIn, false);
 
   const saved = await engine.setSettings({ parallelLimit: 99 });
   assert.equal(saved.ok, true);
   assert.equal(saved.settings.parallelLimit, 10);
   assert.equal(engine.getSnapshot().settings.parallelLimit, 10);
   assert.deepEqual(state.values.get("fixbench:v2:settings"), {
-    schemaVersion: 2,
+    schemaVersion: 3,
     parallelLimit: 10,
-    autoFixAfterReview: false,
+    autoFixAfterReview: true,
+    autoFixOptIn: false,
     autoCleanupAfterFix: false,
     autoCleanupAction: "archive",
+    verifyAfterFix: false,
+    issueSeverities: ["严重", "一般"],
   });
 
   // 重新加载后从存储恢复，而不是回退默认值。
   await engine.reload();
   assert.equal(engine.getSnapshot().settings.parallelLimit, 10);
+  engine.unmount();
+});
+
+test("设置读取失败时自动修复改为等待确认", async () => {
+  const stored = {
+    version: 2,
+    projectId: "a",
+    issues: [],
+    sessions: {
+      review: {
+        conversationId: "conv-review",
+        startedAt: 1,
+        status: "error",
+        lastError: "timeout",
+        issueIds: [],
+      },
+      fix: null,
+    },
+  };
+  const { api, state } = createMockApi({
+    stored,
+    runtime: { conversation: null, streamingSessions: [] },
+  });
+  // 仅设置读取失败，项目状态仍可正常加载。
+  const originalGetJson = api.storage.getJson;
+  api.storage.getJson = async (key) => {
+    if (key === "fixbench:v2:settings") throw new Error("settings unavailable");
+    return originalGetJson(key);
+  };
+  state.messages = [
+    {
+      role: "assistant",
+      content:
+        '```snow-issues\n[{"severity":"一般","title":"读取失败","location":"fallback.ts:1"}]\n```',
+    },
+  ];
+  const engine = resolveEngine(api);
+  await engine.mount();
+  await engine.retryParse();
+
+  const snapshot = engine.getSnapshot();
+  assert.equal(snapshot.settingsLoadFailed, true);
+  assert.equal(snapshot.settings.autoFixAfterReview, true);
+  assert.equal(snapshot.state.sessions.fix, null);
+  assert.equal(state.createCalls, 0);
+  assert.equal(snapshot.dialog.type, "fix");
+  assert.deepEqual(snapshot.dialog.issueIds, [snapshot.state.issues[0].id]);
+  assert.match(snapshot.dialog.notice, /等待确认/);
+
+  await engine.confirmDialog();
+  await waitFor(() => engine.getSnapshot().state.sessions.fix?.status === "running");
+  assert.equal(state.createCalls, 1);
+  // 设置仍读不到时，opt-in 只保留在内存，不得把默认设置写回覆盖用户配置。
+  assert.equal(state.values.has("fixbench:v2:settings"), false);
+  assert.equal(engine.getSnapshot().settingsLoadFailed, true);
+  engine.unmount();
+});
+
+test("审查结论全部落在范围外时给出独立提示", async () => {
+  const stored = {
+    version: 2,
+    projectId: "a",
+    issues: [],
+    sessions: {
+      review: {
+        conversationId: "conv-review",
+        startedAt: 1,
+        status: "error",
+        lastError: "timeout",
+        issueIds: [],
+      },
+      fix: null,
+    },
+  };
+  const { api } = createMockApi({
+    stored,
+    runtime: { conversation: null, streamingSessions: [] },
+    messages: [
+      {
+        role: "assistant",
+        content:
+          '```snow-issues\n[{"severity":"严重","title":"范围外","location":"a.ts:1"}]\n```',
+      },
+    ],
+  });
+  const engine = resolveEngine(api);
+  await engine.mount();
+  await engine.setSettings({ issueSeverities: ["建议"] });
+  await engine.retryParse();
+
+  const snapshot = engine.getSnapshot();
+  assert.equal(snapshot.state.issues.length, 0);
+  assert.equal(snapshot.state.sessions.review.status, "done");
+  assert.match(snapshot.toast.text, /均不在本次审查使用的修复范围内/);
+  engine.unmount();
+});
+
+test("设置读取失败后重试成功时以存储值为基底合并", async () => {
+  const storedSettings = {
+    schemaVersion: 3,
+    parallelLimit: 5,
+    autoFixAfterReview: false,
+    autoFixOptIn: false,
+    autoCleanupAfterFix: true,
+    autoCleanupAction: "delete",
+    verifyAfterFix: true,
+    issueSeverities: ["建议"],
+  };
+  const stored = {
+    version: 2,
+    projectId: "a",
+    issues: [],
+    sessions: {
+      review: {
+        conversationId: "conv-review",
+        startedAt: 1,
+        status: "error",
+        lastError: "timeout",
+        issueIds: [],
+      },
+      fix: null,
+    },
+  };
+  const { api, state } = createMockApi({
+    stored,
+    runtime: { conversation: null, streamingSessions: [] },
+    messages: [
+      {
+        role: "assistant",
+        content:
+          '```snow-issues\n[{"severity":"一般","title":"读取恢复","location":"a.ts:1"}]\n```',
+      },
+    ],
+  });
+  state.values.set("fixbench:v2:settings", storedSettings);
+  const originalGetJson = api.storage.getJson;
+  let failedOnce = false;
+  api.storage.getJson = async (key) => {
+    if (key === "fixbench:v2:settings" && !failedOnce) {
+      failedOnce = true;
+      throw new Error("settings unavailable");
+    }
+    return originalGetJson(key);
+  };
+  const engine = resolveEngine(api);
+  await engine.mount();
+  assert.equal(engine.getSnapshot().settingsLoadFailed, true);
+  await engine.retryParse();
+  assert.equal(engine.getSnapshot().dialog.type, "fix");
+  await engine.confirmDialog();
+  await waitFor(() => engine.getSnapshot().state.sessions.fix?.status === "running");
+
+  const saved = state.values.get("fixbench:v2:settings");
+  assert.equal(saved.parallelLimit, 5);
+  assert.deepEqual(saved.issueSeverities, ["建议"]);
+  assert.equal(saved.autoFixAfterReview, false);
+  assert.equal(saved.autoCleanupAfterFix, true);
+  assert.equal(saved.autoCleanupAction, "delete");
+  assert.equal(saved.verifyAfterFix, true);
+  assert.equal(saved.autoFixOptIn, true);
+  assert.equal(engine.getSnapshot().settingsLoadFailed, false);
+  engine.unmount();
+});
+
+// 三条共用：设置读取失败一次后恢复，弹窗打开时看到的是默认值。
+function createSettingsReadFailureApi(storedSettings) {
+  const { api, state } = createMockApi();
+  state.values.set("fixbench:v2:settings", storedSettings);
+  const originalGetJson = api.storage.getJson;
+  let failedOnce = false;
+  api.storage.getJson = async (key) => {
+    if (key === "fixbench:v2:settings" && !failedOnce) {
+      failedOnce = true;
+      throw new Error("settings unavailable");
+    }
+    return originalGetJson(key);
+  };
+  return { api, state };
+}
+
+const STORED_SETTINGS = {
+  schemaVersion: 3,
+  parallelLimit: 5,
+  autoFixAfterReview: false,
+  autoFixOptIn: false,
+  autoCleanupAfterFix: true,
+  autoCleanupAction: "delete",
+  verifyAfterFix: true,
+  issueSeverities: ["建议"],
+};
+
+test("设置读取失败时弹窗保存只写入改动字段，不覆盖存储中的原有配置", async () => {
+  const { api, state } = createSettingsReadFailureApi(STORED_SETTINGS);
+  const engine = resolveEngine(api);
+  await engine.mount();
+  assert.equal(engine.getSnapshot().settingsLoadFailed, true);
+
+  // 读取失败时弹窗展示默认值，并带上读取失败标记与基线快照。
+  engine.openSettingsDialog();
+  const opened = engine.getSnapshot().dialog;
+  assert.equal(opened.type, "settings");
+  assert.equal(opened.loadFailed, true);
+  assert.equal(opened.parallelLimit, 3);
+  assert.deepEqual(opened.issueSeverities, ["严重", "一般"]);
+
+  // 用户只改并行上限：保存只写入该项，其余配置保持存储中的原值。
+  engine.updateDialog({ parallelLimit: 7 });
+  await engine.confirmDialog();
+
+  const saved = state.values.get("fixbench:v2:settings");
+  assert.equal(saved.parallelLimit, 7);
+  assert.equal(saved.autoFixAfterReview, false);
+  assert.equal(saved.autoFixOptIn, false);
+  assert.equal(saved.autoCleanupAfterFix, true);
+  assert.equal(saved.autoCleanupAction, "delete");
+  assert.equal(saved.verifyAfterFix, true);
+  assert.deepEqual(saved.issueSeverities, ["建议"]);
+  assert.equal(engine.getSnapshot().settingsLoadFailed, false);
+  assert.equal(engine.getSnapshot().dialog, null);
+  engine.unmount();
+});
+
+test("设置弹窗打开后配置被成功重读时，未改动字段不被弹窗默认值覆盖", async () => {
+  const { api, state } = createSettingsReadFailureApi(STORED_SETTINGS);
+  const engine = resolveEngine(api);
+  await engine.mount();
+  engine.openSettingsDialog();
+  assert.equal(engine.getSnapshot().dialog.loadFailed, true);
+
+  // 弹窗打开后设置被成功重读（例如自动修复确认写入 opt-in）：内存回到存储值，
+  // 弹窗仍显示默认值；此时保存不得把未改动字段的默认值写回。
+  await engine.setSettings({ autoFixOptIn: true });
+  assert.equal(engine.getSnapshot().settingsLoadFailed, false);
+
+  engine.updateDialog({ parallelLimit: 7 });
+  await engine.confirmDialog();
+
+  const saved = state.values.get("fixbench:v2:settings");
+  assert.equal(saved.parallelLimit, 7);
+  assert.equal(saved.autoFixAfterReview, false);
+  assert.equal(saved.autoCleanupAfterFix, true);
+  assert.equal(saved.autoCleanupAction, "delete");
+  assert.equal(saved.verifyAfterFix, true);
+  assert.deepEqual(saved.issueSeverities, ["建议"]);
+  engine.unmount();
+});
+
+test("设置读取失败且重读仍失败时不落盘，改动只在当前会话生效", async () => {
+  const { api, state } = createMockApi();
+  const originalGetJson = api.storage.getJson;
+  api.storage.getJson = async (key) => {
+    if (key === "fixbench:v2:settings") throw new Error("settings unavailable");
+    return originalGetJson(key);
+  };
+  const engine = resolveEngine(api);
+  await engine.mount();
+
+  engine.openSettingsDialog();
+  engine.updateDialog({ verifyAfterFix: true });
+  await engine.confirmDialog();
+
+  const snapshot = engine.getSnapshot();
+  assert.equal(state.values.has("fixbench:v2:settings"), false);
+  assert.equal(snapshot.settingsLoadFailed, true);
+  assert.equal(snapshot.dialog.type, "settings");
+  assert.match(snapshot.dialog.error, /当前会话/);
+  // 内存中只有用户改动过的字段变化，其余保持弹窗打开时的默认值。
+  assert.equal(snapshot.settings.verifyAfterFix, true);
+  assert.equal(snapshot.settings.parallelLimit, 3);
+  engine.unmount();
+});
+
+test("设置弹窗没有改动时不写盘并给出提示", async () => {
+  const { api, state } = createMockApi();
+  const engine = resolveEngine(api);
+  await engine.mount();
+
+  engine.openSettingsDialog();
+  await engine.confirmDialog();
+
+  assert.equal(state.values.has("fixbench:v2:settings"), false);
+  assert.equal(engine.getSnapshot().dialog, null);
+  assert.match(engine.getSnapshot().toast.text, /无需保存/);
+  engine.unmount();
+});
+
+test("审查完成时用户正在使用的弹窗不被自动修复确认框覆盖", async () => {
+  const stored = {
+    version: 2,
+    projectId: "a",
+    issues: [],
+    sessions: {
+      review: {
+        conversationId: "conv-review",
+        startedAt: 1,
+        status: "error",
+        lastError: "timeout",
+        issueIds: [],
+      },
+      fix: null,
+    },
+  };
+  const { api, state } = createMockApi({
+    stored,
+    runtime: { conversation: null, streamingSessions: [] },
+    messages: [
+      {
+        role: "assistant",
+        content:
+          '```snow-issues\n[{"severity":"一般","title":"新问题","location":"a.ts:1"}]\n```',
+      },
+    ],
+  });
+  const engine = resolveEngine(api);
+  await engine.mount();
+  engine.openSettingsDialog();
+  engine.updateDialog({ parallelLimit: 7 });
+  await engine.retryParse();
+
+  const snapshot = engine.getSnapshot();
+  assert.equal(snapshot.dialog.type, "settings");
+  assert.equal(snapshot.dialog.parallelLimit, 7);
+  assert.equal(snapshot.pendingAutoFix.issueIds.length, 1);
+  assert.equal(state.createCalls, 0);
+  assert.equal(snapshot.state.sessions.fix, null);
+
+  // 用户关闭设置弹窗后，从 issue 列表入口重新打开自动修复确认框。
+  engine.closeDialog();
+  engine.openPendingAutoFix();
+  const reopened = engine.getSnapshot();
+  assert.equal(reopened.dialog.type, "fix");
+  assert.equal(reopened.dialog.autoFixOptIn, true);
+  assert.equal(reopened.pendingAutoFix, null);
+
+  await engine.confirmDialog();
+  await waitFor(() => engine.getSnapshot().state.sessions.fix?.status === "running");
+  assert.equal(state.createCalls, 1);
+  engine.unmount();
+});
+
+test("旧存储显式关闭自动修复时升级后仍保持关闭", async () => {
+  const { api, state } = createMockApi();
+  state.values.set("fixbench:v2:settings", { schemaVersion: 2, autoFixAfterReview: false });
+  const engine = resolveEngine(api);
+  await engine.mount();
+  assert.equal(engine.getSnapshot().settings.autoFixAfterReview, false);
+
+  // 用户只改其它设置时，也不能把升级后的默认值写回并覆盖原选择。
+  const saved = await engine.setSettings({ parallelLimit: 4 });
+  assert.equal(saved.ok, true);
+  assert.equal(saved.settings.autoFixAfterReview, false);
+  assert.equal(state.values.get("fixbench:v2:settings").autoFixAfterReview, false);
+  engine.unmount();
+});
+
+test("无设置记录或旧记录缺字段时默认开启但需先确认", async () => {
+  const { api, state } = createMockApi();
+  const engine = resolveEngine(api);
+  await engine.mount();
+  assert.equal(engine.getSnapshot().settings.autoFixAfterReview, true);
+  assert.equal(engine.getSnapshot().settings.autoFixOptIn, false);
+  // 首次挂载只读，不把默认值写入存储。
+  assert.equal(state.values.has("fixbench:v2:settings"), false);
+
+  // 旧记录缺少字段：保存其它设置也不会被当作已确认。
+  state.values.set("fixbench:v2:settings", { schemaVersion: 2, parallelLimit: 5 });
+  await engine.reload();
+  assert.equal(engine.getSnapshot().settings.autoFixAfterReview, true);
+  assert.equal(engine.getSnapshot().settings.autoFixOptIn, false);
+  const saved = await engine.setSettings({ parallelLimit: 4 });
+  assert.equal(saved.ok, true);
+  assert.equal(saved.settings.autoFixOptIn, false);
+  assert.equal(state.values.get("fixbench:v2:settings").autoFixOptIn, false);
+
+  // 旧记录里显式开启过自动修复：视为已确认。
+  state.values.set("fixbench:v2:settings", { schemaVersion: 2, autoFixAfterReview: true });
+  await engine.reload();
+  assert.equal(engine.getSnapshot().settings.autoFixOptIn, true);
+  engine.unmount();
+});
+
+test("首次自动修复先等待确认，确认后记住 opt-in", async () => {
+  const stored = {
+    version: 2,
+    projectId: "a",
+    issues: [],
+    sessions: {
+      review: {
+        conversationId: "conv-review",
+        startedAt: 1,
+        status: "error",
+        lastError: "timeout",
+        issueIds: [],
+      },
+      fix: null,
+    },
+  };
+  const { api, state } = createMockApi({
+    stored,
+    runtime: { conversation: null, streamingSessions: [] },
+  });
+  state.messages = [
+    {
+      role: "assistant",
+      content: '```snow-issues\n[{"severity":"一般","title":"新问题","location":"new.ts:1"}]\n```',
+    },
+  ];
+  const engine = resolveEngine(api);
+  await engine.mount();
+  await engine.retryParse();
+
+  const snapshot = engine.getSnapshot();
+  assert.equal(snapshot.state.sessions.fix, null);
+  assert.equal(state.createCalls, 0);
+  assert.equal(snapshot.dialog.type, "fix");
+  assert.equal(snapshot.dialog.autoFixOptIn, true);
+  assert.match(snapshot.dialog.notice, /等待确认/);
+
+  await engine.confirmDialog();
+  await waitFor(() => engine.getSnapshot().state.sessions.fix?.status === "running");
+  assert.equal(state.createCalls, 1);
+  assert.equal(state.values.get("fixbench:v2:settings").autoFixOptIn, true);
   engine.unmount();
 });
 
@@ -387,6 +814,80 @@ test("deleteSelectedIssues 批量删除选中项并清空选择", async () => {
   assert.deepEqual(engine.getSnapshot().selected, []);
   assert.equal(engine.getSnapshot().dialog, null);
   assert.equal(state.values.get("fixbench:v2:a").issues.length, 1);
+  engine.unmount();
+});
+
+test("状态与关键词筛选变化会清空选择，全选取并集、反选只翻转当前结果", async () => {
+  const stored = {
+    version: 2,
+    projectId: "a",
+    issues: [
+      { id: "i1", severity: "严重", title: "空指针", location: "a.ts:1", impact: "启动崩溃", status: "open" },
+      { id: "i2", severity: "一般", title: "并发写入", location: "b.ts:2", impact: "缓存击穿", status: "fixed" },
+      { id: "i3", severity: "建议", title: "命名", location: "c.ts:3", impact: "可读性", status: "archived" },
+    ],
+    sessions: { review: null, fix: null },
+  };
+  const { api } = createMockApi({ stored });
+  const engine = resolveEngine(api);
+  await engine.mount();
+
+  let snapshot = engine.getSnapshot();
+  assert.equal(snapshot.statusFilter, "all");
+  assert.equal(snapshot.severityFilter, "all");
+  assert.equal(snapshot.searchQuery, "");
+
+  // 筛选条件变化会清空选择，避免对隐藏项执行修复或删除。
+  engine.selectMany(["i2"]);
+  engine.setStatusFilter("archived");
+  snapshot = engine.getSnapshot();
+  assert.equal(snapshot.statusFilter, "archived");
+  assert.deepEqual(snapshot.selected, []);
+  engine.setStatusFilter("bogus");
+  assert.equal(engine.getSnapshot().statusFilter, "all");
+
+  engine.selectMany(["i1"]);
+  engine.setSearchQuery("缓存");
+  snapshot = engine.getSnapshot();
+  assert.equal(snapshot.searchQuery, "缓存");
+  assert.deepEqual(snapshot.selected, []);
+
+  // 反选只翻转传入的当前结果，结果之外的已选项保留。
+  engine.selectMany(["i1"]);
+  engine.invertSelection(["i1", "i2"]);
+  assert.deepEqual(engine.getSnapshot().selected, ["i2"]);
+  engine.invertSelection(["i2"]);
+  assert.deepEqual(engine.getSnapshot().selected, []);
+  engine.selectMany(["i1", "i3"]);
+  engine.invertSelection(["i3"]);
+  assert.deepEqual(engine.getSnapshot().selected, ["i1"]);
+
+  // 建议级筛选可用，非法值回退到全部。
+  engine.selectMany(["i1"]);
+  engine.setSeverityFilter("建议");
+  snapshot = engine.getSnapshot();
+  assert.equal(snapshot.severityFilter, "建议");
+  assert.deepEqual(snapshot.selected, []);
+  engine.setSeverityFilter("bogus");
+  assert.equal(engine.getSnapshot().severityFilter, "all");
+
+  // 先恢复到无筛选状态，再验证全选与已有选择取并集。
+  engine.setSearchQuery("");
+  engine.clearSelection();
+  engine.selectMany(["i3"]);
+  engine.selectMany(["i1", "i2"]);
+  assert.deepEqual(engine.getSnapshot().selected, ["i3", "i1", "i2"]);
+  // 空结果不改变选择；清空选择走 clearSelection。
+  engine.selectMany([]);
+  assert.deepEqual(engine.getSnapshot().selected, ["i3", "i1", "i2"]);
+
+  // 重复设置同一筛选值不清空选择，值真正变化时仍然清空。
+  engine.setStatusFilter("all");
+  engine.setSeverityFilter("all");
+  engine.setSearchQuery("");
+  assert.deepEqual(engine.getSnapshot().selected, ["i3", "i1", "i2"]);
+  engine.setStatusFilter("archived");
+  assert.deepEqual(engine.getSnapshot().selected, []);
   engine.unmount();
 });
 
@@ -1200,7 +1701,7 @@ test("审查显式空结果仍标记完成并提示未发现问题", async () =>
   assert.equal(snapshot.state.sessions.review.status, "done");
   assert.equal(snapshot.state.sessions.review.lastError, "");
   assert.equal(snapshot.activity.phase, "done");
-  assert.match(snapshot.toast.text, /未发现「一般」及以上问题/);
+  assert.match(snapshot.toast.text, /未发现纳入修复范围的问题/);
   engine.unmount();
 });
 
@@ -2144,6 +2645,94 @@ test("关闭修复卡片时按快照恢复不存在的结论与取证", async ()
 
 function fixResultText(rows) {
   return "```snow-fix-results\n" + JSON.stringify(rows) + "\n```";
+}
+
+function verifyResultText(rows) {
+  return "```snow-verify-results\n" + JSON.stringify(rows) + "\n```";
+}
+
+// 单批修复已超时、issue 仍停在 fixing：手动重新解析会走到批次收尾。
+function storedFixRun(options = {}) {
+  return {
+    version: 2,
+    projectId: "a",
+    issues: [
+      {
+        id: "i1",
+        severity: "严重",
+        title: "A",
+        location: "a.ts:1",
+        status: "fixing",
+        fix: { conversationId: "conv-fix" },
+      },
+    ],
+    sessions: {
+      review: null,
+      fix: {
+        conversationId: "conv-fix",
+        startedAt: 1,
+        status: "error",
+        lastError: "timeout",
+        issueIds: ["i1"],
+        batchNumber: 1,
+        batchTotal: 1,
+        batchSize: 1,
+        queue: [],
+        allIssueIds: ["i1"],
+        sessionIds: ["conv-fix"],
+        autoCleanup: Boolean(options.autoCleanup),
+        cleanupAction: "archive",
+      },
+    },
+    conversationLog: [{ conversationId: "conv-fix", kind: "fix", title: "修复", createdAt: 1 }],
+  };
+}
+
+// 修复已完成、复审会话超时：手动重新解析直接走复审结果回写。
+function storedVerifyRun() {
+  return {
+    version: 2,
+    projectId: "a",
+    issues: [
+      {
+        id: "i1",
+        severity: "严重",
+        title: "A",
+        location: "a.ts:1",
+        status: "fixed",
+        fix: { conversationId: "conv-fix", result: "fixed", summary: "ok" },
+      },
+    ],
+    sessions: {
+      review: null,
+      fix: {
+        conversationId: "conv-fix",
+        startedAt: 1,
+        status: "done",
+        issueIds: ["i1"],
+        batchNumber: 1,
+        batchTotal: 1,
+        batchSize: 1,
+        queue: [],
+        allIssueIds: ["i1"],
+        sessionIds: ["conv-fix"],
+      },
+      verify: {
+        conversationId: "conv-verify",
+        startedAt: 2,
+        status: "error",
+        lastError: "timeout",
+        issueIds: ["i1"],
+        fixConversationId: "conv-fix",
+        fixSessionIds: ["conv-fix"],
+        fixIssueIds: ["i1"],
+      },
+    },
+    conversationLog: [
+      { conversationId: "conv-fix", kind: "fix", title: "修复", createdAt: 1 },
+      { conversationId: "conv-verify", kind: "verify", title: "复审", createdAt: 2 },
+    ],
+  };
 }
 
 test("修复结果只回写本批次白名单内的 issue", async () => {
@@ -3319,7 +3908,7 @@ test("弹窗内动作失败时保留内联错误", async () => {
   engine.unmount();
 });
 
-test("默认关闭时审查完成不会自动启动修复", async () => {
+test("显式关闭时审查完成不会自动启动修复", async () => {
   const stored = {
     version: 2,
     projectId: "a",
@@ -3348,6 +3937,7 @@ test("默认关闭时审查完成不会自动启动修复", async () => {
   ];
   const engine = resolveEngine(api);
   await engine.mount();
+  await engine.setSettings({ autoFixAfterReview: false });
   await engine.retryParse();
 
   const snapshot = engine.getSnapshot();
@@ -3355,6 +3945,51 @@ test("默认关闭时审查完成不会自动启动修复", async () => {
   assert.equal(snapshot.state.issues[0].status, "open");
   assert.equal(snapshot.state.sessions.fix, null);
   assert.equal(state.createCalls, 0);
+  engine.unmount();
+});
+
+test("审查结果按设置的纳入修复范围入库", async () => {
+  const stored = {
+    version: 2,
+    projectId: "a",
+    issues: [],
+    sessions: {
+      review: {
+        conversationId: "conv-review",
+        startedAt: 1,
+        status: "error",
+        lastError: "timeout",
+        issueIds: [],
+      },
+      fix: null,
+    },
+  };
+  const { api, state } = createMockApi({
+    stored,
+    runtime: { conversation: null, streamingSessions: [] },
+  });
+  state.messages = [
+    {
+      role: "assistant",
+      content:
+        "```snow-issues\n" +
+        JSON.stringify([
+          { severity: "严重", title: "崩溃", location: "src/a.ts:1" },
+          { severity: "建议", title: "命名", location: "src/c.ts:3" },
+        ]) +
+        "\n```",
+    },
+  ];
+  const engine = resolveEngine(api);
+  await engine.mount();
+  await engine.setSettings({ issueSeverities: ["建议"] });
+  await engine.retryParse();
+
+  const snapshot = engine.getSnapshot();
+  assert.deepEqual(
+    snapshot.state.issues.map((issue) => issue.severity),
+    ["建议"],
+  );
   engine.unmount();
 });
 
@@ -3682,5 +4317,820 @@ test("保存窗口内停止跟踪后不会再启动轮询", async () => {
   assert.equal(snapshot.state.sessions.review.status, "detached");
   assert.equal(snapshot.activity.phase, "detached");
   assert.equal(snapshot.state.issues.length, 0);
+  engine.unmount();
+});
+
+test("重开后恢复运行中的复审会话跟踪", async () => {
+  const stored = storedVerifyRun();
+  stored.sessions.verify.status = "running";
+  stored.sessions.verify.lastError = "";
+  const { api } = createMockApi({
+    stored,
+    runtime: {
+      conversation: { conversationId: "conv-verify", isStreaming: true, pendingMessageCount: 0 },
+      streamingSessions: [{ conversationId: "conv-verify", isStreaming: true }],
+    },
+    messages: [{ role: "assistant", content: "正在复核…" }],
+  });
+  const engine = resolveEngine(api);
+  await engine.mount();
+
+  const snapshot = engine.getSnapshot();
+  assert.equal(snapshot.state.sessions.verify.status, "running");
+  // 复审会话必须保留本轮修复的关联，刷新后自动清理才能恢复到正确目标。
+  assert.equal(snapshot.state.sessions.verify.fixConversationId, "conv-fix");
+  assert.deepEqual(snapshot.state.sessions.verify.fixSessionIds, ["conv-fix"]);
+  assert.equal(snapshot.activity.kind, "verify");
+  assert.equal(snapshot.activity.phase, "waiting");
+  engine.unmount();
+});
+
+test("开启复审后修复完成会自动新建只读复审会话并回写结论", async () => {
+  const { api, state } = createMockApi({
+    stored: storedFixRun(),
+    runtime: { conversation: null, streamingSessions: [] },
+    messages: [
+      {
+        role: "assistant",
+        content: fixResultText([{ issueId: "i1", status: "fixed", summary: "ok" }]),
+      },
+      {
+        role: "assistant",
+        content: verifyResultText([
+          { issueId: "i1", status: "confirmed", summary: "复核通过", evidence: "a.ts:1" },
+        ]),
+      },
+    ],
+  });
+  const engine = resolveEngine(api);
+  await engine.mount();
+  await engine.setSettings({ verifyAfterFix: true });
+  await engine.retryParse();
+  await waitFor(() => engine.getSnapshot().state.sessions.verify?.status === "done", 20000);
+
+  const snapshot = engine.getSnapshot();
+  assert.equal(state.createCalls, 1);
+  const created = state.writes.find((item) => item.action === "conversations.create");
+  assert.ok(created);
+  assert.ok(created.params.text.includes("snow-verify-results"));
+  assert.ok(created.params.text.includes("i1"));
+  assert.equal(snapshot.state.sessions.verify.conversationId, "conv-1");
+  assert.equal(snapshot.state.sessions.verify.fixConversationId, "conv-fix");
+  assert.deepEqual(snapshot.state.sessions.verify.fixSessionIds, ["conv-fix"]);
+  assert.deepEqual(snapshot.state.sessions.verify.fixIssueIds, ["i1"]);
+  assert.deepEqual(snapshot.state.sessions.verify.issueIds, ["i1"]);
+  assert.equal(snapshot.state.issues[0].status, "fixed");
+  assert.equal(snapshot.state.issues[0].verify.status, "confirmed");
+  assert.equal(snapshot.state.issues[0].verify.summary, "复核通过");
+  assert.equal(snapshot.state.conversationLog.filter((entry) => entry.kind === "verify").length, 1);
+  assert.equal(snapshot.activity.kind, "verify");
+  assert.equal(snapshot.activity.phase, "done");
+  engine.unmount();
+});
+
+test("关闭复审时修复完成不会创建复审会话", async () => {
+  const { api, state } = createMockApi({
+    stored: storedFixRun(),
+    runtime: { conversation: null, streamingSessions: [] },
+    messages: [
+      {
+        role: "assistant",
+        content: fixResultText([{ issueId: "i1", status: "fixed", summary: "ok" }]),
+      },
+    ],
+  });
+  const engine = resolveEngine(api);
+  await engine.mount();
+  await engine.retryParse();
+
+  const snapshot = engine.getSnapshot();
+  assert.equal(snapshot.state.issues[0].status, "fixed");
+  assert.equal(snapshot.state.sessions.verify, null);
+  assert.equal(state.createCalls, 0);
+  engine.unmount();
+});
+
+test("复审仍存在时退回待修复并保留复审结论", async () => {
+  const { api, state } = createMockApi({
+    stored: storedVerifyRun(),
+    runtime: { conversation: null, streamingSessions: [] },
+    messages: [
+      {
+        role: "assistant",
+        content: verifyResultText([
+          { issueId: "i1", status: "still_present", summary: "仍然复现", evidence: "a.ts:1" },
+        ]),
+      },
+    ],
+  });
+  const engine = resolveEngine(api);
+  await engine.mount();
+  await engine.retryParse();
+
+  const snapshot = engine.getSnapshot();
+  assert.equal(snapshot.state.issues[0].status, "open");
+  assert.equal(snapshot.state.issues[0].verify.status, "still_present");
+  assert.equal(snapshot.state.issues[0].verify.summary, "仍然复现");
+  assert.equal(snapshot.state.sessions.verify.status, "done");
+  assert.equal(snapshot.activity.kind, "verify");
+  assert.equal(snapshot.activity.phase, "done");
+  assert.equal(state.createCalls, 0);
+  engine.unmount();
+});
+
+test("复审结果无法解析时保留已修复状态并标记会话错误", async () => {
+  const { api } = createMockApi({
+    stored: storedVerifyRun(),
+    runtime: { conversation: null, streamingSessions: [] },
+    messages: [{ role: "assistant", content: "复审完成，但没有结构化输出。" }],
+  });
+  const engine = resolveEngine(api);
+  await engine.mount();
+  await engine.retryParse();
+
+  const snapshot = engine.getSnapshot();
+  assert.equal(snapshot.state.issues[0].status, "fixed");
+  assert.equal(snapshot.state.issues[0].verify, null);
+  assert.equal(snapshot.state.sessions.verify.status, "error");
+  assert.equal(snapshot.state.sessions.verify.lastError, "verify-parse-failed");
+  assert.equal(snapshot.activity.phase, "error");
+  assert.match(snapshot.toast.text, /未能从复审结果中解析出结论/);
+  engine.unmount();
+});
+
+test("清理弹窗默认包含复审会话且待确认项不预选", async () => {
+  const stored = {
+    version: 2,
+    projectId: "a",
+    issues: [
+      {
+        id: "i1",
+        severity: "严重",
+        title: "待确认",
+        location: "a.ts:1",
+        status: "fixed",
+        fix: { conversationId: "conv-fix", result: "fixed" },
+        verify: { status: "uncertain", summary: "无法确认" },
+      },
+      {
+        id: "i2",
+        severity: "一般",
+        title: "已确认",
+        location: "b.ts:2",
+        status: "fixed",
+        fix: { conversationId: "conv-fix", result: "fixed" },
+        verify: { status: "confirmed", summary: "通过" },
+      },
+    ],
+    sessions: {
+      review: null,
+      fix: {
+        conversationId: "conv-fix",
+        startedAt: 1,
+        status: "done",
+        issueIds: ["i1", "i2"],
+        batchNumber: 1,
+        batchTotal: 1,
+        batchSize: 1,
+        queue: [],
+        allIssueIds: ["i1", "i2"],
+        sessionIds: ["conv-fix"],
+      },
+      verify: {
+        conversationId: "conv-verify",
+        startedAt: 2,
+        status: "error",
+        lastError: "verify-parse-failed",
+        issueIds: ["i1", "i2"],
+        fixConversationId: "conv-fix",
+        fixSessionIds: ["conv-fix"],
+        fixIssueIds: ["i1", "i2"],
+      },
+    },
+    conversationLog: [
+      { conversationId: "conv-fix", kind: "fix", title: "修复", createdAt: 1 },
+      { conversationId: "conv-verify", kind: "verify", title: "复审", createdAt: 2 },
+    ],
+  };
+  const { api } = createMockApi({ stored, runtime: { conversation: null, streamingSessions: [] } });
+  const engine = resolveEngine(api);
+  await engine.mount();
+  engine.openCleanupDialog();
+
+  const dialog = engine.getSnapshot().dialog;
+  assert.deepEqual(dialog.issueIds, ["i2"]);
+  assert.equal(dialog.sessions.fix, "archive");
+  assert.equal(dialog.sessions.verify, "archive");
+  engine.unmount();
+});
+
+test("复审启动失败时不会自动清理未复核的修复结果", async () => {
+  const { api, state } = createMockApi({
+    stored: storedFixRun({ autoCleanup: true }),
+    runtime: { conversation: null, streamingSessions: [] },
+    messages: [
+      {
+        role: "assistant",
+        content: fixResultText([{ issueId: "i1", status: "fixed", summary: "ok" }]),
+      },
+    ],
+    createResults: [{ ok: false, action: "conversations.create", error: "boom" }],
+  });
+  const engine = resolveEngine(api);
+  await engine.mount();
+  await engine.setSettings({ verifyAfterFix: true });
+  await engine.retryParse();
+
+  const snapshot = engine.getSnapshot();
+  assert.equal(snapshot.state.issues[0].status, "fixed");
+  assert.equal(snapshot.state.sessions.verify, null);
+  assert.equal(snapshot.state.sessions.fix.status, "done");
+  assert.ok(!state.writes.some((item) => item.action === "conversations.archive"));
+  assert.match(snapshot.toast.text, /复审启动失败/);
+  engine.unmount();
+});
+
+test("已有复审运行时不再创建复审并提示本轮未自动清理", async () => {
+  const { api, state } = createMockApi({
+    stored: storedFixRun({ autoCleanup: true }),
+    runtime: { conversation: null, streamingSessions: [] },
+    messages: [
+      {
+        role: "assistant",
+        content: fixResultText([{ issueId: "i1", status: "fixed", summary: "ok" }]),
+      },
+    ],
+  });
+  const engine = resolveEngine(api);
+  await engine.mount();
+  await engine.setSettings({ verifyAfterFix: true });
+  const before = engine.getSnapshot();
+  engine.store.set({
+    state: {
+      ...before.state,
+      sessions: {
+        ...before.state.sessions,
+        verify: {
+          conversationId: "conv-verify-old",
+          startedAt: 2,
+          status: "running",
+          issueIds: ["i1"],
+          fixConversationId: "conv-fix",
+          fixSessionIds: ["conv-fix"],
+          autoCleanup: true,
+        },
+      },
+    },
+  });
+
+  await engine.retryParse();
+
+  const snapshot = engine.getSnapshot();
+  assert.equal(state.createCalls, 0);
+  assert.equal(snapshot.state.sessions.verify.conversationId, "conv-verify-old");
+  assert.equal(snapshot.state.sessions.verify.status, "running");
+  assert.equal(snapshot.state.sessions.fix.status, "done");
+  assert.match(snapshot.toast.text, /已有复审任务正在运行/);
+  assert.ok(!state.writes.some((item) => item.action === "conversations.archive"));
+  engine.unmount();
+});
+
+test("复审待确认的已修复 issue 可以手动重新复审", async () => {
+  const stored = {
+    version: 2,
+    projectId: "a",
+    issues: [
+      {
+        id: "i1",
+        severity: "严重",
+        title: "待确认",
+        location: "a.ts:1",
+        status: "fixed",
+        fix: { conversationId: "conv-fix", result: "fixed" },
+        verify: { status: "uncertain", summary: "无法确认" },
+      },
+    ],
+    sessions: {
+      review: null,
+      fix: {
+        conversationId: "conv-fix",
+        startedAt: 1,
+        status: "done",
+        issueIds: ["i1"],
+        batchNumber: 1,
+        batchTotal: 1,
+        batchSize: 1,
+        queue: [],
+        allIssueIds: ["i1"],
+        sessionIds: ["conv-fix"],
+      },
+      verify: null,
+    },
+    conversationLog: [{ conversationId: "conv-fix", kind: "fix", title: "修复", createdAt: 1 }],
+  };
+  const { api, state } = createMockApi({
+    stored,
+    runtime: { conversation: null, streamingSessions: [] },
+  });
+  const engine = resolveEngine(api);
+  await engine.mount();
+  // 手动复审是显式用户动作，不受 verifyAfterFix 开关限制。
+  assert.equal(engine.getSnapshot().settings.verifyAfterFix, false);
+  await engine.retryVerify(["i1"]);
+
+  const snapshot = engine.getSnapshot();
+  assert.equal(state.createCalls, 1);
+  assert.equal(snapshot.state.sessions.verify.status, "running");
+  assert.deepEqual(snapshot.state.sessions.verify.issueIds, ["i1"]);
+  assert.deepEqual(snapshot.state.sessions.verify.fixSessionIds, ["conv-fix"]);
+  assert.equal(snapshot.state.sessions.verify.autoCleanup, false);
+  assert.equal(snapshot.state.sessions.verify.fixConversationId, "");
+  assert.equal(snapshot.activity.kind, "verify");
+  assert.match(snapshot.toast.text, /已重新发起复审/);
+  engine.unmount();
+});
+
+test("复审结论全部不匹配时不标记完成并保留重解析入口", async () => {
+  const stored = storedVerifyRun();
+  stored.sessions.verify.autoCleanup = true;
+  const { api, state } = createMockApi({
+    stored,
+    runtime: { conversation: null, streamingSessions: [] },
+    messages: [
+      {
+        role: "assistant",
+        content: verifyResultText([{ issueId: "x9", status: "confirmed" }]),
+      },
+    ],
+  });
+  const engine = resolveEngine(api);
+  await engine.mount();
+  await engine.retryParse();
+
+  const snapshot = engine.getSnapshot();
+  assert.equal(snapshot.state.issues[0].status, "fixed");
+  assert.equal(snapshot.state.issues[0].verify, null);
+  assert.equal(snapshot.state.sessions.verify.status, "error");
+  assert.equal(snapshot.state.sessions.verify.lastError, "verify-parse-failed");
+  assert.equal(snapshot.activity.phase, "error");
+  assert.match(snapshot.toast.text, /未能从复审结果中解析出结论/);
+  assert.ok(!state.writes.some((item) => item.action === "conversations.archive"));
+  engine.unmount();
+});
+
+test("复审结果缺少合法状态时按解析失败处理", async () => {
+  const { api } = createMockApi({
+    stored: storedVerifyRun(),
+    runtime: { conversation: null, streamingSessions: [] },
+    messages: [
+      {
+        role: "assistant",
+        content: verifyResultText([{ issueId: "i1" }]),
+      },
+    ],
+  });
+  const engine = resolveEngine(api);
+  await engine.mount();
+  await engine.retryParse();
+
+  const snapshot = engine.getSnapshot();
+  assert.equal(snapshot.state.issues[0].status, "fixed");
+  assert.equal(snapshot.state.issues[0].verify, null);
+  assert.equal(snapshot.state.sessions.verify.status, "error");
+  assert.equal(snapshot.state.sessions.verify.lastError, "verify-parse-failed");
+  engine.unmount();
+});
+
+test("过期复审结论不会回退新一轮修复", async () => {
+  const stored = storedVerifyRun();
+  stored.sessions.verify.autoCleanup = true;
+  stored.issues[0].fix = { conversationId: "conv-fix-2", result: "fixed", summary: "again" };
+  stored.sessions.fix.conversationId = "conv-fix-2";
+  stored.sessions.fix.sessionIds = ["conv-fix-2"];
+  stored.sessions.verify.fixSessionIds = ["conv-fix"];
+  const { api, state } = createMockApi({
+    stored,
+    runtime: { conversation: null, streamingSessions: [] },
+    messages: [
+      {
+        role: "assistant",
+        content: verifyResultText([{ issueId: "i1", status: "still_present", summary: "上一轮结论" }]),
+      },
+    ],
+  });
+  const engine = resolveEngine(api);
+  await engine.mount();
+  await engine.retryParse();
+
+  const snapshot = engine.getSnapshot();
+  assert.equal(snapshot.state.issues[0].status, "fixed");
+  assert.equal(snapshot.state.issues[0].verify, null);
+  // 全部结论属于过期轮次：不能标记完成，也不能提示 0 条成功。
+  assert.equal(snapshot.state.sessions.verify.status, "error");
+  assert.equal(snapshot.state.sessions.verify.lastError, "verify-expired");
+  assert.equal(snapshot.activity.phase, "error");
+  assert.match(snapshot.toast.text, /复审结果已过期/);
+  assert.doesNotMatch(snapshot.toast.text, /复审完成：0 条/);
+  // 过期复审不触发本轮自动清理。
+  assert.ok(
+    !state.writes.some(
+      (item) => item.action === "conversations.archive" || item.action === "conversations.remove",
+    ),
+  );
+  engine.unmount();
+});
+
+test("startReview 冻结本次审查使用的严重度范围", async () => {
+  const { api, state } = createMockApi({
+    gitStatus: { isRepo: true, currentBranch: "main", files: [] },
+  });
+  const engine = resolveEngine(api);
+  await engine.mount();
+  while (engine.getSnapshot().git.loading) await tick();
+  await engine.setSettings({ issueSeverities: ["建议"] });
+  await engine.startReview({ staged: [], unstaged: [], commits: [], note: "" });
+
+  const snapshot = engine.getSnapshot();
+  assert.deepEqual(snapshot.state.sessions.review.issueSeverities, ["建议"]);
+  const persisted = state.values.get("fixbench:v2:a");
+  assert.deepEqual(persisted.sessions.review.issueSeverities, ["建议"]);
+  engine.unmount();
+});
+
+test("审查运行中缩小范围后仍按开始时的范围解析", async () => {
+  const stored = {
+    version: 2,
+    projectId: "a",
+    issues: [],
+    sessions: {
+      review: {
+        conversationId: "conv-review",
+        startedAt: 1,
+        status: "error",
+        lastError: "timeout",
+        issueIds: [],
+        issueSeverities: ["严重", "一般"],
+      },
+      fix: null,
+    },
+  };
+  const { api } = createMockApi({
+    stored,
+    runtime: { conversation: null, streamingSessions: [] },
+    messages: [
+      {
+        role: "assistant",
+        content:
+          '```snow-issues\n[{"severity":"严重","title":"崩溃","location":"a.ts:1"},' +
+          '{"severity":"一般","title":"空指针","location":"b.ts:2"}]\n```',
+      },
+    ],
+  });
+  const engine = resolveEngine(api);
+  await engine.mount();
+  // 运行期间把范围缩小到「建议」：本次结论仍应按开始时的快照入库。
+  await engine.setSettings({ issueSeverities: ["建议"] });
+  await engine.retryParse();
+
+  const snapshot = engine.getSnapshot();
+  assert.deepEqual(snapshot.state.issues.map((issue) => issue.severity).sort(), ["一般", "严重"]);
+  assert.equal(snapshot.state.sessions.review.status, "done");
+  assert.doesNotMatch(snapshot.toast.text, /均不在/);
+  engine.unmount();
+});
+
+test("设置读取失败时会话内关闭自动修复后不再弹确认框", async () => {
+  const stored = {
+    version: 2,
+    projectId: "a",
+    issues: [],
+    sessions: {
+      review: {
+        conversationId: "conv-review",
+        startedAt: 1,
+        status: "error",
+        lastError: "timeout",
+        issueIds: [],
+      },
+      fix: null,
+    },
+  };
+  const { api, state } = createMockApi({
+    stored,
+    runtime: { conversation: null, streamingSessions: [] },
+  });
+  const originalGetJson = api.storage.getJson;
+  api.storage.getJson = async (key) => {
+    if (key === "fixbench:v2:settings") throw new Error("settings unavailable");
+    return originalGetJson(key);
+  };
+  state.messages = [
+    {
+      role: "assistant",
+      content:
+        '```snow-issues\n[{"severity":"一般","title":"新问题","location":"new.ts:1"}]\n```',
+    },
+  ];
+
+  const engine = resolveEngine(api);
+  await engine.mount();
+  assert.equal(engine.getSnapshot().settingsLoadFailed, true);
+
+  engine.openSettingsDialog();
+  engine.updateDialog({ autoFixAfterReview: false });
+  await engine.confirmDialog();
+  let snapshot = engine.getSnapshot();
+  assert.equal(snapshot.settings.autoFixAfterReview, false);
+  assert.equal(snapshot.settingsLoadFailed, true);
+  assert.match(snapshot.dialog.error, /当前会话/);
+  engine.closeDialog();
+
+  await engine.retryParse();
+  snapshot = engine.getSnapshot();
+  assert.equal(snapshot.state.issues.length, 1);
+  assert.equal(snapshot.state.sessions.fix, null);
+  assert.equal(snapshot.dialog, null);
+  assert.equal(snapshot.pendingAutoFix, null);
+  assert.equal(state.createCalls, 0);
+  engine.unmount();
+});
+
+test("自动复审跳过已确认的 issue，遗漏结论不会降级 confirmed", async () => {
+  const stored = {
+    version: 2,
+    projectId: "a",
+    issues: [
+      {
+        id: "i1",
+        severity: "严重",
+        title: "A",
+        location: "a.ts:1",
+        status: "fixed",
+        fix: { conversationId: "conv-fix-1", result: "fixed", summary: "ok" },
+        verify: {
+          status: "confirmed",
+          summary: "人工复核通过",
+          evidence: "a.ts:1",
+          conversationId: "conv-manual",
+          at: 2,
+        },
+      },
+      {
+        id: "i2",
+        severity: "一般",
+        title: "B",
+        location: "b.ts:2",
+        status: "fixing",
+        fix: { conversationId: "conv-fix-2" },
+      },
+    ],
+    sessions: {
+      review: null,
+      fix: {
+        conversationId: "conv-fix-2",
+        startedAt: 1,
+        status: "error",
+        lastError: "timeout",
+        issueIds: ["i2"],
+        batchNumber: 2,
+        batchTotal: 2,
+        batchSize: 1,
+        queue: [],
+        allIssueIds: ["i1", "i2"],
+        sessionIds: ["conv-fix-1", "conv-fix-2"],
+        autoCleanup: false,
+        cleanupAction: "archive",
+      },
+      verify: null,
+    },
+    conversationLog: [
+      { conversationId: "conv-fix-1", kind: "fix", title: "修复1", createdAt: 1 },
+      { conversationId: "conv-fix-2", kind: "fix", title: "修复2", createdAt: 2 },
+    ],
+  };
+  const { api, state } = createMockApi({
+    stored,
+    runtime: { conversation: null, streamingSessions: [] },
+    messages: [
+      {
+        role: "assistant",
+        content: fixResultText([{ issueId: "i2", status: "fixed", summary: "ok" }]),
+      },
+      {
+        role: "assistant",
+        content: verifyResultText([
+          { issueId: "i2", status: "confirmed", summary: "复核通过", evidence: "b.ts:2" },
+        ]),
+      },
+    ],
+  });
+  const engine = resolveEngine(api);
+  await engine.mount();
+  await engine.setSettings({ verifyAfterFix: true });
+  await engine.retryParse();
+  await waitFor(() => engine.getSnapshot().state.sessions.verify?.status === "done", 20000);
+
+  const snapshot = engine.getSnapshot();
+  assert.equal(state.createCalls, 1);
+  const created = state.writes.find((item) => item.action === "conversations.create");
+  assert.ok(created.params.text.includes('"issueId": "i2"'));
+  assert.ok(!created.params.text.includes('"issueId": "i1"'));
+  assert.deepEqual(snapshot.state.sessions.verify.issueIds, ["i2"]);
+  const first = snapshot.state.issues.find((issue) => issue.id === "i1");
+  assert.equal(first.verify.status, "confirmed");
+  assert.equal(first.verify.summary, "人工复核通过");
+  assert.equal(first.verify.conversationId, "conv-manual");
+  engine.unmount();
+});
+
+test("修复运行中启动复审会被拒绝并提示", async () => {
+  const stored = storedVerifyRun();
+  stored.sessions.verify.status = "done";
+  stored.sessions.verify.lastError = "";
+  const { api, state } = createMockApi({
+    stored,
+    runtime: { conversation: null, streamingSessions: [] },
+  });
+  const engine = resolveEngine(api);
+  await engine.mount();
+  const before = engine.getSnapshot();
+  engine.store.set({
+    state: {
+      ...before.state,
+      sessions: {
+        ...before.state.sessions,
+        fix: {
+          conversationId: "conv-fix-running",
+          startedAt: 1,
+          status: "running",
+          issueIds: ["i1"],
+          batchNumber: 1,
+          batchTotal: 1,
+          batchSize: 1,
+          queue: [],
+          allIssueIds: ["i1"],
+          sessionIds: ["conv-fix-running"],
+        },
+      },
+    },
+  });
+
+  await engine.retryVerify(["i1"]);
+
+  const snapshot = engine.getSnapshot();
+  assert.equal(state.createCalls, 0);
+  assert.equal(snapshot.state.sessions.verify.status, "done");
+  assert.match(snapshot.toast.text, /修复会话仍在运行/);
+  engine.unmount();
+});
+
+test("复审运行中启动修复会被拒绝并提示", async () => {
+  const stored = {
+    version: 2,
+    projectId: "a",
+    issues: [
+      {
+        id: "i1",
+        severity: "严重",
+        title: "A",
+        location: "a.ts:1",
+        status: "fixed",
+        fix: { conversationId: "conv-fix", result: "fixed" },
+        verify: { status: "uncertain", summary: "待确认" },
+      },
+      { id: "i2", severity: "一般", title: "B", location: "b.ts:2", status: "open" },
+    ],
+    sessions: {
+      review: null,
+      fix: {
+        conversationId: "conv-fix",
+        startedAt: 1,
+        status: "done",
+        issueIds: ["i1"],
+        batchNumber: 1,
+        batchTotal: 1,
+        batchSize: 1,
+        queue: [],
+        allIssueIds: ["i1"],
+        sessionIds: ["conv-fix"],
+      },
+      verify: null,
+    },
+    conversationLog: [{ conversationId: "conv-fix", kind: "fix", title: "修复", createdAt: 1 }],
+  };
+  const { api, state } = createMockApi({
+    stored,
+    runtime: { conversation: null, streamingSessions: [] },
+  });
+  const engine = resolveEngine(api);
+  await engine.mount();
+  const before = engine.getSnapshot();
+  engine.store.set({
+    state: {
+      ...before.state,
+      sessions: {
+        ...before.state.sessions,
+        verify: {
+          conversationId: "conv-verify-running",
+          startedAt: 2,
+          status: "running",
+          issueIds: ["i1"],
+          fixSessionIds: ["conv-fix"],
+          fixIssueIds: ["i1"],
+        },
+      },
+    },
+  });
+
+  await engine.startFix(["i2"]);
+
+  const snapshot = engine.getSnapshot();
+  assert.equal(state.createCalls, 0);
+  assert.equal(snapshot.state.sessions.fix.status, "done");
+  assert.equal(snapshot.state.issues.find((issue) => issue.id === "i2").status, "open");
+  assert.match(snapshot.toast.text, /复审会话仍在运行/);
+  engine.unmount();
+});
+
+test("复审批次超过上限时自动拆分并在全部完成后收尾", async () => {
+  const total = 21;
+  const issues = Array.from({ length: total }, (_, index) => ({
+    id: `i${index + 1}`,
+    severity: "一般",
+    title: `问题 ${index + 1}`,
+    location: `src/f${index + 1}.ts:1`,
+    status: "fixed",
+    fix: {
+      conversationId: "conv-fix",
+      result: "fixed",
+      summary: "ok",
+      files: [`src/f${index + 1}.ts`],
+      verification: "npm test",
+    },
+  }));
+  const stored = {
+    version: 2,
+    projectId: "a",
+    issues,
+    sessions: {
+      review: null,
+      fix: {
+        conversationId: "conv-fix",
+        startedAt: 1,
+        status: "done",
+        issueIds: ["i1"],
+        batchNumber: 1,
+        batchTotal: 1,
+        batchSize: 1,
+        queue: [],
+        allIssueIds: issues.map((issue) => issue.id),
+        sessionIds: ["conv-fix"],
+      },
+      verify: null,
+    },
+    conversationLog: [{ conversationId: "conv-fix", kind: "fix", title: "修复", createdAt: 1 }],
+  };
+  const { api, state } = createMockApi({
+    stored,
+    runtime: { conversation: null, streamingSessions: [] },
+    messages: [
+      {
+        role: "assistant",
+        content: verifyResultText(
+          issues.map((issue) => ({
+            issueId: issue.id,
+            status: "confirmed",
+            summary: "ok",
+            evidence: "src/x.ts:1",
+          })),
+        ),
+      },
+    ],
+  });
+  const engine = resolveEngine(api);
+  await engine.mount();
+  await engine.retryVerify(issues.map((issue) => issue.id));
+  await waitFor(
+    () => engine.getSnapshot().state.sessions.verify?.status === "done",
+    30000,
+  );
+
+  const snapshot = engine.getSnapshot();
+  assert.equal(state.createCalls, 2);
+  const creates = state.writes.filter((item) => item.action === "conversations.create");
+  assert.match(creates[0].params.title, /第 1\/2 批/);
+  assert.match(creates[1].params.title, /第 2\/2 批/);
+  const firstRows = JSON.parse(creates[0].params.text.split("```json")[1].split("```")[0]);
+  const secondRows = JSON.parse(creates[1].params.text.split("```json")[1].split("```")[0]);
+  assert.equal(firstRows.length, 20);
+  assert.equal(secondRows.length, 1);
+  assert.equal(snapshot.state.sessions.verify.batchNumber, 2);
+  assert.equal(snapshot.state.sessions.verify.batchTotal, 2);
+  assert.deepEqual(snapshot.state.sessions.verify.queue, []);
+  assert.equal(snapshot.state.sessions.verify.confirmedCount, total);
+  assert.equal(snapshot.state.sessions.verify.sessionIds.length, 2);
+  assert.equal(snapshot.state.issues.filter((issue) => issue.verify?.status === "confirmed").length, total);
+  assert.equal(snapshot.state.conversationLog.filter((entry) => entry.kind === "verify").length, 2);
+  assert.equal(snapshot.activity.phase, "done");
   engine.unmount();
 });
