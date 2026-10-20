@@ -1,6 +1,6 @@
 // 工作台根组件：组合工具栏、步骤条、双栏内容与对话框。
 // 脚本版由入口渲染到自建浮层容器；关闭动作由入口注入 onClose。
-import { h, iconEl, useStore, makeT, useEffect, useMemo, createPortal } from "./host.js";
+import { h, iconEl, useStore, makeT, useEffect, useMemo, createPortal, useState } from "./host.js";
 import { resolveEngine } from "../engine.js";
 import { currentStep, listVisibleIssues } from "../issues.js";
 import { Stepper, ProjectPane, IssuesSection, ActivityCard, EmptyState } from "./components.js";
@@ -19,6 +19,17 @@ function FixBenchView({ api, onClose }) {
   const engine = useMemo(() => resolveEngine(api), [api]);
   const snapshot = useStore(engine);
   const t = makeT(api);
+  // issue 列表视图偏好只属于当前面板会话：与状态 / 严重度筛选一样不落盘。
+  const [issueView, setIssueView] = useState("file");
+  const [collapsedGroups, setCollapsedGroups] = useState(() => new Set());
+  const toggleIssueGroup = (key) => {
+    setCollapsedGroups((current) => {
+      const next = new Set(current);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  };
   useEffect(() => {
     void engine.mount();
     return () => engine.unmount();
@@ -129,7 +140,7 @@ function FixBenchView({ api, onClose }) {
           : null,
       ),
     ),
-            h(Stepper, { current: step, snapshot, t, api }),
+    h(Stepper, { current: step, snapshot, t, api }),
     h(
       "div",
       { className: "fx-body" },
@@ -139,7 +150,17 @@ function FixBenchView({ api, onClose }) {
         { className: "fx-main" },
         snapshot.activity ? h(ActivityCard, { activity: snapshot.activity, engine, api, t }) : null,
         hasIssues || snapshot.activity
-          ? h(IssuesSection, { snapshot, visible, engine, api, t })
+          ? h(IssuesSection, {
+              snapshot,
+              visible,
+              engine,
+              api,
+              t,
+              viewMode: issueView,
+              onViewModeChange: setIssueView,
+              collapsedGroups,
+              onToggleGroup: toggleIssueGroup,
+            })
           : h(EmptyState, { snapshot, engine, api, t }),
       ),
     ),

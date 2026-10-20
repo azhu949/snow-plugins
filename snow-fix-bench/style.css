@@ -240,7 +240,9 @@
   min-width: 0;
   min-height: 0;
   overflow: auto;
-  padding: 8px 12px 16px;
+  /* 顶部留白交给内容块（操作栏 / 活动卡片）：滚动容器带 padding-top 时，
+     吸顶操作栏与容器顶部之间的空隙会漏出正在滚动的 issue 卡片。 */
+  padding: 0 12px 16px;
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -252,12 +254,20 @@
   gap: 8px;
 }
 
+/* issue 多时列表内部滚动：操作栏吸顶，勾选后不必滚回顶部才能点「修复选中项」。
+   不透明背景负责遮住从下方滚过的筛选行与卡片，避免文字叠影。 */
 .fx-section-head {
+  position: sticky;
+  top: 0;
+  z-index: 3;
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
   gap: 8px;
   flex-wrap: wrap;
+  padding: 8px 0 6px;
+  background: var(--bg-primary, #ffffff);
+  box-shadow: 0 1px 0 var(--fx-border);
 }
 
 .fx-section-title {
@@ -401,6 +411,12 @@
 .fx-filter-label {
   color: var(--fx-sub);
   font-size: 10px;
+}
+
+.fx-filter-divider {
+  width: 1px;
+  height: 12px;
+  background: var(--fx-border);
 }
 
 .fx-search {
@@ -551,6 +567,59 @@
   color: var(--fx-sub);
 }
 
+/* 修复结果：可点击的改动文件与单行验证摘要 */
+
+.fx-issue-fix {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin-top: 5px;
+  padding-top: 5px;
+  border-top: 1px dashed var(--fx-border);
+  font-size: 10px;
+  color: var(--fx-sub);
+}
+
+.fx-fix-files {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 3px 10px;
+  min-width: 0;
+}
+
+.fx-fix-label {
+  flex: none;
+  color: var(--fx-sub);
+}
+
+.fx-fix-file {
+  max-width: 100%;
+}
+
+.fx-fix-file-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--fx-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+}
+
+.fx-fix-verify {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+
+.fx-fix-verify-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .fx-issue-detail {
   margin-top: 6px;
   padding-top: 6px;
@@ -577,10 +646,78 @@
   margin-top: 6px;
 }
 
+/* 按文件聚合视图：组头承载文件路径、条数与「修复本组」入口 */
+
+.fx-issue-group {
+  border: 1px solid var(--fx-border);
+  border-radius: 9px;
+  background: var(--fx-soft);
+  overflow: hidden;
+}
+
+.fx-issue-group-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+}
+
+.fx-issue-group-toggle {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 11px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.fx-issue-group-chevron,
+.fx-issue-group-icon {
+  flex: none;
+  display: inline-flex;
+  color: var(--fx-sub);
+}
+
+.fx-issue-group-file {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--fx-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+  font-size: 11px;
+  color: var(--text-primary, inherit);
+}
+
+.fx-issue-group-count {
+  flex: none;
+  padding: 1px 7px;
+  border: 1px solid var(--fx-border);
+  border-radius: 999px;
+  background: var(--fx-card);
+  font-size: 10px;
+  color: var(--fx-sub);
+}
+
+.fx-issue-group-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 0 8px 8px;
+}
+
 /* ---------------- 活动卡片 ---------------- */
 
 .fx-activity {
   flex: none;
+  /* .fx-main 自身不再保留顶部 padding，首屏留白由第一个内容块承担。 */
+  margin-top: 8px;
   padding: 8px 10px;
   border: 1px solid var(--fx-border);
   border-radius: 8px;

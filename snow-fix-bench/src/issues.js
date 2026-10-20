@@ -4,12 +4,13 @@ import { nowMs, uid, normalizeText } from "./util.js";
 import { normalizeSeverity, normalizeSeverityScope, severityRank, statusRank } from "./parse.js";
 // ==================== issue 合并与状态 ====================
 
-// 从 issue 位置中提取归一化后的文件路径集合：去掉行号 / 行范围，
-// 统一路径分隔符并忽略文件顺序。location 由审查提示词约定为“仓库相对路径:行号”。
-function issueLocationFiles(location) {
-  const text = normalizeText(location).toLowerCase().replace(/\\/g, "/");
+// 把位置文本拆成文件路径片段：lowerCase 决定是否做大小写归一化，
+// 以便匹配用的小写键与展示用的原始路径共用同一套解析规则。
+function splitLocationFiles(location, lowerCase) {
+  const raw = normalizeText(location);
+  const text = (lowerCase ? raw.toLowerCase() : raw).replace(/\\/g, "/");
   if (!text) return [];
-  const files = text
+  return text
     .split(/[,;、，；]/)
     .map((part) => {
       const trimmed = part.trim().replace(/^\.\//, "");
@@ -23,7 +24,19 @@ function issueLocationFiles(location) {
       return path;
     })
     .filter(Boolean);
+}
+
+// 从 issue 位置中提取归一化后的文件路径集合：去掉行号 / 行范围，
+// 统一路径分隔符并忽略文件顺序。location 由审查提示词约定为“仓库相对路径:行号”。
+function issueLocationFiles(location) {
+  const files = splitLocationFiles(location, true);
   return Array.from(new Set(files)).sort();
+}
+
+// 位置里的第一处文件路径（保留原始大小写）：按文件聚合视图用它做组标题。
+// 多文件位置归入第一处文件所在的组，避免同一条 issue 在多组重复出现。
+function issuePrimaryFile(location) {
+  return splitLocationFiles(location, false)[0] || "";
 }
 
 // 指纹只使用文件路径集合与标题：代码位移导致行号变化时仍命中同一条 issue。
@@ -280,6 +293,62 @@ function isFixSelectable(issue) {
 // 已修复但复审未确认的条目允许重新复审；confirmed 已有定论，不再重复消耗会话。
 function isVerifySelectable(issue) {
   return Boolean(issue) && issue.status === ISSUE_STATUS.fixed && issue.verify?.status !== "confirmed";
+}
+
+// 按文件聚合视图的未定位分组键：与真实文件路径不会冲突。
+const UNLOCATED_GROUP_KEY = "__unlocated__";
+// 组间排序中「没有可修复条目」的哨兵值：severityRank 最大为 2，3 必然排在其后。
+// 不能用 Infinity：两个分组相减会得到 NaN，排序会退化为引擎默认行为。
+const NO_FIXABLE_SEVERITY_RANK = 3;
+
+// 按文件聚合 issue：同一文件的问题折叠成一组，多文件位置取第一处文件，
+// 无法解析出文件的条目统一归入未定位组。
+// 组内顺序沿用传入列表的顺序（调用方已按 status / severity 排序）；
+// 组间先比较组内首个可执行条目的严重度，再比较可执行条数与条目数，
+// 没有可执行条目的分组排在最后，未定位组固定排在最后。
+function groupIssuesByFile(issues) {
+  const groups = new Map();
+  for (const issue of Array.isArray(issues) ? issues : []) {
+    const file = issuePrimaryFile(issue?.location);
+    // 大小写不敏感归组：不同审查会话写出的路径大小写可能不一致。
+    const key = file ? file.toLowerCase() : UNLOCATED_GROUP_KEY;
+    let group = groups.get(key);
+    if (!group) {
+      group = {
+        key,
+        file,
+        issues: [],
+        fixableIds: [],
+        fixingIds: [],
+        priorityRank: NO_FIXABLE_SEVERITY_RANK,
+      };
+      groups.set(key, group);
+    }
+    group.issues.push(issue);
+    if (issue.status === ISSUE_STATUS.fixing) {
+      // 修复中的条目不计入组头数量：引擎的 hasFixConflict 会直接拦截整组，
+      // 计入后按钮会显示一个点击后必然失败的 N。
+      group.fixingIds.push(issue.id);
+    } else if (isFixSelectable(issue)) {
+      // 传入列表已按 status / severity 排序：首个可执行条目的严重度就是该组
+      // 最需要处理的档位，已修复 / 归档 / 修复中的严重条目不会把整组顶到前面。
+      if (!group.fixableIds.length) group.priorityRank = severityRank(issue.severity);
+      group.fixableIds.push(issue.id);
+    }
+  }
+  const output = Array.from(groups.values());
+  output.sort((left, right) => {
+    const leftUnlocated = left.key === UNLOCATED_GROUP_KEY;
+    const rightUnlocated = right.key === UNLOCATED_GROUP_KEY;
+    if (leftUnlocated !== rightUnlocated) return leftUnlocated ? 1 : -1;
+    if (left.priorityRank !== right.priorityRank) return left.priorityRank - right.priorityRank;
+    if (right.fixableIds.length !== left.fixableIds.length) {
+      return right.fixableIds.length - left.fixableIds.length;
+    }
+    if (right.issues.length !== left.issues.length) return right.issues.length - left.issues.length;
+    return left.key.localeCompare(right.key);
+  });
+  return output;
 }
 
 function markIssuesFixing(issues, ids, conversationId) {
@@ -847,6 +916,8 @@ function listVisibleIssues(issues, options) {
 export {
   issueFingerprint,
   issueLocationFiles,
+  issuePrimaryFile,
+  groupIssuesByFile,
   createIssue,
   mergeReviewIssues,
   applyFixResults,

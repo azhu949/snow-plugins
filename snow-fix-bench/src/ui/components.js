@@ -1,7 +1,7 @@
 // 面板展示组件：流程条、文件树、issue 卡片与活动卡片。
 import { h, iconEl, STEP_KEYS, formatElapsed, formatDateTime, statusLabel, severityLabel, severityClass, useEffect, useState } from "./host.js";
 import { ISSUE_STATUS, SEVERITY } from "../constants.js";
-import { statusCounts, isFixSelectable, isVerifySelectable } from "../issues.js";
+import { statusCounts, isFixSelectable, isVerifySelectable, groupIssuesByFile } from "../issues.js";
 
 function Stepper({ current, snapshot, t, api }) {
   const currentIndex = STEP_KEYS.indexOf(current);
@@ -183,6 +183,22 @@ function IssueCard({ issue, selected, engine, api, t }) {
   // 重开来源决定详情文案：not_found 重开是取证结论被推翻，不是修复后回归。
   const reopenedKey =
     issue.reopenedFrom === ISSUE_STATUS.notFound ? "fx.issues.overturned" : "fx.issues.regressed";
+  // 修复结果：改动文件去重后逐个做成文件链接，验证摘要单行展示。
+  const fixFiles = Array.from(
+    new Set(
+      (issue.fix?.files || [])
+        .map((file) => String(file || "").trim())
+        .filter(Boolean),
+    ),
+  );
+  const fixVerification = String(issue.fix?.verification || "").trim();
+  // 仅当最后一次修复结论仍然有效时才把文件与验证当作当前结果：
+  // blocked / not_found 未改动代码；回归重开或复审未通过的条目 fix 只是历史记录。
+  // 归档项只有从「已修复」归档时才继续展示。
+  const fixIsCurrent =
+    issue.fix?.result === "fixed" &&
+    (issue.status === ISSUE_STATUS.fixed ||
+      (issue.status === ISSUE_STATUS.archived && issue.archivedFrom === ISSUE_STATUS.fixed));
   useEffect(() => {
     if (confirmLeft <= 0) return;
     const timer = setInterval(() => setConfirmLeft((value) => Math.max(0, value - 1)), 1000);
@@ -238,6 +254,40 @@ function IssueCard({ issue, selected, engine, api, t }) {
         expanded ? t("fx.issues.less") : t("fx.issues.more"),
       ),
     ),
+    fixIsCurrent && (fixFiles.length || fixVerification)
+      ? h(
+          "div",
+          { className: "fx-issue-fix" },
+          fixFiles.length
+            ? h(
+                "div",
+                { className: "fx-fix-files" },
+                h("span", { className: "fx-fix-label" }, t("fx.issues.fixFiles")),
+                fixFiles.map((file) =>
+                  h(
+                    "button",
+                    {
+                      key: file,
+                      className: "fx-link fx-fix-file",
+                      title: file,
+                      onClick: () => engine.openIssueLocation({ ...issue, location: file }),
+                    },
+                    h("span", { className: "fx-link-icon" }, iconEl(api, "File", 10)),
+                    h("span", { className: "fx-fix-file-text" }, file),
+                  ),
+                ),
+              )
+            : null,
+          fixVerification
+            ? h(
+                "div",
+                { className: "fx-fix-verify" },
+                h("span", { className: "fx-fix-label" }, t("fx.issues.fixVerifySummary")),
+                h("span", { className: "fx-fix-verify-text", title: fixVerification }, fixVerification),
+              )
+            : null,
+        )
+      : null,
     expanded
       ? h(
           "div",
@@ -249,12 +299,16 @@ function IssueCard({ issue, selected, engine, api, t }) {
             ? h("p", null, h("b", null, t("fx.issues.suggestion")), h("span", null, issue.suggestion))
             : null,
           issue.fix?.summary
+            ? h("p", null, h("b", null, t("fx.issues.fixNote")), h("span", null, issue.fix.summary))
+            : null,
+          // 非当前修复（not_found、blocked、回归重开、复审未通过等）的验证摘要属于历史记录，
+          // 折叠时不展示，展开详情时补上，保证上一轮执行过的验证仍可追溯。
+          !fixIsCurrent && fixVerification
             ? h(
                 "p",
                 null,
-                h("b", null, t("fx.issues.fixNote")),
-                h("span", null, issue.fix.summary),
-                issue.fix.verification ? h("span", { className: "fx-muted" }, ` · ${issue.fix.verification}`) : null,
+                h("b", null, t("fx.issues.fixVerifyHistory")),
+                h("span", { className: "fx-muted", title: fixVerification }, fixVerification),
               )
             : null,
           issue.verify
@@ -315,7 +369,94 @@ function IssueCard({ issue, selected, engine, api, t }) {
   );
 }
 
-function IssuesSection({ snapshot, visible, engine, api, t }) {
+// 按文件聚合视图的分组：组头显示文件路径与条数，「修复本组」只提交组内当前可执行条目。
+// 同文件问题一次提交，天然串行，能明显减少文件冲突，也更容易判断影响面。
+function IssueFileGroup({ group, collapsed, onToggle, selected, engine, api, t }) {
+  const unlocated = !group.file;
+  const title = unlocated ? t("fx.issues.groupUnlocated") : group.file;
+  const fixableIds = Array.isArray(group.fixableIds) ? group.fixableIds : [];
+  const fixingCount = Array.isArray(group.fixingIds) ? group.fixingIds.length : 0;
+  // 与引擎共用同一套冲突判定：修复中、队列认领或文件重叠时直接禁用组头按钮，
+  // 避免点击后才弹出通用冲突提示，也避免把整组一并提交给必然失败的会话。
+  const conflict =
+    fixableIds.length > 0 && typeof engine?.previewFixConflict === "function"
+      ? engine.previewFixConflict(fixableIds)
+      : false;
+  const blocked = fixableIds.length === 0 || conflict;
+  // 仅在按钮确实被禁用且原因可归为修复冲突时解释原因；会话已结束时残留的
+  // fixing 状态不应阻止组内其余条目，也不应显示误导性的阻塞提示。
+  const fixHint =
+    blocked && (fixingCount > 0 || conflict)
+      ? t("fx.issues.fixGroupBlocked")
+      : t("fx.issues.fixGroupHint");
+  return h(
+    "section",
+    { className: "fx-issue-group" },
+    h(
+      "div",
+      { className: "fx-issue-group-head" },
+      h(
+        "button",
+        {
+          type: "button",
+          className: "fx-issue-group-toggle",
+          onClick: onToggle,
+          "aria-expanded": !collapsed,
+          title,
+        },
+        h(
+          "span",
+          { className: "fx-issue-group-chevron" },
+          iconEl(api, collapsed ? "ChevronRight" : "ChevronDown", 12),
+        ),
+        h("span", { className: "fx-issue-group-icon" }, iconEl(api, unlocated ? "MapPin" : "File", 13)),
+        h("span", { className: "fx-issue-group-file" }, title),
+      ),
+      h("span", { className: "fx-issue-group-count" }, t("fx.issues.groupCount", { count: group.issues.length })),
+      h(
+        "button",
+        {
+          type: "button",
+          className: "fx-btn small",
+          disabled: blocked,
+          title: fixHint,
+          onClick: () => {
+            // openFixDialog 会把空数组回退成当前勾选项，禁用态下不能透传空集合。
+            if (!blocked) engine.openFixDialog(fixableIds);
+          },
+        },
+        t("fx.issues.fixGroup", { count: fixableIds.length }),
+      ),
+    ),
+    collapsed
+      ? null
+      : h(
+          "div",
+          { className: "fx-issue-group-body" },
+          group.issues.map((issue) =>
+            h(IssueCard, {
+              key: issue.id,
+              issue,
+              selected: selected.includes(issue.id),
+              engine,
+              api,
+              t,
+            }),
+          ),
+        ),
+  );
+}
+
+function IssuesSection({ snapshot, visible, engine, api, t, viewMode, onViewModeChange, collapsedGroups, onToggleGroup }) {
+  // 默认按文件聚合：同文件问题一次提交，冲突更少，影响面也更直观。
+  const mode = viewMode === "list" ? "list" : "file";
+  const collapsed = collapsedGroups instanceof Set ? collapsedGroups : new Set();
+  const setMode = (next) => {
+    if (typeof onViewModeChange === "function") onViewModeChange(next);
+  };
+  const toggleGroup = (key) => {
+    if (typeof onToggleGroup === "function") onToggleGroup(key);
+  };
   const counts = statusCounts(snapshot.state.issues);
   const selected = snapshot.selected;
   // 清理入口同时覆盖已修复与已确认不存在的条目：两者都已定论，不再需要修复。
@@ -368,6 +509,15 @@ function IssuesSection({ snapshot, visible, engine, api, t }) {
     (snapshot.state.conversationLog || []).length > 0 ||
     Boolean(snapshot.state.sessions.review) ||
     Boolean(snapshot.state.sessions.fix);
+  const renderIssue = (issue) =>
+    h(IssueCard, {
+      key: issue.id,
+      issue,
+      selected: selected.includes(issue.id),
+      engine,
+      api,
+      t,
+    });
   return h(
     "section",
     { className: "fx-section" },
@@ -474,6 +624,24 @@ function IssuesSection({ snapshot, visible, engine, api, t }) {
     h(
       "div",
       { className: "fx-filters" },
+      h("span", { className: "fx-filter-label" }, t("fx.issues.view")),
+      h(
+        "button",
+        {
+          className: `fx-chip ${mode === "file" ? "is-active" : ""}`,
+          onClick: () => setMode("file"),
+        },
+        t("fx.issues.viewFile"),
+      ),
+      h(
+        "button",
+        {
+          className: `fx-chip ${mode === "list" ? "is-active" : ""}`,
+          onClick: () => setMode("list"),
+        },
+        t("fx.issues.viewList"),
+      ),
+      h("span", { className: "fx-filter-divider", "aria-hidden": "true" }),
       h(
         "button",
         {
@@ -516,16 +684,20 @@ function IssuesSection({ snapshot, visible, engine, api, t }) {
       { className: "fx-issues" },
       visible.length === 0
         ? h("div", { className: "fx-empty-small" }, t("fx.issues.empty"))
-        : visible.map((issue) =>
-            h(IssueCard, {
-              key: issue.id,
-              issue,
-              selected: selected.includes(issue.id),
-              engine,
-              api,
-              t,
-            }),
-          ),
+        : mode === "list"
+          ? visible.map(renderIssue)
+          : groupIssuesByFile(visible).map((group) =>
+              h(IssueFileGroup, {
+                key: group.key,
+                group,
+                collapsed: collapsed.has(group.key),
+                onToggle: () => toggleGroup(group.key),
+                selected,
+                engine,
+                api,
+                t,
+              }),
+            ),
     ),
   );
 }

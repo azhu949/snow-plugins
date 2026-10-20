@@ -435,6 +435,13 @@ function createEngine(api) {
     return Array.from(selectedFiles).some((file) => claimedFiles.has(file));
   }
 
+  // 供 UI 预判冲突：空集合不构成冲突，避免未结束的修复会话把空分组误判为阻塞。
+  function previewFixConflict(issueIds) {
+    const ids = (Array.isArray(issueIds) ? issueIds : []).filter(Boolean);
+    if (!ids.length) return false;
+    return hasFixConflict(ids);
+  }
+
   async function closeConversation(conversationId) {
     if (!conversationId) return;
     const removed = await runWrite("conversations.remove", { conversationId });
@@ -4071,6 +4078,7 @@ function createEngine(api) {
     dismissActivity,
     openReviewDialog,
     openFixDialog,
+    previewFixConflict,
     openVerifyDialog,
     openPendingAutoFix,
     openCleanupDialog,
