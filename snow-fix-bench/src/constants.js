@@ -82,6 +82,10 @@ const ISSUE_STATUS = {
   archived: "archived",
 };
 
+// 修复后只读复审的结论取值：确认已修复 / 仍然存在 / 无法确认。
+// issue 状态归一化与修复提示词的历史字段共用同一份白名单。
+const VERIFY_STATUSES = ["confirmed", "still_present", "uncertain"];
+
 const SEVERITY = {
   critical: "严重",
   major: "一般",
@@ -209,6 +213,12 @@ const FALLBACK = {
   "fx.activity.hint": "面板只读取会话进度，不会中止 AI 运行。",
   "fx.activity.elapsed": "已运行 {{time}}",
   "fx.activity.phase": "阶段：{{phase}}",
+  "fx.activity.receivedChars": "已接收 {{count}} 字符",
+  "fx.activity.lastUpdate": "最后更新 {{time}}",
+  "fx.activity.agoJustNow": "刚刚",
+  "fx.activity.agoSeconds": "{{count}} 秒前",
+  "fx.activity.agoMinutes": "{{count}} 分钟前",
+  "fx.activity.agoHours": "{{count}} 小时前",
   "fx.activity.batch": "第 {{batch}}/{{total}} 批",
   "fx.activity.sessionError": "会话未产生有效输出，可能已失败。",
   "fx.activity.sessionInterrupted": "会话已中止，且没有产生任何回复；已停止跟踪并释放修复中状态。",
@@ -440,6 +450,7 @@ export {
   TREE_IGNORED_DIRS,
   TREE_LOAD_LIMIT,
   ISSUE_STATUS,
+  VERIFY_STATUSES,
   SEVERITY,
   ISSUE_SEVERITIES,
   DEFAULT_ISSUE_SEVERITIES,

@@ -1,12 +1,12 @@
 // 客户端脚本渲染层：内置 Preact、本地 SVG 图标与三语言文案。
 // 脚本插件没有宿主面板容器，React 与图标都由脚本自身打包提供。
 import { h } from "preact";
-import { createPortal } from "preact/compat";
+import { createPortal, memo } from "preact/compat";
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "preact/hooks";
 import { SEVERITY } from "../constants.js";
 import { createT } from "../i18n.js";
 
-export { h, createPortal, useCallback, useEffect, useId, useMemo, useRef, useState };
+export { h, createPortal, memo, useCallback, useEffect, useId, useMemo, useRef, useState };
 
 const STEP_KEYS = ["review", "extract", "fix", "cleanup"];
 

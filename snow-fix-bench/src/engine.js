@@ -77,6 +77,8 @@ import { createT } from "./i18n.js";
 import { DEFAULT_SETTINGS, normalizeParallelLimit, normalizeSettings } from "./settings.js";
 
 const ENGINE_CACHE = new WeakMap();
+// 活动指标写盘节流：流式输出期间指标持续变化，不能每轮轮询都整份保存状态。
+const ACTIVITY_METRICS_SAVE_MS = 60_000;
 
 export function resolveEngine(api) {
   let engine = ENGINE_CACHE.get(api);
@@ -250,6 +252,10 @@ function createEngine(api) {
   let projectEpoch = 0;
   const tracking = new Map();
   const starting = new Map();
+  // 每个会话最近一次活动指标落盘时间：按 conversationId 独立节流，互不抑制。
+  const metricsSavedAt = new Map();
+  // 每个会话尚未落盘的活动指标：流式期间只更新内存，保存时再合并进 state.sessions。
+  const sessionMetrics = new Map();
   let toastTimer = null;
   let persistBlocked = false;
   let gitSeq = 0;
@@ -502,11 +508,78 @@ function createEngine(api) {
     store.set({ activity: { ...current, phase, message } });
   }
 
+  // 活动卡片的进度指标：已接收字符数取正文 + 思考内容，最后更新时间只在
+  // 正文、思考、工具调用参数或 runtime token / message 计数确实变化时刷新。
+  // 仅宿主持续报告 running 而没有可观测进展时不刷新，卡片才能显示“多久没更新”。
+  // 指标只更新 store.activity：state.sessions 里的同一份指标改为落盘时合并，
+  // 避免流式期间每轮进展都替换整份 state 引用、触发面板全量重渲染。
+  function updateActivityMetrics(conversationId, patch) {
+    const current = store.get().activity;
+    if (!current || current.conversationId !== conversationId) return;
+    const next = { ...current };
+    let changed = false;
+    if (Number.isFinite(patch?.receivedChars)) {
+      const receivedChars = Math.max(0, Math.floor(patch.receivedChars));
+      if (receivedChars !== current.receivedChars) {
+        next.receivedChars = receivedChars;
+        changed = true;
+      }
+    }
+    if (Number.isFinite(patch?.lastUpdateAt) && patch.lastUpdateAt !== current.lastUpdateAt) {
+      next.lastUpdateAt = patch.lastUpdateAt;
+      changed = true;
+    }
+    if (!changed) return;
+    // 一次指标变化只产生一次 store 通知：界面按活动切片重渲染，issue 列表依赖的集合不变。
+    store.set({ activity: next });
+
+    const sessionKey = sessionKeyOf(next.kind);
+    const latest = store.get();
+    const session = latest.state.sessions[sessionKey];
+    if (!session || session.conversationId !== conversationId || session.status !== "running") return;
+    // 内存暂存最近指标：saveState 落盘时统一并进 state.sessions，重开工作台仍能恢复真实龄期。
+    sessionMetrics.set(conversationId, {
+      receivedChars: Number.isFinite(next.receivedChars) ? Math.max(0, Math.floor(next.receivedChars)) : 0,
+      lastUpdateAt: Number.isFinite(next.lastUpdateAt) ? next.lastUpdateAt : 0,
+    });
+    const at = nowMs();
+    if (at - (metricsSavedAt.get(conversationId) || 0) < ACTIVITY_METRICS_SAVE_MS) return;
+    metricsSavedAt.set(conversationId, at);
+    // 写盘按会话节流：saveState 内部合并最新指标，终态迁移的保存也会带走最新值。
+    void saveState({ projectId: latest.project?.directoryId });
+  }
+
+  // 落盘前把内存指标合并进待写入的 state：只在保存路径发生，不参与逐轮通知。
+  // 指标必须属于同一会话且不早于本批启动时间：续批与旧数据残留值不参与合并。
+  function applySessionMetrics(state) {
+    const sessions = state?.sessions;
+    if (!sessions || !sessionMetrics.size) return state;
+    let nextSessions = null;
+    for (const key of Object.keys(sessions)) {
+      const session = sessions[key];
+      if (!session?.conversationId) continue;
+      const metrics = sessionMetrics.get(session.conversationId);
+      if (!metrics) continue;
+      if (metrics.lastUpdateAt < (Number(session.startedAt) || 0)) continue;
+      if (session.receivedChars === metrics.receivedChars && session.lastUpdateAt === metrics.lastUpdateAt) {
+        continue;
+      }
+      if (!nextSessions) nextSessions = { ...sessions };
+      nextSessions[key] = {
+        ...session,
+        receivedChars: metrics.receivedChars,
+        lastUpdateAt: metrics.lastUpdateAt,
+      };
+    }
+    return nextSessions ? { ...state, sessions: nextSessions } : state;
+  }
+
   async function saveState(scope = {}) {
     const snapshot = store.get();
     const projectId = String(scope.projectId || snapshot.project?.directoryId || "");
     if (!projectId) return { ok: false };
-    const state = scope.state || snapshot.state;
+    // 落盘前把内存中的活动指标并进 state：指标只在这里进入持久化与内存态。
+    const state = applySessionMetrics(scope.state || snapshot.state);
     const payload = { ...state, projectId, updatedAt: nowMs() };
     // 只有当前项目与目标项目一致时才更新内存态；跨项目写入仍落到捕获项目的 key。
     if (snapshot.project?.directoryId === projectId) store.set({ state: payload });
@@ -908,6 +981,10 @@ function createEngine(api) {
       issueIds: session.issueIds || [],
       batchNumber: session.batchNumber || 1,
       batchTotal: session.batchTotal || 1,
+      receivedChars: Math.max(0, Math.floor(Number(session.receivedChars) || 0)),
+      // 续批与旧数据可能残留上一批的最后更新时刻：展示龄期不得早于本批启动时间。
+      lastUpdateAt:
+        Math.max(Number(session.lastUpdateAt) || 0, Number(session.startedAt) || 0) || nowMs(),
     };
   }
 
@@ -1595,16 +1672,28 @@ function createEngine(api) {
       });
     }
     const startedAt = nowMs();
+    // 恢复跟踪时用持久化的最后更新时间作为展示基线；首个 runtime / 消息快照只建立观测基线，
+    // 不能当成新进展，否则重开工作台后卡片会立刻显示“刚刚”。
+    const resumed = Boolean(options.resumed);
+    const resumedSession = resumed ? store.get().state.sessions[sessionKeyOf(token.kind)] : null;
+    const restoredUpdateAt =
+      resumedSession && resumedSession.conversationId === conversationId
+        ? Number(resumedSession.lastUpdateAt)
+        : 0;
+    let displayUpdateAt =
+      Number.isFinite(restoredUpdateAt) && restoredUpdateAt > 0 ? restoredUpdateAt : startedAt;
     // 最近一次“有新进展”的时刻：正文变化、消息行变化与 runtime 可观测进展都算进展。
     // 超时只看这个时间与绝对上限，不再使用固定总时长。
     let lastActivityAt = startedAt;
     // 上一轮 runtime 是否可读；runtime 不可读时无法确认会话是否仍在执行工具，
     // 因此不能沿用常规的 idle 阈值（首轮未知，此时尚无空闲，不影响判定）。
     let runtimeKnown = false;
-    let lastMessageSignature = "";
+    // 恢复跟踪时首轮签名从 null 开始，只用于建立基线；新建会话保持原行为。
+    let lastMessageSignature = resumed ? null : "";
     // 上一轮 runtime 进展签名；签名不变说明没有新 token / 新消息 / 新 run 起点。
-    let lastRuntimeProgress = "";
-    let lastCombined = "";
+    let lastRuntimeProgress = resumed ? null : "";
+    // 恢复跟踪时首轮正文同样只建立基线：历史正文不是新进展，不能刷新龄期。
+    let lastCombined = resumed ? null : "";
     let stable = 0;
     // runtime 不可读期间的独立稳定计数：不能复用 stable，否则可读 / 未知切换会沿用旧计数。
     let stableUnknown = 0;
@@ -1701,9 +1790,15 @@ function createEngine(api) {
         ? buildRuntimeProgressSignature({ streamingSession, focusedConversation })
         : "";
       if (runtimeProgress) {
-        if (runtimeProgress !== lastRuntimeProgress) {
+        if (lastRuntimeProgress === null) {
           lastRuntimeProgress = runtimeProgress;
-          if (busy) lastActivityAt = nowMs();
+        } else if (runtimeProgress !== lastRuntimeProgress) {
+          lastRuntimeProgress = runtimeProgress;
+          if (busy) {
+            lastActivityAt = nowMs();
+            displayUpdateAt = lastActivityAt;
+            updateActivityMetrics(conversationId, { lastUpdateAt: displayUpdateAt });
+          }
         }
       } else if (busy) {
         // 旧宿主未提供 tokenCount / messageCount / startedAt：没有可观测进展信号，
@@ -1766,9 +1861,13 @@ function createEngine(api) {
       )}|${String(lastRow?.content || "").length}|${String(lastRow?.thinking || "").length}|${String(
         lastRow?.toolCallsJson || "",
       ).length}`;
-      if (messageSignature !== lastMessageSignature) {
+      if (lastMessageSignature === null) {
+        lastMessageSignature = messageSignature;
+      } else if (messageSignature !== lastMessageSignature) {
         lastMessageSignature = messageSignature;
         lastActivityAt = nowMs();
+        displayUpdateAt = lastActivityAt;
+        updateActivityMetrics(conversationId, { lastUpdateAt: displayUpdateAt });
       }
       // 会话可能在中途被删除：连续为空达到阈值后用 conversations 域确认存在性，
       // 首次跟踪与重连恢复都适用；确认不存在时立即结束，避免修复中状态挂到超时。
@@ -1789,6 +1888,12 @@ function createEngine(api) {
       const assistantItems = items.filter((message) => message.role === "assistant");
       const lastAssistant = assistantItems[assistantItems.length - 1] || null;
       if (lastAssistant) sawAssistantRow = true;
+      // 已接收字符数：正文 + 思考内容。错误消息不是有效输出，不计入进度。
+      const receivedChars = assistantItems.reduce((total, message) => {
+        if (isErrorStatus(message)) return total;
+        return total + String(message.content || "").length + String(message.thinking || "").length;
+      }, 0);
+      updateActivityMetrics(conversationId, { receivedChars, lastUpdateAt: displayUpdateAt });
       // 只把尾部、非流式、空内容的错误消息视为当前失败；历史错误或已重试成功不算。
       if (
         !isStreaming &&
@@ -1813,7 +1918,10 @@ function createEngine(api) {
       );
       const combined = assistants.map((message) => message.content).join("\n\n");
       if (combined) {
-        if (combined === lastCombined) {
+        if (lastCombined === null) {
+          // 恢复后的首个正文快照只建立基线，不刷新 lastActivityAt / displayUpdateAt。
+          lastCombined = combined;
+        } else if (combined === lastCombined) {
           stable += 1;
           if (!runtimeKnown) stableUnknown += 1;
         } else {
@@ -1821,6 +1929,8 @@ function createEngine(api) {
           stable = 0;
           stableUnknown = 0;
           lastActivityAt = nowMs();
+          displayUpdateAt = lastActivityAt;
+          updateActivityMetrics(conversationId, { lastUpdateAt: displayUpdateAt });
         }
         abortedPolls = 0;
         emptyResponsePolls = 0;
@@ -2252,7 +2362,10 @@ function createEngine(api) {
       ...currentSession,
       conversationId,
       title,
+      // 新批次重新计时：上一批的字符数与最后更新时刻不能带入本批，否则重开后卡片显示矛盾。
       startedAt: at,
+      receivedChars: 0,
+      lastUpdateAt: at,
       status: "running",
       scopeLabel: t("fx.fix.scopeBatch", {
         count: liveIssues.length,
@@ -2727,7 +2840,10 @@ function createEngine(api) {
       ...current,
       conversationId,
       title,
+      // 新批次重新计时：上一批的字符数与最后更新时刻不能带入本批，否则重开后卡片显示矛盾。
       startedAt: at,
+      receivedChars: 0,
+      lastUpdateAt: at,
       status: "running",
       scopeLabel:
         batchTotal > 1
@@ -3116,6 +3232,9 @@ function createEngine(api) {
       );
       await saveState({ projectId: token.projectId, state: nextState });
     } finally {
+      metricsSavedAt.delete(token.conversationId);
+      // 终态保存已在 try / catch 中完成，之后不再需要该会话的暂存指标。
+      sessionMetrics.delete(token.conversationId);
       if (tracking.get(token.kind) === token) tracking.delete(token.kind);
     }
   }
@@ -3268,11 +3387,29 @@ function createEngine(api) {
       setToast("error", t("fx.activity.sessionError"));
       return;
     }
+    const resumedAt = nowMs();
+    // 重新挂接沿用上次真实进展时刻：点击「继续跟踪」不是新进展，
+    // 把 lastUpdateAt 改成当前时间会让龄期立刻显示“刚刚”，并写回持久化。
+    const restoredUpdateAt =
+      Number(session.lastUpdateAt) > 0
+        ? Number(session.lastUpdateAt)
+        : Number(activity.lastUpdateAt) > 0
+          ? Number(activity.lastUpdateAt)
+          : resumedAt;
     const state = {
       ...snapshot.state,
       sessions: {
         ...snapshot.state.sessions,
-        [sessionKey]: { ...session, status: "running", lastError: "", activityDismissed: false },
+        [sessionKey]: {
+          ...session,
+          status: "running",
+          lastError: "",
+          activityDismissed: false,
+          lastUpdateAt: restoredUpdateAt,
+          receivedChars: Number.isFinite(activity.receivedChars)
+            ? Math.max(0, Math.floor(activity.receivedChars))
+            : Number(session.receivedChars) || 0,
+        },
       },
     };
     store.set({
@@ -3280,10 +3417,12 @@ function createEngine(api) {
       activity: {
         ...activity,
         phase: "waiting",
-        message: "",
+        message: t("fx.activity.waiting"),
         error: "",
         timedOut: false,
-        startedAt: activity.startedAt || nowMs(),
+        startedAt: activity.startedAt || resumedAt,
+        // 字符数保留上次值，首次读消息后更新。
+        lastUpdateAt: restoredUpdateAt,
       },
     });
     await saveState({ projectId: project.directoryId, state });

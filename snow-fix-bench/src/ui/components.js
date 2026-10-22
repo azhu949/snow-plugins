@@ -1,5 +1,5 @@
 // 面板展示组件：流程条、文件树、issue 卡片与活动卡片。
-import { h, iconEl, STEP_KEYS, formatElapsed, formatDateTime, statusLabel, severityLabel, severityClass, useEffect, useState } from "./host.js";
+import { h, iconEl, STEP_KEYS, formatElapsed, formatDateTime, statusLabel, severityLabel, severityClass, memo, useEffect, useState } from "./host.js";
 import { ISSUE_STATUS, SEVERITY } from "../constants.js";
 import { statusCounts, isFixSelectable, isVerifySelectable, groupIssuesByFile } from "../issues.js";
 
@@ -176,7 +176,8 @@ function ProjectPane({ snapshot, engine, api, t }) {
   );
 }
 
-function IssueCard({ issue, selected, engine, api, t }) {
+// 卡片只依赖单条 issue 与勾选状态：活动指标刷新不重建行，memo 才能跳到下一次渲染。
+const IssueCard = memo(function IssueCard({ issue, selected, engine, api, t }) {
   const [expanded, setExpanded] = useState(false);
   const [confirmLeft, setConfirmLeft] = useState(0);
   const archived = issue.status === ISSUE_STATUS.archived;
@@ -367,10 +368,12 @@ function IssueCard({ issue, selected, engine, api, t }) {
         )
       : null,
   );
-}
+});
 
 // 按文件聚合视图的分组：组头显示文件路径与条数，「修复本组」只提交组内当前可执行条目。
 // 同文件问题一次提交，天然串行，能明显减少文件冲突，也更容易判断影响面。
+// 分组本身不套 memo：组头「修复本组」要按当前引擎会话与活动相位实时判定冲突，
+// 每次渲染都取最新结论；组内卡片由 IssueCard 的 memo 复用，活动指标刷新不会重建。
 function IssueFileGroup({ group, collapsed, onToggle, selected, engine, api, t }) {
   const unlocated = !group.file;
   const title = unlocated ? t("fx.issues.groupUnlocated") : group.file;
@@ -400,7 +403,9 @@ function IssueFileGroup({ group, collapsed, onToggle, selected, engine, api, t }
         {
           type: "button",
           className: "fx-issue-group-toggle",
-          onClick: onToggle,
+          onClick: () => {
+            if (typeof onToggle === "function") onToggle(group.key);
+          },
           "aria-expanded": !collapsed,
           title,
         },
@@ -447,27 +452,66 @@ function IssueFileGroup({ group, collapsed, onToggle, selected, engine, api, t }
   );
 }
 
-function IssuesSection({ snapshot, visible, engine, api, t, viewMode, onViewModeChange, collapsedGroups, onToggleGroup }) {
+// issue 区的派生数据：状态计数、勾选统计、复审范围与按文件分组。
+// 面板在 useMemo 中预先算好，活动指标刷新时不再重复遍历全部 issue；
+// 直接调用组件（如渲染测试）未传 view 时按需自算。
+function buildIssueView(snapshot, visible) {
+  const issues = Array.isArray(snapshot?.state?.issues) ? snapshot.state.issues : [];
+  const selected = Array.isArray(snapshot?.selected) ? snapshot.selected : [];
+  const counts = statusCounts(issues);
+  const statusFilter = snapshot?.statusFilter || "all";
+  // 标题与「当前 x / y」共用同一状态口径：全部=非归档总量，其余=该状态总量；
+  // 非法状态值按「全部」处理，与 listVisibleIssues 的归一规则保持一致。
+  const statusScopeCount =
+    statusFilter === "all" || counts[statusFilter] === undefined
+      ? counts.open + counts.fixing + counts.fixed + counts.not_found
+      : counts[statusFilter];
+  // 归档项也能勾选（用于批量删除），但「修复选中项」只统计仍可修复的条目：
+  // 已修复与已确认不存在都已定论，再次投入修复会在会话失败时覆盖结论。
+  const fixableSelectedCount = issues.filter(
+    (issue) => selected.includes(issue.id) && isFixSelectable(issue),
+  ).length;
+  // 复审入口只处理当前勾选或当前可见的条目：按钮计数与实际启动范围共用同一份 id 列表。
+  const verifyScopeIssues = (
+    selected.length ? issues.filter((issue) => selected.includes(issue.id)) : visible
+  ).filter(isVerifySelectable);
+  return {
+    counts,
+    statusScopeCount,
+    visibleIds: visible.map((issue) => issue.id),
+    fixableSelectedCount,
+    verifyScopeIssues,
+    verifyScopeIds: verifyScopeIssues.map((issue) => issue.id),
+    reverifyCount: verifyScopeIssues.length,
+    // 已有历史复审结论时用「重新复审」，首次复审用「复审」。
+    verifyLabelKey: verifyScopeIssues.some((issue) => Boolean(issue.verify))
+      ? "fx.issues.reverifyCount"
+      : "fx.issues.verifyCount",
+    groups: groupIssuesByFile(visible),
+  };
+}
+
+function IssuesSection({ snapshot, visible, engine, api, t, viewMode, onViewModeChange, collapsedGroups, onToggleGroup, view }) {
   // 默认按文件聚合：同文件问题一次提交，冲突更少，影响面也更直观。
   const mode = viewMode === "list" ? "list" : "file";
   const collapsed = collapsedGroups instanceof Set ? collapsedGroups : new Set();
   const setMode = (next) => {
     if (typeof onViewModeChange === "function") onViewModeChange(next);
   };
-  const toggleGroup = (key) => {
-    if (typeof onToggleGroup === "function") onToggleGroup(key);
-  };
-  const counts = statusCounts(snapshot.state.issues);
-  const selected = snapshot.selected;
+  const derived = view || buildIssueView(snapshot, visible);
+  const {
+    counts,
+    statusScopeCount,
+    visibleIds,
+    fixableSelectedCount,
+    verifyScopeIds,
+    reverifyCount,
+    verifyLabelKey,
+    groups,
+  } = derived;
+  const selected = Array.isArray(snapshot.selected) ? snapshot.selected : [];
   // 清理入口同时覆盖已修复与已确认不存在的条目：两者都已定论，不再需要修复。
   const settledCount = counts.fixed + counts.not_found;
-  // 标题与「当前 x / y」共用同一状态口径：全部=非归档总量，其余=该状态总量；
-  // 非法状态值按「全部」处理，与 listVisibleIssues 的归一规则保持一致。
-  const statusFilter = snapshot.statusFilter || "all";
-  const statusScopeCount =
-    statusFilter === "all" || counts[statusFilter] === undefined
-      ? counts.open + counts.fixing + settledCount
-      : counts[statusFilter];
   const statusFilters = [
     { key: "all", label: t("fx.issues.filterAll") },
     { key: ISSUE_STATUS.open, label: t("fx.status.open") },
@@ -482,28 +526,10 @@ function IssuesSection({ snapshot, visible, engine, api, t, viewMode, onViewMode
     { key: SEVERITY.major, label: t("fx.issues.filterMajor") },
     { key: SEVERITY.minor, label: t("fx.issues.filterMinor") },
   ];
-  // 归档项也能勾选（用于批量删除），但「修复选中项」只统计仍可修复的条目：
-  // 已修复与已确认不存在都已定论，再次投入修复会在会话失败时覆盖结论。
-  const visibleIds = visible.map((issue) => issue.id);
   const hasFilter =
     snapshot.statusFilter !== "all" ||
     snapshot.severityFilter !== "all" ||
     Boolean(String(snapshot.searchQuery || "").trim());
-  const fixableSelectedCount = snapshot.state.issues.filter(
-    (issue) => selected.includes(issue.id) && isFixSelectable(issue),
-  ).length;
-  // 复审入口只处理当前勾选或当前可见的条目：按钮计数与实际启动范围共用同一份 id 列表。
-  const verifyScopeIssues = (
-    selected.length
-      ? snapshot.state.issues.filter((issue) => selected.includes(issue.id))
-      : visible
-  ).filter(isVerifySelectable);
-  const verifyScopeIds = verifyScopeIssues.map((issue) => issue.id);
-  const reverifyCount = verifyScopeIssues.length;
-  // 已有历史复审结论时用「重新复审」，首次复审用「复审」。
-  const verifyLabelKey = verifyScopeIssues.some((issue) => Boolean(issue.verify))
-    ? "fx.issues.reverifyCount"
-    : "fx.issues.verifyCount";
   // 清理入口也要覆盖没有当前跟踪会话、但存在历史会话台账的情况。
   const hasSessionLog =
     (snapshot.state.conversationLog || []).length > 0 ||
@@ -686,12 +712,12 @@ function IssuesSection({ snapshot, visible, engine, api, t, viewMode, onViewMode
         ? h("div", { className: "fx-empty-small" }, t("fx.issues.empty"))
         : mode === "list"
           ? visible.map(renderIssue)
-          : groupIssuesByFile(visible).map((group) =>
+          : groups.map((group) =>
               h(IssueFileGroup, {
                 key: group.key,
                 group,
                 collapsed: collapsed.has(group.key),
-                onToggle: () => toggleGroup(group.key),
+                onToggle: onToggleGroup,
                 selected,
                 engine,
                 api,
@@ -702,17 +728,53 @@ function IssuesSection({ snapshot, visible, engine, api, t, viewMode, onViewMode
   );
 }
 
+function formatUpdateAge(t, elapsedMs) {
+  const seconds = Math.max(0, Math.floor(Number(elapsedMs) / 1000));
+  if (!Number.isFinite(seconds) || seconds < 2) return t("fx.activity.agoJustNow");
+  if (seconds < 60) return t("fx.activity.agoSeconds", { count: seconds });
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return t("fx.activity.agoMinutes", { count: minutes });
+  return t("fx.activity.agoHours", { count: Math.floor(minutes / 60) });
+}
+
+// 非运行态卡片的耗时终点取自会话自身的最后进展时刻：
+// 卡片可能因切换项目被重建，既不能沿用上一个会话的结束时刻，也不能用重建时刻顶替。
+function settledEndOf(activity, running) {
+  if (running) return null;
+  const lastUpdateAt = Number(activity.lastUpdateAt);
+  if (!Number.isFinite(lastUpdateAt)) return null;
+  // 旧数据可能残留早于本批启动时间的时刻：展示不得出现负时长。
+  return Math.max(lastUpdateAt, Number(activity.startedAt) || 0);
+}
+
 function ActivityCard({ activity, engine, api, t }) {
   const running = !["done", "error", "detached"].includes(activity.phase);
   // 手动停止或跟踪报错后允许重新挂接同一会话，继续读取后续输出。
   const resumable = activity.phase === "detached" || activity.phase === "error";
   const [now, setNow] = useState(Date.now());
+  const [settledAt, setSettledAt] = useState(() => settledEndOf(activity, running));
+  // 相对更新时间在卡片存续期间都要前进：done/error/detached 后也保留每秒时钟，
+  // 否则“最后更新 X 前”会永久停在相位切换的瞬间。
+  // “已运行”停在结束时刻：挂载即为非运行态时用会话自身的最后进展时刻，
+  // 运行中转为终态时用观察到切换的时刻，继续跟踪时重新计时。
   useEffect(() => {
-    if (!running) return;
+    const tick = Date.now();
+    setNow(tick);
+    if (running) setSettledAt(null);
+    else setSettledAt((value) => (value == null ? tick : value));
     const timer = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(timer);
   }, [running]);
-  const elapsed = activity.startedAt ? formatElapsed(now - activity.startedAt) : "";
+  const elapsedEnd = running ? now : settledAt ?? now;
+  const elapsed = activity.startedAt ? formatElapsed(elapsedEnd - activity.startedAt) : "";
+  // 已接收字符数来自正文 + 思考内容；最后更新时间只在检测到新输出 / 工具进展时刷新。
+  const receivedChars = Number.isFinite(activity.receivedChars) ? activity.receivedChars : 0;
+  const lastUpdateAt = Number.isFinite(activity.lastUpdateAt)
+    ? activity.lastUpdateAt
+    : Number.isFinite(activity.startedAt)
+      ? activity.startedAt
+      : null;
+  const updateAge = lastUpdateAt ? formatUpdateAge(t, now - lastUpdateAt) : "";
   let phaseText = "";
   if (activity.phase === "waiting") phaseText = t("fx.activity.waiting");
   else if (activity.phase === "streaming") phaseText = t("fx.activity.streaming");
@@ -748,6 +810,18 @@ function ActivityCard({ activity, engine, api, t }) {
       h("span", { className: "fx-muted fx-activity-id" }, t("fx.activity.session", { id: activity.conversationId.slice(0, 10) })),
     ),
     h("div", { className: "fx-activity-body" }, phaseText),
+    h(
+      "div",
+      { className: "fx-activity-metrics" },
+      h("span", null, t("fx.activity.receivedChars", { count: receivedChars.toLocaleString() })),
+      lastUpdateAt
+        ? h(
+            "span",
+            { title: formatDateTime(lastUpdateAt) },
+            t("fx.activity.lastUpdate", { time: updateAge }),
+          )
+        : null,
+    ),
     activity.error ? h("div", { className: "fx-error" }, activity.error) : null,
     activity.timedOut ? h("div", { className: "fx-warn" }, t("fx.activity.timeout")) : null,
     h(
@@ -799,4 +873,12 @@ function EmptyState({ snapshot, engine, api, t }) {
   );
 }
 
-export { Stepper, ProjectPane, IssuesSection, ActivityCard, EmptyState, defaultCollapsedGroups };
+export {
+  Stepper,
+  ProjectPane,
+  IssuesSection,
+  ActivityCard,
+  EmptyState,
+  defaultCollapsedGroups,
+  buildIssueView,
+};

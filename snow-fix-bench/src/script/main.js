@@ -11,10 +11,19 @@ const ROOT_CLASS = "fx-overlay";
 const CHAT_LAUNCHER_CLASS = "fx-chat-launcher";
 const VISIBLE_KEY = "fixbench:ui:open";
 const POSITION_KEY = "fixbench:ui:pos";
+const SIZE_KEY = "fixbench:ui:size";
 const NARROW_QUERY = "(max-width: 760px)";
 // 与 style.css 中 .fx-overlay 的 width: min(980px, calc(100vw - 32px)) 保持一致。
 const OVERLAY_MAX_WIDTH = 980;
 const OVERLAY_VIEWPORT_GUTTER = 32;
+// 拖拽缩放的下限与视口留白：低于 480px 会提前触发窄面板布局，280px 以下容纳不了头部与列表。
+const RESIZE_MIN_WIDTH = 480;
+const RESIZE_MIN_HEIGHT = 280;
+const RESIZE_VIEWPORT_GAP = 8;
+// 居中布局的默认顶部偏移，与 style.css 中 .fx-overlay 的 top: 72px 保持一致。
+const OVERLAY_TOP_OFFSET = 72;
+// 指针位移低于该阈值视为单击 / 抖动，不进入缩放，也不写入位置与尺寸。
+const RESIZE_MOVE_THRESHOLD = 3;
 
 function readVisible() {
   try {
@@ -48,6 +57,27 @@ function readPosition() {
 function writePosition(position) {
   try {
     GM_setValue(POSITION_KEY, position ? JSON.stringify(position) : "");
+  } catch {
+    // 忽略存储失败，界面仍可继续使用。
+  }
+}
+
+function readSize() {
+  try {
+    const raw = GM_getValue(SIZE_KEY, "");
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed || !Number.isFinite(parsed.width) || !Number.isFinite(parsed.height)) return null;
+    if (parsed.width <= 0 || parsed.height <= 0) return null;
+    return { width: parsed.width, height: parsed.height };
+  } catch {
+    return null;
+  }
+}
+
+function writeSize(size) {
+  try {
+    GM_setValue(SIZE_KEY, size ? JSON.stringify(size) : "");
   } catch {
     // 忽略存储失败，界面仍可继续使用。
   }
@@ -116,25 +146,112 @@ function mount() {
   }
 
   // 隐藏时元素没有布局盒，getBoundingClientRect / offsetWidth 的宽度都是 0：
-  // 按 CSS 宽度公式兜底，避免把浮层位置夹到屏幕外。
+  // 按已写入的内联宽度或 CSS 宽度公式兜底，避免把浮层位置夹到屏幕外。
   function overlayWidth() {
     const width = root.getBoundingClientRect().width;
     if (width > 0) return width;
+    const inline = Number.parseFloat(root.style.width);
+    if (Number.isFinite(inline) && inline > 0) return inline;
     return Math.max(0, Math.min(OVERLAY_MAX_WIDTH, window.innerWidth - OVERLAY_VIEWPORT_GUTTER));
   }
 
-  function applyPosition(position) {
+  function applyPosition(position, size) {
     if (isNarrow()) {
       clearInlinePosition();
       return;
     }
-    if (!position) return;
-    const maxLeft = Math.max(8, window.innerWidth - overlayWidth() - 8);
-    const maxTop = Math.max(8, window.innerHeight - 80);
+    if (!position) {
+      // 居中布局：横向仍由 auto margin 决定，不写内联 left；只有视口过矮、
+      // 默认 top 放不下当前高度时才上移，保证底部与右下角手柄不被推出视口。
+      const height = size ? size.height : 0;
+      const bottomLimit = window.innerHeight - RESIZE_VIEWPORT_GAP;
+      root.style.top =
+        height > 0 && OVERLAY_TOP_OFFSET + height > bottomLimit
+          ? `${Math.max(RESIZE_VIEWPORT_GAP, bottomLimit - height)}px`
+          : "";
+      return;
+    }
+    // 位置夹取以已确定的尺寸为准：窗口缩小后优先移动浮层，保证它完整落在视口内。
+    const width = size ? size.width : overlayWidth();
+    const height = size ? size.height : 0;
+    const maxLeft = Math.max(8, window.innerWidth - width - 8);
+    const maxTop = Math.max(8, height > 0 ? window.innerHeight - height - 8 : window.innerHeight - 80);
     pinTo(
       Math.min(Math.max(8, position.left), maxLeft),
       Math.min(Math.max(8, position.top), maxTop),
     );
+  }
+
+  function clearInlineSize() {
+    root.style.width = "";
+    root.style.height = "";
+  }
+
+  // 恢复布局时的尺寸上限只由视口决定，不参考当前 rect / 残留 inline left：
+  // 否则窗口缩小后可用宽度会随旧位置变小，把浮层越压越窄。
+  // topOffset 用于居中布局：默认 top 由上向下占用视口高度，必须计入上限。
+  function viewportSizeLimits(topOffset = 0) {
+    return {
+      maxWidth: Math.max(RESIZE_MIN_WIDTH, window.innerWidth - RESIZE_VIEWPORT_GAP * 2),
+      maxHeight: Math.max(
+        RESIZE_MIN_HEIGHT,
+        window.innerHeight - topOffset - RESIZE_VIEWPORT_GAP * 2,
+      ),
+    };
+  }
+
+  function clampSizeToViewport(size, topOffset = 0) {
+    const { maxWidth, maxHeight } = viewportSizeLimits(topOffset);
+    return {
+      width: Math.min(Math.max(RESIZE_MIN_WIDTH, size.width), maxWidth),
+      height: Math.min(Math.max(RESIZE_MIN_HEIGHT, size.height), maxHeight),
+    };
+  }
+
+  // 拖拽缩放期间的上限跟随当前左上角：向右 / 向下缩放时不允许把浮层推出视口。
+  // 未拖动过（居中布局）时按视口整宽计算，缩放后仍由 auto margin 居中。
+  function sizeLimits() {
+    const rect = root.getBoundingClientRect();
+    const hasBox = rect.width > 0 && rect.height > 0;
+    const pinned = Boolean(root.style.left) || Boolean(root.style.top);
+    const left = hasBox ? rect.left : Number.parseFloat(root.style.left);
+    const top = hasBox ? rect.top : Number.parseFloat(root.style.top);
+    const fallbackTop = OVERLAY_TOP_OFFSET;
+    const effectiveTop = Number.isFinite(top) ? top : fallbackTop;
+    return {
+      maxWidth: Math.max(
+        RESIZE_MIN_WIDTH,
+        pinned && Number.isFinite(left)
+          ? window.innerWidth - left - RESIZE_VIEWPORT_GAP
+          : window.innerWidth - RESIZE_VIEWPORT_GAP * 2,
+      ),
+      maxHeight: Math.max(RESIZE_MIN_HEIGHT, window.innerHeight - effectiveTop - RESIZE_VIEWPORT_GAP),
+    };
+  }
+
+  function applySize(size, topOffset = 0) {
+    if (isNarrow()) {
+      clearInlineSize();
+      return null;
+    }
+    if (!size) {
+      clearInlineSize();
+      return null;
+    }
+    const next = clampSizeToViewport(size, topOffset);
+    root.style.width = `${Math.round(next.width)}px`;
+    root.style.height = `${Math.round(next.height)}px`;
+    return next;
+  }
+
+  // 先按保存尺寸与视口独立确定尺寸，再用该尺寸夹取位置：
+  // 窗口缩小时移动浮层而不是缩小浮层，避免尺寸被旧位置反复压小。
+  function applyLayout() {
+    const position = readPosition();
+    // 无保存位置时沿用 CSS 的 top: 72px，高度上限要扣掉这段偏移；
+    // 有保存位置时由 applyPosition 按实际 top 夹取，这里不再重复扣。
+    const size = applySize(readSize(), position ? 0 : OVERLAY_TOP_OFFSET);
+    applyPosition(position, size);
   }
 
   let drag = null;
@@ -142,7 +259,11 @@ function mount() {
   function onPointerMove(event) {
     if (!drag) return;
     const maxLeft = Math.max(8, window.innerWidth - drag.width - 8);
-    const maxTop = Math.max(8, window.innerHeight - 80);
+    // 与 applyPosition 一致：按面板实际高度夹取，避免调高后拖动把底部推出视口。
+    const maxTop = Math.max(
+      8,
+      drag.height > 0 ? window.innerHeight - drag.height - 8 : window.innerHeight - 80,
+    );
     const left = Math.min(Math.max(8, drag.left + event.clientX - drag.startX), maxLeft);
     const top = Math.min(Math.max(8, drag.top + event.clientY - drag.startY), maxTop);
     root.style.left = `${left}px`;
@@ -158,14 +279,118 @@ function mount() {
     window.removeEventListener("pointerup", onPointerUp);
     window.removeEventListener("pointercancel", onPointerUp);
     window.removeEventListener("blur", onPointerUp);
+    // 拖动期间视口可能变化：释放时按当前尺寸再夹一次，只持久化视口内的位置。
     const rect = root.getBoundingClientRect();
+    const maxLeft = Math.max(8, window.innerWidth - rect.width - 8);
+    const maxTop = Math.max(
+      8,
+      rect.height > 0 ? window.innerHeight - rect.height - 8 : window.innerHeight - 80,
+    );
+    const left = Math.min(Math.max(8, rect.left), maxLeft);
+    const top = Math.min(Math.max(8, rect.top), maxTop);
+    root.style.left = `${left}px`;
+    root.style.top = `${top}px`;
+    writePosition({ left: Math.round(left), top: Math.round(top) });
+  }
+
+  let resize = null;
+
+  function resizeCursor(mode) {
+    if (mode === "e") return "ew-resize";
+    if (mode === "s") return "ns-resize";
+    return "nwse-resize";
+  }
+
+  function onResizePointerMove(event) {
+    if (!resize) return;
+    const dx = event.clientX - resize.startX;
+    const dy = event.clientY - resize.startY;
+    // 右边缘手柄贴着滚动条：指针未超过阈值时不进入缩放，单击不应把居中布局固定下来。
+    if (!resize.moved) {
+      const movedHorizontal = resize.horizontal && Math.abs(dx) >= RESIZE_MOVE_THRESHOLD;
+      const movedVertical = resize.vertical && Math.abs(dy) >= RESIZE_MOVE_THRESHOLD;
+      if (!movedHorizontal && !movedVertical) return;
+      resize.moved = true;
+      // 首次真正移动时才固定左上角：sizeLimits 依赖已写入的 left/top 计算右侧可用宽度。
+      pinTo(resize.left, resize.top);
+    }
+    const { maxWidth, maxHeight } = sizeLimits();
+    const width = Math.min(
+      Math.max(RESIZE_MIN_WIDTH, resize.width + (resize.horizontal ? dx : 0)),
+      maxWidth,
+    );
+    const height = Math.min(
+      Math.max(RESIZE_MIN_HEIGHT, resize.height + (resize.vertical ? dy : 0)),
+      maxHeight,
+    );
+    root.style.width = `${Math.round(width)}px`;
+    root.style.height = `${Math.round(height)}px`;
+  }
+
+  function endResize() {
+    if (!resize) return;
+    const previousCursor = resize.previousCursor;
+    const moved = resize.moved;
+    resize = null;
+    root.classList.remove("is-resizing");
+    document.body.classList.remove("fx-resizing");
+    document.body.style.cursor = previousCursor;
+    window.removeEventListener("pointermove", onResizePointerMove);
+    window.removeEventListener("pointerup", endResize);
+    window.removeEventListener("pointercancel", endResize);
+    window.removeEventListener("blur", endResize);
+    // 只是点在手柄上、没有实际缩放时不写存储：否则居中布局会被固化为显式坐标。
+    if (!moved) return;
+    const rect = root.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return;
+    writeSize({ width: Math.round(rect.width), height: Math.round(rect.height) });
     writePosition({ left: Math.round(rect.left), top: Math.round(rect.top) });
+  }
+
+  function startResize(event, handle) {
+    const mode = handle.getAttribute("data-fx-resize") || "se";
+    const rect = root.getBoundingClientRect();
+    // 缩放期间固定左上角：居中布局改为显式 left/top，右 / 下边缘才会跟随指针。
+    // 若当前位置放不下最小尺寸，先左移 / 上移到能放下的位置；实际固定推迟到指针移动后。
+    const left = Math.min(
+      Math.max(RESIZE_VIEWPORT_GAP, rect.left),
+      Math.max(RESIZE_VIEWPORT_GAP, window.innerWidth - RESIZE_MIN_WIDTH - RESIZE_VIEWPORT_GAP),
+    );
+    const top = Math.min(
+      Math.max(RESIZE_VIEWPORT_GAP, rect.top),
+      Math.max(RESIZE_VIEWPORT_GAP, window.innerHeight - RESIZE_MIN_HEIGHT - RESIZE_VIEWPORT_GAP),
+    );
+    resize = {
+      startX: event.clientX,
+      startY: event.clientY,
+      left,
+      top,
+      width: rect.width,
+      height: rect.height,
+      horizontal: mode === "e" || mode === "se",
+      vertical: mode === "s" || mode === "se",
+      moved: false,
+      previousCursor: document.body.style.cursor,
+    };
+    root.classList.add("is-resizing");
+    document.body.classList.add("fx-resizing");
+    document.body.style.cursor = resizeCursor(mode);
+    window.addEventListener("pointermove", onResizePointerMove);
+    window.addEventListener("pointerup", endResize);
+    window.addEventListener("pointercancel", endResize);
+    window.addEventListener("blur", endResize);
+    event.preventDefault();
   }
 
   function onPointerDown(event) {
     if (event.button !== 0 || isNarrow()) return;
     const target = event.target instanceof Element ? event.target : null;
     if (!target) return;
+    const handle = target.closest("[data-fx-resize]");
+    if (handle && root.contains(handle)) {
+      startResize(event, handle);
+      return;
+    }
     const header = target.closest(".fx-head");
     if (!header || !root.contains(header)) return;
     if (target.closest("button, input, textarea, select, a, [data-no-drag]")) return;
@@ -176,6 +401,7 @@ function mount() {
       left: rect.left,
       top: rect.top,
       width: rect.width,
+      height: rect.height,
     };
     root.style.left = `${rect.left}px`;
     root.style.top = `${rect.top}px`;
@@ -198,18 +424,20 @@ function mount() {
     if (target.closest("button, input, textarea, select, a")) return;
     writePosition(null);
     clearInlinePosition();
+    // 恢复居中后顶部回到 CSS 默认值，重新按视口夹取已保存的尺寸。
+    applyLayout();
   }
 
   function onResize() {
-    // 隐藏时没有布局盒，位置留到重新显示后再夹取。
+    // 隐藏时没有布局盒，位置与尺寸留到重新显示后再夹取。
     if (!visible) return;
-    applyPosition(readPosition());
+    applyLayout();
   }
 
   root.addEventListener("pointerdown", onPointerDown);
   root.addEventListener("dblclick", onDoubleClick);
   window.addEventListener("resize", onResize);
-  applyPosition(readPosition());
+  applyLayout();
 
   function setVisible(next) {
     visible = next;
@@ -217,8 +445,8 @@ function mount() {
     root.classList.toggle("is-hidden", !visible);
     syncLauncherState();
     if (visible) {
-      // 隐藏期间的窗口缩放没有夹取位置：显示后按真实宽度重新夹取。
-      applyPosition(readPosition());
+      // 隐藏期间的窗口缩放没有夹取位置与尺寸：显示后按真实视口重新夹取。
+      applyLayout();
       engine.refresh();
     } else {
       // 审查弹窗通过 Portal 挂在 body 上，浮层隐藏时必须一并关闭，避免残留遮罩。
@@ -326,7 +554,7 @@ function mount() {
     setVisible(!visible);
   }
 
-  render(h(FixBenchPanel, { api, onClose: () => setVisible(false) }), root);
+  render(h(FixBenchPanel, { api, onClose: () => setVisible(false), resizable: true }), root);
   placeChatLauncher();
   document.addEventListener("pointerdown", onDocumentPointerDown, true);
   document.addEventListener("keydown", onDocumentKeyDown, true);
@@ -406,7 +634,16 @@ function mount() {
     window.removeEventListener("pointerup", onPointerUp);
     window.removeEventListener("pointercancel", onPointerUp);
     window.removeEventListener("blur", onPointerUp);
+    window.removeEventListener("pointermove", onResizePointerMove);
+    window.removeEventListener("pointerup", endResize);
+    window.removeEventListener("pointercancel", endResize);
+    window.removeEventListener("blur", endResize);
+    if (resize) {
+      document.body.style.cursor = resize.previousCursor;
+      resize = null;
+    }
     document.body.classList.remove("fx-dragging");
+    document.body.classList.remove("fx-resizing");
     document.removeEventListener("pointerdown", onDocumentPointerDown, true);
     document.removeEventListener("keydown", onDocumentKeyDown, true);
     render(null, root);

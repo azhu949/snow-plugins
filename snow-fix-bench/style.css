@@ -248,6 +248,12 @@
   gap: 10px;
 }
 
+/* 右边缘缩放手柄占浮层最右 5px：主区右边缘内缩同样的宽度，
+   让滚动条整体落在手柄左侧，拖动滚动条不会被当成调整宽度。 */
+.fx-overlay .fx-main {
+  margin-right: 5px;
+}
+
 .fx-section {
   display: flex;
   flex-direction: column;
@@ -738,6 +744,20 @@
   margin-top: 5px;
   font-size: 11px;
   color: var(--text-secondary, inherit);
+}
+
+.fx-activity-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--fx-sub);
+  font-variant-numeric: tabular-nums;
+}
+
+.fx-activity-metrics span {
+  white-space: nowrap;
 }
 
 .fx-activity-actions {
@@ -1378,6 +1398,8 @@
   left: 0;
   width: min(980px, calc(100vw - 32px));
   height: min(620px, calc(100vh - 112px));
+  max-width: calc(100vw - 16px);
+  max-height: calc(100vh - 16px);
   margin-left: auto;
   margin-right: auto;
   z-index: 2147483000;
@@ -1401,7 +1423,8 @@
   cursor: grabbing;
 }
 
-.fx-overlay.is-dragging {
+.fx-overlay.is-dragging,
+.fx-overlay.is-resizing {
   user-select: none;
 }
 
@@ -1415,12 +1438,67 @@ body.fx-dragging {
   cursor: grabbing;
 }
 
+body.fx-resizing {
+  user-select: none;
+}
+
 .fx-overlay.is-hidden {
   display: none;
 }
 
 .fx-overlay .fx-panel {
   height: 100%;
+}
+
+/* 缩放手柄：贴在右 / 下 / 右下角，透明区域只负责命中与光标。
+   右边缘 5px 窄条尽量少遮挡主区滚动条；右下角给一条 L 形抓握提示。 */
+.fx-resize {
+  position: absolute;
+  z-index: 8;
+  touch-action: none;
+  user-select: none;
+}
+
+.fx-resize.is-e {
+  top: 10px;
+  right: 0;
+  bottom: 14px;
+  width: 5px;
+  cursor: ew-resize;
+}
+
+.fx-resize.is-s {
+  right: 14px;
+  bottom: 0;
+  left: 10px;
+  height: 5px;
+  cursor: ns-resize;
+}
+
+.fx-resize.is-se {
+  right: 0;
+  bottom: 0;
+  width: 16px;
+  height: 16px;
+  cursor: nwse-resize;
+}
+
+.fx-resize.is-se::after {
+  content: "";
+  position: absolute;
+  right: 4px;
+  bottom: 4px;
+  width: 7px;
+  height: 7px;
+  border-right: 1.5px solid var(--fx-sub);
+  border-bottom: 1.5px solid var(--fx-sub);
+  border-bottom-right-radius: 3px;
+  opacity: 0.5;
+  transition: opacity 0.15s ease;
+}
+
+.fx-resize.is-se:hover::after {
+  opacity: 1;
 }
 
 /* 聊天输入框入口：不依赖宿主 toolbar-btn，自行定义尺寸、悬停与激活态。 */
@@ -1468,6 +1546,16 @@ body.fx-dragging {
     width: auto;
     height: auto;
     margin-left: 0;
+    margin-right: 0;
+  }
+
+  /* 窄屏浮层铺满视口，缩放没有意义。 */
+  .fx-resize {
+    display: none;
+  }
+
+  /* 手柄已隐藏，主区不需要为右边缘手柄预留安全区。 */
+  .fx-overlay .fx-main {
     margin-right: 0;
   }
 }
