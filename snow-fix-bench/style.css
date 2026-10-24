@@ -1698,6 +1698,105 @@
   margin-top: 2px;
 }
 
+/* ---------------- 自定义提示词 ---------------- */
+
+.fx-prompts {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.fx-prompts-desc {
+  margin: 0;
+  color: var(--fx-text-2);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.fx-prompts-slot {
+  border: 1px solid var(--fx-line-soft);
+  border-radius: var(--fx-r);
+  padding: 9px 11px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.fx-prompts-slot-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  cursor: pointer;
+}
+
+.fx-prompts-slot-head:hover .fx-setting-name {
+  color: var(--fx-accent-text);
+}
+
+.fx-prompts-input {
+  width: 100%;
+  resize: vertical;
+  min-height: 64px;
+  padding: 6px 8px;
+  border: 1px solid var(--fx-line-soft);
+  border-radius: var(--fx-r-sm);
+  background: transparent;
+  color: var(--fx-text);
+  font: inherit;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.fx-prompts-input:focus {
+  outline: none;
+  border-color: var(--fx-accent);
+}
+
+.fx-prompts-input:disabled {
+  opacity: 0.55;
+}
+
+.fx-prompts-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.fx-prompts-toggle {
+  border: none;
+  background: none;
+  padding: 0;
+  color: var(--fx-accent-text);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.fx-prompts-rules {
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: var(--fx-r-sm);
+  background: var(--fx-hover, rgba(127, 127, 127, 0.08));
+  color: var(--fx-text-2);
+  font-size: 10.5px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+.fx-prompts-note {
+  padding: 8px 10px;
+  border: 1px solid var(--fx-line-soft);
+  border-radius: var(--fx-r);
+  background: var(--fx-accent-soft);
+  color: var(--fx-text-2);
+  font-size: 10.5px;
+  line-height: 1.5;
+}
+
 /* ---------------- 设置 ---------------- */
 
 .fx-settings {
@@ -1822,6 +1921,8 @@
 .fx-switch-track {
   position: absolute;
   inset: 0;
+  /* 视觉轨道绘制在透明 checkbox 之上：必须放行点击，否则开关点不动。 */
+  pointer-events: none;
   border: 1px solid var(--fx-line-soft);
   border-radius: 999px;
   background: var(--fx-surface-2);

@@ -6,6 +6,8 @@ import {
   DEFAULT_ISSUE_SEVERITIES,
   CLEANUP_SESSION_KINDS,
   DEFAULT_AUTO_CLEANUP_SESSION_KINDS,
+  CUSTOM_PROMPT_SLOTS,
+  MAX_CUSTOM_PROMPT_CHARS,
 } from "./constants.js";
 import { normalizeSeverityScope } from "./parse.js";
 
@@ -15,6 +17,27 @@ const DEFAULT_REVIEW_MODE = "default";
 
 function normalizeReviewMode(value) {
   return REVIEW_MODES.includes(value) ? value : DEFAULT_REVIEW_MODE;
+}
+
+// 自定义提示词插槽：enabled + text。text 保留换行（多行指令是合理需求），
+// 其余清洗（打散连续 @、控制围栏、限长）在注入时统一进行，这里只做结构与长度归一。
+function normalizeCustomPromptSlot(raw) {
+  const value = raw && typeof raw === "object" ? raw : {};
+  const text = typeof value.text === "string" ? value.text.slice(0, MAX_CUSTOM_PROMPT_CHARS) : "";
+  return {
+    enabled: value.enabled === true,
+    text,
+  };
+}
+
+// 三槽结构固定，未知插槽直接丢弃；每个槽都生成完整对象，调用方无需判空。
+function normalizeCustomPrompts(raw) {
+  const source = raw && typeof raw === "object" ? raw : {};
+  const slots = {};
+  for (const slot of CUSTOM_PROMPT_SLOTS) {
+    slots[slot] = normalizeCustomPromptSlot(source[slot]);
+  }
+  return slots;
 }
 
 // 设置结构版本：schemaVersion 4 新增 autoCleanupSessionKinds。
@@ -79,6 +102,8 @@ function normalizeSettings(raw) {
     verifyAfterFix: Boolean(raw?.verifyAfterFix),
     // 非法值、重复值与空数组统一按默认范围处理，保持「严重 + 一般」。
     issueSeverities: normalizeSeverityScope(raw?.issueSeverities),
+    // 自定义提示词：三槽结构固定；未配置时全部为关闭 + 空文本，行为与默认一致。
+    customPrompts: normalizeCustomPrompts(raw?.customPrompts),
   };
   // 审查方式只在用户显式保存过时写回：旧存储不补默认键，避免无意义地改写配置。
   if (raw && Object.prototype.hasOwnProperty.call(raw, "reviewMode")) {
@@ -95,5 +120,7 @@ export {
   normalizeReviewMode,
   normalizeParallelLimit,
   normalizeCleanupSessionKinds,
+  normalizeCustomPrompts,
+  normalizeCustomPromptSlot,
   normalizeSettings,
 };

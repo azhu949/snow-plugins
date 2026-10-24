@@ -320,5 +320,20 @@
   "fx.verify.start": "开始复审",
   "fx.verify.busy": "正在创建复审会话…",
   "fx.activity.verifyBatchFailed": "下一批复审会话创建失败，剩余批次已保留；可重新解析继续。",
-  "fx.toast.reviewNoChangesInMode": "当前审查方式下没有可审查的变更，已打开范围选择弹窗。"
+  "fx.toast.reviewNoChangesInMode": "当前审查方式下没有可审查的变更，已打开范围选择弹窗。",
+  "fx.prompts.title": "自定义提示词",
+  "fx.prompts.open": "自定义提示词",
+  "fx.prompts.description": "三类提示词的固定规则保持只读；下面的附加要求在启用后会注入对应提示词，留空或关闭时行为与默认一致。",
+  "fx.prompts.slot.review": "审查附加指令",
+  "fx.prompts.slot.fix": "修复附加约束",
+  "fx.prompts.slot.verify": "复审附加要求",
+  "fx.prompts.slotHint.review": "启用后追加到审查提示词的固定规则之后，每次审查生效。",
+  "fx.prompts.slotHint.fix": "启用后追加到修复提示词的硬性约束之后，每批修复生效。",
+  "fx.prompts.slotHint.verify": "启用后追加到复审提示词的复核方法之后，每批复审生效。",
+  "fx.prompts.placeholder.review": "例如：重点关注空指针与异常处理；忽略样式类问题。",
+  "fx.prompts.placeholder.fix": "例如：修改后运行 pnpm test；不要改动 src/legacy 目录。",
+  "fx.prompts.placeholder.verify": "例如：优先核对类型定义与文档是否同步更新。",
+  "fx.prompts.chars": "{{count}} / {{max}} 字符",
+  "fx.prompts.conflictNote": "附加要求仅作为补充关注点与工作方式偏好；与只读约束、安全规则或结构化输出要求冲突时，以插件固定规则为准。",
+  "fx.prompts.defaultRules": "默认固定规则（只读）"
 }

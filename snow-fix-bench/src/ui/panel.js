@@ -160,6 +160,11 @@ function FixBenchView({ api, onClose, resizable }) {
         ),
         h(
           "button",
+          { className: "fx-icon-btn", title: t("fx.prompts.open"), onClick: () => engine.openPromptsDialog() },
+          iconEl(api, "FileText", 14),
+        ),
+        h(
+          "button",
           { className: "fx-icon-btn", title: t("fx.refreshTitle"), onClick: () => engine.refresh() },
           iconEl(api, "RefreshCw", 14),
         ),

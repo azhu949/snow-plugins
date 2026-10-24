@@ -358,6 +358,11 @@ test("并行上限默认值、区间收敛与持久化", async () => {
     autoCleanupSessionKinds: ["fix", "verify"],
     verifyAfterFix: false,
     issueSeverities: ["严重", "一般"],
+    customPrompts: {
+      review: { enabled: false, text: "" },
+      fix: { enabled: false, text: "" },
+      verify: { enabled: false, text: "" },
+    },
   });
 
   // 重新加载后从存储恢复，而不是回退默认值。

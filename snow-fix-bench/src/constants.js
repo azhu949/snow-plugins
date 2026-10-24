@@ -102,6 +102,11 @@ const CLEANUP_SESSION_KINDS = ["review", "fix", "verify"];
 // 默认清理本轮的修复会话与复审会话；审查会话默认保留，便于回溯问题来源。
 const DEFAULT_AUTO_CLEANUP_SESSION_KINDS = ["fix", "verify"];
 
+// 自定义提示词插槽：与提示词构建函数的注入点一一对应，数组顺序决定编辑弹窗的展示顺序。
+const CUSTOM_PROMPT_SLOTS = ["review", "fix", "verify"];
+// 自定义提示词单槽字符上限：与审查备注一致，避免附加要求挤占结构化输出的上下文预算。
+const MAX_CUSTOM_PROMPT_CHARS = 2000;
+
 // 语言包缺失时的内置兜底文案（简体中文）。
 const FALLBACK = {
   "fx.name": "修复工作台",
@@ -454,6 +459,24 @@ const FALLBACK = {
   "fx.confirm.title": "确认操作",
   "fx.confirm.cancel": "取消",
   "fx.confirm.ok": "确认",
+
+  "fx.prompts.title": "自定义提示词",
+  "fx.prompts.open": "自定义提示词",
+  "fx.prompts.description":
+    "三类提示词的固定规则保持只读；下面的附加要求在启用后会注入对应提示词，留空或关闭时行为与默认一致。",
+  "fx.prompts.slot.review": "审查附加指令",
+  "fx.prompts.slot.fix": "修复附加约束",
+  "fx.prompts.slot.verify": "复审附加要求",
+  "fx.prompts.slotHint.review": "启用后追加到审查提示词的固定规则之后，每次审查生效。",
+  "fx.prompts.slotHint.fix": "启用后追加到修复提示词的硬性约束之后，每批修复生效。",
+  "fx.prompts.slotHint.verify": "启用后追加到复审提示词的复核方法之后，每批复审生效。",
+  "fx.prompts.placeholder.review": "例如：重点关注空指针与异常处理；忽略样式类问题。",
+  "fx.prompts.placeholder.fix": "例如：修改后运行 pnpm test；不要改动 src/legacy 目录。",
+  "fx.prompts.placeholder.verify": "例如：优先核对类型定义与文档是否同步更新。",
+  "fx.prompts.chars": "{{count}} / {{max}} 字符",
+  "fx.prompts.conflictNote":
+    "附加要求仅作为补充关注点与工作方式偏好；与只读约束、安全规则或结构化输出要求冲突时，以插件固定规则为准。",
+  "fx.prompts.defaultRules": "默认固定规则（只读）",
 };
 
 export {
@@ -497,5 +520,7 @@ export {
   DEFAULT_ISSUE_SEVERITIES,
   CLEANUP_SESSION_KINDS,
   DEFAULT_AUTO_CLEANUP_SESSION_KINDS,
+  CUSTOM_PROMPT_SLOTS,
+  MAX_CUSTOM_PROMPT_CHARS,
   FALLBACK,
 };

@@ -34,7 +34,7 @@ import {
   isSessionPossiblyRunning,
   isVerifySelectable,
 } from "../src/issues.js";
-import { buildReviewPrompt, buildFixPrompt, buildVerifyPrompt, estimateVerifyIssueChars, langText } from "../src/prompts.js";
+import { buildReviewPrompt, buildFixPrompt, buildVerifyPrompt, estimateVerifyIssueChars, defaultRulesForSlot, langText } from "../src/prompts.js";
 import { normalizeParallelLimit, normalizeSettings } from "../src/settings.js";
 import { createStore } from "../src/store.js";
 import {
@@ -1448,6 +1448,11 @@ test("normalizeParallelLimit 收敛区间并回退默认值", () => {
     autoCleanupSessionKinds: ["fix", "verify"],
     verifyAfterFix: false,
     issueSeverities: [SEVERITY.critical, SEVERITY.major],
+    customPrompts: {
+      review: { enabled: false, text: "" },
+      fix: { enabled: false, text: "" },
+      verify: { enabled: false, text: "" },
+    },
   });
   assert.deepEqual(
     normalizeSettings({
@@ -1468,6 +1473,11 @@ test("normalizeParallelLimit 收敛区间并回退默认值", () => {
       autoCleanupSessionKinds: ["fix", "verify"],
       verifyAfterFix: false,
       issueSeverities: [SEVERITY.critical, SEVERITY.minor],
+      customPrompts: {
+        review: { enabled: false, text: "" },
+        fix: { enabled: false, text: "" },
+        verify: { enabled: false, text: "" },
+      },
     },
   );
   // 空数组或非法值回退默认范围，避免 issue 清单彻底为空。
@@ -2720,4 +2730,123 @@ test("buildVerifyPrompt 截断超长文件列表并把单批提示词控制在�
   for (const batch of batches) {
     assert.ok(buildVerifyPrompt({ locale: "zh-CN", issues: batch }).length <= 40000);
   }
+});
+
+test("buildReviewPrompt 注入启用的自定义审查指令并声明固定规则优先", () => {
+  const base = { locale: "zh-CN", repoPath: "D:/repo", currentCode: true };
+  const customPrompts = {
+    review: { enabled: true, text: "重点关注空指针与异常处理。\n忽略样式类问题。" },
+    fix: { enabled: true, text: "修复时运行 pnpm test。" },
+    verify: { enabled: false, text: "不会被使用的文本。" },
+  };
+  const prompt = buildReviewPrompt({ ...base, customPrompts });
+  assert.ok(prompt.includes("用户附加审查要求"));
+  assert.ok(prompt.includes("重点关注空指针与异常处理。"));
+  assert.ok(prompt.includes("忽略样式类问题。"));
+  // 附加要求保留换行：多行指令按原行结构注入。
+  assert.ok(prompt.includes("重点关注空指针与异常处理。\n忽略样式类问题。"));
+  // 冲突声明必须随小节注入，且输出契约仍在文末。
+  assert.ok(prompt.includes("以插件固定规则与输出契约为准"));
+  assert.ok(prompt.includes("## 插件结构化输出要求（必读）"));
+  // 自定义小节插在固定规则之后、仓库信息之前。
+  assert.ok(prompt.indexOf("用户附加审查要求") < prompt.indexOf("仓库路径"));
+  // 英文 locale 使用英文小节标题。
+  const english = buildReviewPrompt({ ...base, locale: "en", customPrompts });
+  assert.ok(english.includes("Additional review requirements from the user"));
+});
+
+test("自定义提示词关闭或为空时输出与默认提示词完全一致", () => {
+  const base = { locale: "zh-CN", repoPath: "D:/repo", currentCode: true };
+  const disabled = buildReviewPrompt({
+    ...base,
+    customPrompts: { review: { enabled: false, text: "不注入" }, fix: {}, verify: {} },
+  });
+  assert.equal(disabled, buildReviewPrompt(base));
+  const blank = buildReviewPrompt({
+    ...base,
+    customPrompts: { review: { enabled: true, text: "  \n\t " }, fix: {}, verify: {} },
+  });
+  assert.equal(blank, buildReviewPrompt(base));
+  assert.equal(buildReviewPrompt(base), buildReviewPrompt({ ...base, customPrompts: undefined }));
+});
+
+test("buildFixPrompt 在硬性约束之后注入用户附加约束", () => {
+  const prompt = buildFixPrompt({
+    locale: "zh-CN",
+    issues: [],
+    parallelLimit: 3,
+    customPrompts: { fix: { enabled: true, text: "验证使用 pnpm test。\n不要改动 src/legacy 目录。" } },
+  });
+  assert.ok(prompt.includes("【用户附加约束】"));
+  assert.ok(prompt.includes("验证使用 pnpm test。\n不要改动 src/legacy 目录。"));
+  // 注入位置：硬性约束之后、阶段 0 之前。
+  assert.ok(prompt.indexOf("【用户附加约束】") > prompt.indexOf("【硬性约束】"));
+  assert.ok(prompt.indexOf("【用户附加约束】") < prompt.indexOf("【阶段 0：逐条判定】"));
+  assert.ok(prompt.includes("以插件固定规则与输出契约为准"));
+});
+
+test("buildVerifyPrompt 注入用户附加复审要求", () => {
+  const prompt = buildVerifyPrompt({
+    locale: "zh-CN",
+    issues: [],
+    customPrompts: { verify: { enabled: true, text: "优先核对类型定义与文档是否同步更新。" } },
+  });
+  assert.ok(prompt.includes("【用户附加复审要求】"));
+  assert.ok(prompt.includes("优先核对类型定义与文档是否同步更新。"));
+  // 注入位置：复核方法之后、结论状态之前。
+  assert.ok(prompt.indexOf("【用户附加复审要求】") < prompt.indexOf("【结论状态】"));
+});
+
+test("sanitizeCustomPromptText 打散宿主标签、控制围栏并保留换行", () => {
+  const prompt = buildReviewPrompt({
+    locale: "zh-CN",
+    currentCode: true,
+    customPrompts: {
+      review: { enabled: true, text: "参考 @@review: 标签\n```\ncode fence\n```\n收尾" },
+    },
+  });
+  assert.ok(!prompt.includes("@@"));
+  // 自定义文本里的围栏被拆成 ``，不再破坏提示词结构；输出契约自身的围栏不受影响。
+  const customLine = prompt.split("用户附加审查要求")[1]?.split("插件结构化输出要求")[0] || "";
+  assert.ok(!customLine.includes("```"));
+  assert.ok(customLine.includes("``\ncode fence\n``"));
+  assert.ok(customLine.includes("收尾"));
+});
+
+test("normalizeCustomPrompts 归一化结构与长度", () => {
+  const normalized = normalizeSettings({
+    customPrompts: {
+      review: { enabled: true, text: "x".repeat(3000) },
+      unknown: { enabled: true, text: "未知插槽" },
+      fix: "not-an-object",
+    },
+  });
+  const prompts = normalized.customPrompts;
+  assert.deepEqual(Object.keys(prompts).sort(), ["fix", "review", "verify"]);
+  assert.equal(prompts.review.enabled, true);
+  assert.equal(prompts.review.text.length, 2000);
+  assert.equal(prompts.fix.enabled, false);
+  assert.equal(prompts.fix.text, "");
+  assert.equal(prompts.verify.enabled, false);
+  assert.equal(prompts.verify.text, "");
+  // 缺失字段时三槽全部为默认关闭 + 空文本。
+  assert.deepEqual(normalizeSettings({}).customPrompts, {
+    review: { enabled: false, text: "" },
+    fix: { enabled: false, text: "" },
+    verify: { enabled: false, text: "" },
+  });
+});
+
+test("defaultRulesForSlot 输出与构建函数同源的固定规则", () => {
+  const reviewRules = defaultRulesForSlot("review", "zh-CN");
+  assert.ok(reviewRules.includes("只做深入分析"));
+  assert.ok(reviewRules.includes("重点检查"));
+  const fixRules = defaultRulesForSlot("fix", "zh-CN");
+  assert.ok(fixRules.includes("证据优先"));
+  assert.ok(fixRules.includes("Git 独占"));
+  const verifyRules = defaultRulesForSlot("verify", "zh-CN");
+  assert.ok(verifyRules.includes("只读"));
+  assert.equal(defaultRulesForSlot("unknown", "zh-CN"), "");
+  const englishFix = defaultRulesForSlot("fix", "en-US");
+  assert.ok(englishFix.includes("Evidence first"));
 });

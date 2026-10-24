@@ -80,9 +80,12 @@ import {
   DEFAULT_REVIEW_MODE,
   normalizeParallelLimit,
   normalizeCleanupSessionKinds,
+  normalizeCustomPrompts,
+  normalizeCustomPromptSlot,
   normalizeReviewMode,
   normalizeSettings,
 } from "./settings.js";
+import { CUSTOM_PROMPT_SLOTS } from "./constants.js";
 
 const ENGINE_CACHE = new WeakMap();
 // 活动指标写盘节流：流式输出期间指标持续变化，不能每轮轮询都整份保存状态。
@@ -644,7 +647,13 @@ function createEngine(api) {
         // 仍读不到：本次只更新内存，不落盘，保留读取失败标记。
       }
     }
-    const next = normalizeSettings({ ...base, ...patch });
+    // customPrompts 需要按槽位深层合并：弹窗可能只提交改动的槽位，
+    // 直接整份覆盖会把未提交槽位的用户配置重置为默认空值。
+    const merged = { ...base, ...patch };
+    if (patch.customPrompts) {
+      merged.customPrompts = { ...base.customPrompts, ...patch.customPrompts };
+    }
+    const next = normalizeSettings(merged);
     // 调用方显式改写开关（设置弹窗或确认流程）即视为用户确认，之后不再重复询问。
     if (Object.prototype.hasOwnProperty.call(patch || {}, "autoFixAfterReview")) {
       next.autoFixOptIn = true;
@@ -1450,7 +1459,8 @@ function createEngine(api) {
 
     const currentCode = sections.length === 0 && scopeFiles.length === 0;
     // 提示词与完成解析共用同一份范围快照：运行中改设置不能改变本次审查的合法结论。
-    const severities = normalizeSeverityScope(store.get().settings.issueSeverities);
+    const settings = store.get().settings;
+    const severities = normalizeSeverityScope(settings.issueSeverities);
     const prompt = buildReviewPrompt({
       locale: api.locale,
       repoPath: project.path,
@@ -1462,6 +1472,7 @@ function createEngine(api) {
       currentCode,
       scopeTruncated,
       severities,
+      customPrompts: settings.customPrompts,
     });
     return {
       prompt,
@@ -2294,6 +2305,7 @@ function createEngine(api) {
       locale: api.locale,
       issues,
       parallelLimit: batchSize,
+      customPrompts: snapshot.settings?.customPrompts,
     });
     const title = t("fx.title.fixBatch", {
       project: project.name || project.path,
@@ -2506,7 +2518,12 @@ function createEngine(api) {
 
   // 复审预算与批次规划：确认框与实际启动共用同一口径，避免展示的批次与实际不一致。
   function planVerifyScope(issues) {
-    const headerChars = buildVerifyPrompt({ locale: api.locale, issues: [] }).length;
+    // 头部预算同样计入自定义复审附加要求：否则启用后实际提示词会超出规划预算。
+    const headerChars = buildVerifyPrompt({
+      locale: api.locale,
+      issues: [],
+      customPrompts: store.get().settings?.customPrompts,
+    }).length;
     return planVerifyBatches(issues, {
       maxIssues: MAX_VERIFY_BATCH_ISSUES,
       maxChars: MAX_VERIFY_PROMPT_CHARS,
@@ -2607,7 +2624,7 @@ function createEngine(api) {
     const firstBatch = batches[0] || [];
     const queue = batches.slice(1).flat().map((issue) => issue.id);
     const batchTotal = Math.max(1, batches.length);
-    const prompt = buildVerifyPrompt({ locale: api.locale, issues: firstBatch });
+    const prompt = buildVerifyPrompt({ locale: api.locale, issues: firstBatch, customPrompts: snapshot.settings?.customPrompts });
     const title = t(batchTotal > 1 ? "fx.title.verifyBatch" : "fx.title.verify", {
       project: project.name || project.path,
       count: firstBatch.length,
@@ -2771,7 +2788,11 @@ function createEngine(api) {
       (issue) => queuedIds.has(issue.id) && isVerifySelectable(issue) && inFixRound(issue),
     );
     if (!candidates.length) return "empty";
-    const headerChars = buildVerifyPrompt({ locale: api.locale, issues: [] }).length;
+    const headerChars = buildVerifyPrompt({
+      locale: api.locale,
+      issues: [],
+      customPrompts: snapshot.settings?.customPrompts,
+    }).length;
     const batches = planVerifyBatches(candidates, {
       maxIssues: MAX_VERIFY_BATCH_ISSUES,
       maxChars: MAX_VERIFY_PROMPT_CHARS,
@@ -2783,7 +2804,7 @@ function createEngine(api) {
     const remainingIds = batches.slice(1).flat().map((issue) => issue.id);
     const batchNumber = Math.max(1, Number(session.batchNumber) || 1) + 1;
     const batchTotal = batchNumber + Math.max(0, batches.length - 1);
-    const prompt = buildVerifyPrompt({ locale: api.locale, issues: batch });
+    const prompt = buildVerifyPrompt({ locale: api.locale, issues: batch, customPrompts: snapshot.settings?.customPrompts });
     const title = t(batchTotal > 1 ? "fx.title.verifyBatch" : "fx.title.verify", {
       project: project.name || project.path,
       count: batch.length,
@@ -3650,6 +3671,7 @@ function createEngine(api) {
         locale: api.locale,
         issues: batchIssues,
         parallelLimit: batchSize,
+        customPrompts: snapshot.settings?.customPrompts,
       });
       const time = formatStamp(new Date());
       const title = isMultiBatch
@@ -4377,6 +4399,67 @@ function createEngine(api) {
     });
   }
 
+  // 自定义提示词编辑弹窗：展示三类插槽的只读固定规则与可编辑附加要求。
+  // 沿用设置的基线策略：读取失败时展示默认值，保存只提交真正改动过的槽位。
+  function openPromptsDialog() {
+    const snapshot = store.get();
+    const settings = snapshot.settings || DEFAULT_SETTINGS;
+    const custom = normalizeCustomPrompts(settings.customPrompts);
+    const baseline = {
+      review: { ...custom.review },
+      fix: { ...custom.fix },
+      verify: { ...custom.verify },
+    };
+    store.set({
+      dialog: {
+        type: "prompts",
+        error: "",
+        loadFailed: Boolean(snapshot.settingsLoadFailed),
+        baseline,
+        review: { ...custom.review },
+        fix: { ...custom.fix },
+        verify: { ...custom.verify },
+      },
+    });
+  }
+
+  // 三个槽位内容完全一致才视为未改动，避免一次纯文本点击改写整份配置。
+  function sameCustomPrompts(a, b) {
+    return (
+      a?.enabled === b?.enabled && String(a?.text ?? "") === String(b?.text ?? "")
+    );
+  }
+
+  async function savePromptsDialog(dialog) {
+    const baseline = dialog.baseline || {};
+    const patch = {};
+    for (const slot of CUSTOM_PROMPT_SLOTS) {
+      const next = normalizeCustomPromptSlot(dialog[slot]);
+      if (!sameCustomPrompts(next, baseline[slot])) {
+        patch[slot] = next;
+      }
+    }
+    if (!Object.keys(patch).length) {
+      store.set({ dialog: null });
+      setToast("success", t("fx.settings.unchanged"));
+      return;
+    }
+    const result = await setSettings({ customPrompts: patch });
+    if (!result.ok) {
+      setDialogError(
+        "prompts",
+        result.persisted === false && !result.error
+          ? t("fx.settings.readFailed")
+          : t("fx.settings.failed", {
+              error: String(result.error?.cause?.message || result.error?.message || result.error),
+            }),
+      );
+      return;
+    }
+    store.set({ dialog: null });
+    setToast("success", t("fx.settings.saved"));
+  }
+
   async function saveSettingsDialog(dialog) {
     // 只提交用户相对打开弹窗时的基线真正改动过的字段：读取失败后重读成功时，
     // 未改动字段保持存储里的原值，而不是被弹窗展示的默认值覆盖。
@@ -4467,6 +4550,8 @@ function createEngine(api) {
         await applyDelete(dialog.issueIds);
       } else if (dialog.type === "settings") {
         await saveSettingsDialog(dialog);
+      } else if (dialog.type === "prompts") {
+        await savePromptsDialog(dialog);
       }
     } catch (error) {
       const message = String(error?.message || error);
@@ -4518,6 +4603,7 @@ function createEngine(api) {
     openPendingAutoFix,
     openCleanupDialog,
     openSettingsDialog,
+    openPromptsDialog,
     setSettings,
     updateDialog,
     confirmDialog,

@@ -1,4 +1,4 @@
-// 面板对话框：审查范围、批量修复确认、结果清理。
+// 面板对话框：审查范围、批量修复确认、结果清理、自定义提示词。
 import { h, createPortal, iconEl, severityLabel, severityClass, statusLabel, useEffect, useId, useRef, useState } from "./host.js";
 import {
   ISSUE_STATUS,
@@ -8,9 +8,12 @@ import {
   ISSUE_SEVERITIES,
   DEFAULT_ISSUE_SEVERITIES,
   CLEANUP_SESSION_KINDS,
+  CUSTOM_PROMPT_SLOTS,
+  MAX_CUSTOM_PROMPT_CHARS,
 } from "../constants.js";
 import { normalizeSeverityScope } from "../parse.js";
 import { DEFAULT_REVIEW_MODE, REVIEW_MODES, normalizeCleanupSessionKinds } from "../settings.js";
+import { defaultRulesForSlot } from "../prompts.js";
 import { isSessionBusy, isSessionPossiblyRunning, conversationCleanupGroups } from "../issues.js";
 
 // 会话类型与文案键的映射：设置面板与清理弹窗共用同一组标签。
@@ -1102,7 +1105,114 @@ function Dialogs({ dialog, snapshot, engine, api, t }) {
   if (dialog.type === "settings") {
     return h(SettingsDialog, { dialog, snapshot, engine, api, t });
   }
+  if (dialog.type === "prompts") {
+    return h(PromptsDialog, { dialog, engine, api, t });
+  }
   return null;
+}
+
+// 自定义提示词编辑弹窗：三类插槽 = 只读固定规则 + 可编辑附加要求（开关 + 多行文本）。
+// 固定规则来自与构建函数同一份文案源，展示与实际注入内容不会漂移。
+function PromptsDialog({ dialog, engine, api, t }) {
+  const [busy, setBusy] = useState(false);
+  const [expanded, setExpanded] = useState(() => new Set());
+  const toggleRules = (slot) => {
+    setExpanded((current) => {
+      const next = new Set(current);
+      if (next.has(slot)) next.delete(slot);
+      else next.add(slot);
+      return next;
+    });
+  };
+  const body = h(
+    "div",
+    { className: "fx-prompts" },
+    dialog.loadFailed ? h("div", { className: "fx-warn" }, t("fx.settings.loadFailedNotice")) : null,
+    h("p", { className: "fx-prompts-desc" }, t("fx.prompts.description")),
+    CUSTOM_PROMPT_SLOTS.map((slot) =>
+      h(
+        "section",
+        { className: "fx-prompts-slot", key: slot },
+        h(
+          "label",
+          { className: "fx-prompts-slot-head" },
+          h(
+            "div",
+            { className: "fx-setting-main" },
+            h("span", { className: "fx-setting-name" }, t(`fx.prompts.slot.${slot}`)),
+            h("span", { className: "fx-hint" }, t(`fx.prompts.slotHint.${slot}`)),
+          ),
+          h(
+            "span",
+            { className: "fx-switch" },
+            h("input", {
+              type: "checkbox",
+              checked: dialog[slot]?.enabled === true,
+              "aria-label": t(`fx.prompts.slot.${slot}`),
+              onChange: (event) =>
+                engine.updateDialog({
+                  [slot]: { ...dialog[slot], enabled: event.target.checked },
+                }),
+            }),
+            h("span", { className: "fx-switch-track", "aria-hidden": "true" }),
+          ),
+        ),
+        h("textarea", {
+          className: "fx-prompts-input",
+          rows: 4,
+          placeholder: t(`fx.prompts.placeholder.${slot}`),
+          value: dialog[slot]?.text || "",
+          maxLength: MAX_CUSTOM_PROMPT_CHARS,
+          disabled: dialog[slot]?.enabled !== true,
+          onChange: (event) =>
+            engine.updateDialog({
+              [slot]: { ...dialog[slot], text: event.target.value },
+            }),
+        }),
+        h(
+          "div",
+          { className: "fx-prompts-meta" },
+          h(
+            "span",
+            { className: "fx-hint" },
+            t("fx.prompts.chars", { count: (dialog[slot]?.text || "").length, max: MAX_CUSTOM_PROMPT_CHARS }),
+          ),
+          h(
+            "button",
+            { className: "fx-prompts-toggle", onClick: () => toggleRules(slot) },
+            expanded.has(slot) ? t("fx.issues.less") : t("fx.prompts.defaultRules"),
+          ),
+        ),
+        expanded.has(slot)
+          ? h("pre", { className: "fx-prompts-rules" }, defaultRulesForSlot(slot, api?.locale))
+          : null,
+      ),
+    ),
+    h("div", { className: "fx-prompts-note" }, t("fx.prompts.conflictNote")),
+  );
+  const footer = h(
+    "div",
+    { className: "fx-dialog-actions" },
+    h("button", { className: "fx-btn", onClick: () => engine.closeDialog() }, t("fx.settings.cancel")),
+    h(
+      "button",
+      {
+        className: "fx-btn primary",
+        disabled: busy,
+        onClick: async () => {
+          setBusy(true);
+          await engine.confirmDialog();
+          setBusy(false);
+        },
+      },
+      t("fx.settings.save"),
+    ),
+  );
+  return h(
+    DialogShell,
+    { title: t("fx.prompts.title"), closeLabel: t("fx.close"), api, error: dialog.error, onClose: () => engine.closeDialog(), footer },
+    body,
+  );
 }
 
 export { Dialogs };
