@@ -97,6 +97,11 @@ const ISSUE_SEVERITIES = [SEVERITY.critical, SEVERITY.major, SEVERITY.minor];
 // 默认纳入「严重」与「一般」，「建议」需在设置中显式勾选。
 const DEFAULT_ISSUE_SEVERITIES = [SEVERITY.critical, SEVERITY.major];
 
+// 自动清理可处理的会话类型：与台账 kind 一致，数组顺序同时决定设置面板的展示顺序。
+const CLEANUP_SESSION_KINDS = ["review", "fix", "verify"];
+// 默认清理本轮的修复会话与复审会话；审查会话默认保留，便于回溯问题来源。
+const DEFAULT_AUTO_CLEANUP_SESSION_KINDS = ["fix", "verify"];
+
 // 语言包缺失时的内置兜底文案（简体中文）。
 const FALLBACK = {
   "fx.name": "修复工作台",
@@ -134,6 +139,13 @@ const FALLBACK = {
   "fx.empty.desc": "先执行一次代码审查，系统会按设置中的修复范围把问题写入工作台，并自动产生修复清单。",
   "fx.empty.start": "开始代码审查",
   "fx.empty.hint": "审查使用与内置 /review 相同的范围选择与提示词规则。",
+  "fx.empty.cleanupHint": "issue 已清空，但仍有历史会话记录；可在「处理结果」中归档或删除。",
+  "fx.empty.step1": "选择审查范围",
+  "fx.empty.step1Hint": "已暂存变更、工作区变更、提交记录，或直接审查当前代码。",
+  "fx.empty.step2": "AI 只读审查",
+  "fx.empty.step2Hint": "按设置中的严重度范围，把结论写入 issue 清单。",
+  "fx.empty.step3": "勾选后批量修复",
+  "fx.empty.step3Hint": "同文件合并提交，分批执行，结果自动回写并复审。",
 
   "fx.issues.title": "项目 issue",
   "fx.issues.count": "共 {{count}} 条",
@@ -202,6 +214,7 @@ const FALLBACK = {
   "fx.activity.streaming": "正在接收会话输出…",
   "fx.activity.done": "已完成",
   "fx.activity.detached": "已停止跟踪",
+  "fx.activity.errorState": "跟踪中断",
   "fx.activity.open": "打开会话",
   "fx.activity.detach": "停止跟踪",
   "fx.activity.close": "关闭",
@@ -229,11 +242,15 @@ const FALLBACK = {
   "fx.activity.verifyBatchFailed": "下一批复审会话创建失败，剩余批次已保留；可重新解析继续。",
 
   "fx.toast.reviewStarted": "已新建审查会话，正在跟踪结果。",
+  "fx.toast.reviewStartedScope": "已新建审查会话（{{scope}}），正在跟踪结果。",
+  "fx.toast.reviewScopeTruncated": "Git 变更清单被截断，已打开范围选择，请确认本次审查范围。",
   "fx.toast.reviewDone": "审查完成：新增 {{added}} 条，更新 {{updated}} 条，重新打开 {{reopened}} 条。",
   "fx.toast.reviewEmpty": "审查完成：未发现纳入修复范围的问题。",
+  "fx.toast.reviewNoChangesInMode": "当前审查方式下没有可审查的变更，已打开范围选择弹窗。",
   "fx.toast.reviewFiltered": "审查完成：发现 {{count}} 条结论，但均不在本次审查使用的修复范围内；如需纳入，请调整范围后重新发起审查。",
   "fx.toast.reviewParseFailed": "未能从审查结果中解析出 issue，请打开会话检查。",
   "fx.toast.reviewFailed": "审查启动失败：{{error}}",
+  "fx.toast.reviewGitUnreadable": "无法读取 Git 状态，请刷新后重试。",
   "fx.toast.reviewBusy": "已有审查任务正在运行，请等待完成或先停止跟踪。",
   "fx.toast.fixStarted": "已新建修复会话，正在跟踪结果。",
   "fx.toast.fixDone": "修复完成：{{fixed}} 条已修复，{{notFound}} 条不存在，{{blocked}} 条待处理。",
@@ -260,9 +277,23 @@ const FALLBACK = {
   "fx.toast.autoFixDeferred": "审查完成：本次 {{count}} 条待修复 issue 暂不能自动修复（复审或修复仍在进行）；已保留本次范围，可从 issue 列表点「开始自动修复」。",
   "fx.toast.fixBatchStarted": "第 {{batch}}/{{total}} 批修复已启动（{{count}} 条）。",
   "fx.toast.fixAllDone": "全部 {{batches}} 批修复完成。",
-  "fx.toast.autoCleanupDone": "自动清理完成：已归档 {{count}} 条已修复或不存在 issue 及本轮会话。",
-  "fx.toast.autoCleanupDeleted": "自动清理完成：已删除 {{count}} 条已修复或不存在 issue 及本轮会话。",
+  "fx.toast.autoCleanupDone": "自动清理完成：已归档 {{count}} 条已修复或不存在 issue，处理 {{sessions}} 个会话。",
+  "fx.toast.autoCleanupDeleted": "自动清理完成：已删除 {{count}} 条已修复或不存在 issue，处理 {{sessions}} 个会话。",
   "fx.toast.autoCleanupFailed": "自动清理未完全成功：{{error}}",
+  "fx.toast.autoCleanupDoneSkipped":
+    "自动清理完成：已归档 {{count}} 条已修复或不存在 issue，处理 {{sessions}} 个会话；{{skipped}} 个会话仍在运行或无法确认运行状态，已保留，可在「处理结果」中手动清理。",
+  "fx.toast.autoCleanupDeletedSkipped":
+    "自动清理完成：已删除 {{count}} 条已修复或不存在 issue，处理 {{sessions}} 个会话；{{skipped}} 个会话仍在运行或无法确认运行状态，已保留，可在「处理结果」中手动清理。",
+  "fx.toast.autoCleanupDowngraded":
+    "自动清理已改为归档：无法读取会话运行状态，{{skipped}} 个会话已全部保留；{{count}} 条已修复或不存在 issue 已归档（原动作为删除，为避免不可恢复已改为归档），确认会话已结束后可在「处理结果」中删除。",
+  "fx.toast.autoCleanupBaselineArchived":
+    "自动清理完成：已归档 {{count}} 条已修复或不存在 issue，处理 {{sessions}} 个会话；本轮缺少启动时间基准（旧版本启动的修复轮次），{{baseline}} 个审查会话未自动清理，可在「处理结果」中手动确认后处理。",
+  "fx.toast.autoCleanupBaselineArchivedSkipped":
+    "自动清理完成：已归档 {{count}} 条已修复或不存在 issue，处理 {{sessions}} 个会话；本轮缺少启动时间基准（旧版本启动的修复轮次），{{baseline}} 个审查会话未自动清理，另有 {{skipped}} 个会话仍在运行或无法确认运行状态，已保留；均可在「处理结果」中手动处理。",
+  "fx.toast.autoCleanupBaselineDeleted":
+    "自动清理完成：已删除 {{count}} 条已修复或不存在 issue，处理 {{sessions}} 个会话；本轮缺少启动时间基准（旧版本启动的修复轮次），{{baseline}} 个审查会话未自动清理，可在「处理结果」中手动确认后处理。",
+  "fx.toast.autoCleanupBaselineDeletedSkipped":
+    "自动清理完成：已删除 {{count}} 条已修复或不存在 issue，处理 {{sessions}} 个会话；本轮缺少启动时间基准（旧版本启动的修复轮次），{{baseline}} 个审查会话未自动清理，另有 {{skipped}} 个会话仍在运行或无法确认运行状态，已保留；均可在「处理结果」中手动处理。",
   "fx.toast.archived": "已归档 {{count}} 条 issue。",
   "fx.toast.deleted": "已删除 {{count}} 条 issue。",
   "fx.toast.cleanupDone": "处理完成：{{issues}} 条 issue，{{sessions}} 个会话。",
@@ -355,6 +386,7 @@ const FALLBACK = {
   "fx.cleanup.confirm": "确认处理",
   "fx.cleanup.cancel": "取消",
   "fx.cleanup.noSessions": "暂无可处理的会话",
+  "fx.cleanup.noIssues": "没有需要处理的 issue。",
   "fx.cleanup.sessionGroup": "{{label}} · {{count}} 个会话",
   "fx.cleanup.fixedHint": "已修复或已确认不存在的 issue 默认勾选；修复中或待修复项也可勾选后一并删除。",
   "fx.cleanup.deleteWarn": "删除 issue 与删除会话都不可恢复。",
@@ -383,6 +415,11 @@ const FALLBACK = {
   "fx.settings.title": "设置",
   "fx.settings.open": "设置",
   "fx.settings.groupExecution": "执行",
+  "fx.settings.reviewMode": "审查方式",
+  "fx.settings.reviewModeHint": "选「默认」时点击审查会打开范围选择弹窗；选「已暂存变更」或「工作区变更」则直接开始审查。该方式下没有可审查的变更时，改为打开范围选择弹窗。",
+  "fx.settings.reviewMode.default": "默认",
+  "fx.settings.reviewMode.staged": "已暂存变更",
+  "fx.settings.reviewMode.unstaged": "工作区变更",
   "fx.settings.groupAutomation": "自动化",
   "fx.settings.parallel": "并行上限",
   "fx.settings.parallelHint":
@@ -397,10 +434,14 @@ const FALLBACK = {
   "fx.settings.verifyHint":
     "默认关闭。全部批次修复完成后，按批新建只读会话逐条复核已修复的 issue；复审不通过会退回待修复，待确认项不参与自动清理。",
   "fx.settings.autoCleanup": "全部修复完成后自动清理",
-  "fx.settings.autoCleanupHint": "所有批次修复完成后，自动处理本轮的已修复或不存在 issue 与修复会话。",
+  "fx.settings.autoCleanupHint":
+    "所有批次修复完成后，自动处理本轮的已修复或不存在 issue，以及下面勾选的会话类型。",
   "fx.settings.autoCleanupAction": "自动清理动作",
   "fx.settings.cleanupArchive": "归档（可恢复）",
   "fx.settings.cleanupDelete": "删除（不可恢复）",
+  "fx.settings.autoCleanupSessions": "自动清理会话范围",
+  "fx.settings.autoCleanupSessionsHint":
+    "只处理本轮由「自动清理动作」覆盖的会话；未勾选的类型会保留，可在「处理结果」中手动清理。默认勾选修复会话与复审会话，审查会话默认保留；勾选审查会话时，只有其来源条目已全部修复或已确认不存在的审查会话会被清理，仍被待修复、修复中或被复审退回条目引用的来源会话会保留，避免来源链接失效与证据丢失；全部取消时只处理 issue。",
   "fx.settings.save": "保存",
   "fx.settings.cancel": "取消",
   "fx.settings.saved": "设置已保存。",
@@ -454,5 +495,7 @@ export {
   SEVERITY,
   ISSUE_SEVERITIES,
   DEFAULT_ISSUE_SEVERITIES,
+  CLEANUP_SESSION_KINDS,
+  DEFAULT_AUTO_CLEANUP_SESSION_KINDS,
   FALLBACK,
 };

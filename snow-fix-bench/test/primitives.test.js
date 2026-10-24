@@ -1439,12 +1439,13 @@ test("normalizeParallelLimit 收敛区间并回退默认值", () => {
   assert.equal(normalizeParallelLimit(99), 10);
   assert.equal(normalizeParallelLimit(3.6), 4);
   assert.deepEqual(normalizeSettings({}), {
-    schemaVersion: 3,
+    schemaVersion: 4,
     parallelLimit: 3,
     autoFixAfterReview: true,
     autoFixOptIn: false,
     autoCleanupAfterFix: false,
     autoCleanupAction: "archive",
+    autoCleanupSessionKinds: ["fix", "verify"],
     verifyAfterFix: false,
     issueSeverities: [SEVERITY.critical, SEVERITY.major],
   });
@@ -1458,12 +1459,13 @@ test("normalizeParallelLimit 收敛区间并回退默认值", () => {
       issueSeverities: ["建议", "严重", "建议"],
     }),
     {
-      schemaVersion: 3,
+      schemaVersion: 4,
       parallelLimit: 8,
       autoFixAfterReview: false,
       autoFixOptIn: false,
       autoCleanupAfterFix: true,
       autoCleanupAction: "delete",
+      autoCleanupSessionKinds: ["fix", "verify"],
       verifyAfterFix: false,
       issueSeverities: [SEVERITY.critical, SEVERITY.minor],
     },

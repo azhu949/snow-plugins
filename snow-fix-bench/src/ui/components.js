@@ -1,7 +1,7 @@
-// 面板展示组件：流程条、文件树、issue 卡片与活动卡片。
+// 面板展示组件：首页概览、流程轨道、项目树、issue 卡片、活动卡片与空状态。
 import { h, iconEl, STEP_KEYS, formatElapsed, formatDateTime, statusLabel, severityLabel, severityClass, memo, useEffect, useState } from "./host.js";
 import { ISSUE_STATUS, SEVERITY } from "../constants.js";
-import { statusCounts, isFixSelectable, isVerifySelectable, groupIssuesByFile } from "../issues.js";
+import { statusCounts, isFixSelectable, isVerifySelectable, groupIssuesByFile, hasCleanupCandidates } from "../issues.js";
 
 function Stepper({ current, snapshot, t, api }) {
   const currentIndex = STEP_KEYS.indexOf(current);
@@ -29,7 +29,10 @@ function Stepper({ current, snapshot, t, api }) {
   );
 }
 
-function ProjectRow({ directory, color, active, engine, t }) {
+function ProjectRow({ directory, color, active, engine, api, t }) {
+  // 与宿主侧栏一致：项目前是文件夹图标，SSH 项目换成服务器图标；
+  // 有合集时图标沿用合集颜色，未分组时用中性色。
+  const iconName = directory.kind === "ssh" ? "Server" : "Folder";
   return h(
     "button",
     {
@@ -37,10 +40,14 @@ function ProjectRow({ directory, color, active, engine, t }) {
       title: directory.path || directory.name,
       onClick: () => void engine.activateProject(directory.directoryId),
     },
-    h("span", {
-      className: `fx-project-dot ${color ? "" : "is-default"}`,
-      style: color ? { background: color } : undefined,
-    }),
+    h(
+      "span",
+      {
+        className: "fx-project-icon",
+        style: color ? { color } : undefined,
+      },
+      iconEl(api, iconName, 13),
+    ),
     h("span", { className: "fx-project-name" }, directory.name || directory.path),
     active ? h("span", { className: "fx-project-current" }, t("fx.projects.current")) : null,
   );
@@ -130,6 +137,7 @@ function ProjectPane({ snapshot, engine, api, t }) {
       color,
       active: directory.directoryId === activeId,
       engine,
+      api,
       t,
     });
   return h(
@@ -154,7 +162,14 @@ function ProjectPane({ snapshot, engine, api, t }) {
           "div",
           { className: "fx-project-group", key: group.collectionId },
           renderGroupHead(group.collectionId, group.color, group.name, group.members.length),
-          isCollapsed ? null : group.members.map((directory) => renderRow(directory, group.color)),
+          // 成员包一层缩进容器：合集是分区，项目是成员，缩进由 CSS 统一处理。
+          isCollapsed
+            ? null
+            : h(
+                "div",
+                { className: "fx-project-group-body is-nested" },
+                group.members.map((directory) => renderRow(directory, group.color)),
+              ),
         );
       }),
       ungrouped.length
@@ -166,7 +181,11 @@ function ProjectPane({ snapshot, engine, api, t }) {
               : null,
             groups.length && collapsed.has("ungrouped")
               ? null
-              : ungrouped.map((directory) => renderRow(directory, "")),
+              : h(
+                  "div",
+                  { className: `fx-project-group-body${groups.length ? " is-nested" : ""}` },
+                  ungrouped.map((directory) => renderRow(directory, "")),
+                ),
           )
         : null,
       projects.directories.length === 0
@@ -215,7 +234,7 @@ const IssueCard = memo(function IssueCard({ issue, selected, engine, api, t }) {
   };
   return h(
     "article",
-    { className: `fx-issue ${selected ? "is-selected" : ""} is-${issue.status}` },
+    { className: `fx-issue ${selected ? "is-selected" : ""} is-${issue.status} ${severityClass(issue.severity)}` },
     h(
       "div",
       { className: "fx-issue-head" },
@@ -492,8 +511,8 @@ function buildIssueView(snapshot, visible) {
 }
 
 function IssuesSection({ snapshot, visible, engine, api, t, viewMode, onViewModeChange, collapsedGroups, onToggleGroup, view }) {
-  // 默认按文件聚合：同文件问题一次提交，冲突更少，影响面也更直观。
-  const mode = viewMode === "list" ? "list" : "file";
+  // 默认按列表展示；只有显式切到按文件时才聚合分组。
+  const mode = viewMode === "file" ? "file" : "list";
   const collapsed = collapsedGroups instanceof Set ? collapsedGroups : new Set();
   const setMode = (next) => {
     if (typeof onViewModeChange === "function") onViewModeChange(next);
@@ -526,15 +545,21 @@ function IssuesSection({ snapshot, visible, engine, api, t, viewMode, onViewMode
     { key: SEVERITY.major, label: t("fx.issues.filterMajor") },
     { key: SEVERITY.minor, label: t("fx.issues.filterMinor") },
   ];
+  // 状态分段上的计数：全部 = 非归档总量，其余按状态累加。
+  const statusTabCounts = {
+    all: counts.open + counts.fixing + counts.fixed + counts.not_found,
+    open: counts.open,
+    fixing: counts.fixing,
+    fixed: counts.fixed,
+    not_found: counts.not_found,
+    archived: counts.archived,
+  };
   const hasFilter =
     snapshot.statusFilter !== "all" ||
     snapshot.severityFilter !== "all" ||
     Boolean(String(snapshot.searchQuery || "").trim());
   // 清理入口也要覆盖没有当前跟踪会话、但存在历史会话台账的情况。
-  const hasSessionLog =
-    (snapshot.state.conversationLog || []).length > 0 ||
-    Boolean(snapshot.state.sessions.review) ||
-    Boolean(snapshot.state.sessions.fix);
+  const hasSessionLog = hasCleanupCandidates(snapshot.state);
   const renderIssue = (issue) =>
     h(IssueCard, {
       key: issue.id,
@@ -607,103 +632,148 @@ function IssuesSection({ snapshot, visible, engine, api, t, viewMode, onViewMode
           : null,
       ),
     ),
+    // 筛选区：状态用带计数的分段控件，严重度 / 搜索 / 视图压成一行，
+    // 批量选择单独收成小字一行，避免三组「标签 + 一排 chip」占满首屏。
     h(
       "div",
-      { className: "fx-filters" },
-      h("span", { className: "fx-filter-label" }, t("fx.issues.filterStatus")),
-      statusFilters.map((item) =>
-        h(
-          "button",
-          {
-            key: item.key,
-            className: `fx-chip ${snapshot.statusFilter === item.key ? "is-active" : ""}`,
-            onClick: () => engine.setStatusFilter(item.key),
-          },
-          item.label,
-        ),
-      ),
-    ),
-    h(
-      "div",
-      { className: "fx-filters" },
-      h("span", { className: "fx-filter-label" }, t("fx.issues.filterSeverity")),
-      severityFilters.map((item) =>
-        h(
-          "button",
-          {
-            key: item.key,
-            className: `fx-chip ${snapshot.severityFilter === item.key ? "is-active" : ""}`,
-            onClick: () => engine.setSeverityFilter(item.key),
-          },
-          item.label,
-        ),
-      ),
-      h("input", {
-        className: "fx-search",
-        type: "search",
-        value: snapshot.searchQuery || "",
-        placeholder: t("fx.issues.searchPlaceholder"),
-        "aria-label": t("fx.issues.searchPlaceholder"),
-        onInput: (event) => engine.setSearchQuery(event.target.value),
-      }),
-    ),
-    h(
-      "div",
-      { className: "fx-filters" },
-      h("span", { className: "fx-filter-label" }, t("fx.issues.view")),
+      { className: "fx-filterbar" },
       h(
-        "button",
-        {
-          className: `fx-chip ${mode === "file" ? "is-active" : ""}`,
-          onClick: () => setMode("file"),
-        },
-        t("fx.issues.viewFile"),
-      ),
-      h(
-        "button",
-        {
-          className: `fx-chip ${mode === "list" ? "is-active" : ""}`,
-          onClick: () => setMode("list"),
-        },
-        t("fx.issues.viewList"),
-      ),
-      h("span", { className: "fx-filter-divider", "aria-hidden": "true" }),
-      h(
-        "button",
-        {
-          className: "fx-link",
-          disabled: visibleIds.length === 0,
-          onClick: () => engine.selectMany(visibleIds),
-        },
-        t("fx.issues.selectAll"),
-      ),
-      h(
-        "button",
-        {
-          className: "fx-link",
-          disabled: visibleIds.length === 0,
-          onClick: () => engine.invertSelection(visibleIds),
-        },
-        t("fx.issues.invertSelection"),
-      ),
-      selected.length > 0
-        ? h(
+        "div",
+        { className: "fx-segmented is-status", role: "group", "aria-label": t("fx.issues.filterStatus") },
+        statusFilters.map((item) => {
+          const count = statusTabCounts[item.key] || 0;
+          const active = snapshot.statusFilter === item.key;
+          return h(
             "button",
-            { className: "fx-link", onClick: () => engine.clearSelection() },
-            t("fx.issues.clearSelection"),
-          )
-        : null,
-      selected.length > 0 ? h("span", { className: "fx-muted" }, t("fx.issues.selected", { count: selected.length })) : null,
-      hasFilter
-        ? h(
-            "span",
-            { className: "fx-muted" },
-            t("fx.issues.filteredCount", {
-              visible: visible.length,
-              total: statusScopeCount,
-            }),
-          )
-        : null,
+            {
+              key: item.key,
+              type: "button",
+              className: `fx-segment-tab ${active ? "is-active" : ""}`,
+              "aria-pressed": active,
+              onClick: () => engine.setStatusFilter(item.key),
+            },
+            h("span", { className: "fx-segment-tab-label" }, item.label),
+            h(
+              "span",
+              { className: "fx-segment-tab-count", "data-zero": count === 0 ? "true" : undefined },
+              String(count),
+            ),
+          );
+        }),
+      ),
+      h(
+        "div",
+        { className: "fx-filterbar-row" },
+        h(
+          "div",
+          {
+            className: "fx-segmented is-compact",
+            role: "group",
+            "aria-label": t("fx.issues.filterSeverity"),
+            title: t("fx.issues.filterSeverity"),
+          },
+          severityFilters.map((item) =>
+            h(
+              "button",
+              {
+                key: item.key,
+                type: "button",
+                className: `fx-segment-tab ${snapshot.severityFilter === item.key ? "is-active" : ""}`,
+                "aria-pressed": snapshot.severityFilter === item.key,
+                onClick: () => engine.setSeverityFilter(item.key),
+              },
+              h("span", { className: "fx-segment-tab-label" }, item.label),
+            ),
+          ),
+        ),
+        h("input", {
+          className: "fx-search",
+          type: "search",
+          value: snapshot.searchQuery || "",
+          placeholder: t("fx.issues.searchPlaceholder"),
+          "aria-label": t("fx.issues.searchPlaceholder"),
+          onInput: (event) => engine.setSearchQuery(event.target.value),
+        }),
+        h(
+          "div",
+          {
+            className: "fx-segmented is-compact is-view",
+            role: "group",
+            "aria-label": t("fx.issues.view"),
+            title: t("fx.issues.view"),
+          },
+          h(
+            "button",
+            {
+              type: "button",
+              className: `fx-segment-tab ${mode === "list" ? "is-active" : ""}`,
+              "aria-pressed": mode === "list",
+              onClick: () => setMode("list"),
+            },
+            h("span", { className: "fx-segment-tab-label" }, t("fx.issues.viewList")),
+          ),
+          h(
+            "button",
+            {
+              type: "button",
+              className: `fx-segment-tab ${mode === "file" ? "is-active" : ""}`,
+              "aria-pressed": mode === "file",
+              onClick: () => setMode("file"),
+            },
+            h("span", { className: "fx-segment-tab-label" }, t("fx.issues.viewFile")),
+          ),
+        ),
+      ),
+      h(
+        "div",
+        { className: "fx-selectbar" },
+        h(
+          "div",
+          { className: "fx-selectbar-actions" },
+          h(
+            "button",
+            {
+              className: "fx-link",
+              disabled: visibleIds.length === 0,
+              onClick: () => engine.selectMany(visibleIds),
+            },
+            t("fx.issues.selectAll"),
+          ),
+          h(
+            "button",
+            {
+              className: "fx-link",
+              disabled: visibleIds.length === 0,
+              onClick: () => engine.invertSelection(visibleIds),
+            },
+            t("fx.issues.invertSelection"),
+          ),
+          selected.length > 0
+            ? h(
+                "button",
+                { className: "fx-link", onClick: () => engine.clearSelection() },
+                t("fx.issues.clearSelection"),
+              )
+            : null,
+        ),
+        h(
+          "div",
+          { className: "fx-selectbar-meta" },
+          selected.length > 0
+            ? h("span", { className: "fx-muted" }, t("fx.issues.selected", { count: selected.length }))
+            : null,
+          hasFilter
+            ? h(
+                "span",
+                { className: "fx-muted" },
+                t("fx.issues.filteredCount", {
+                  visible: visible.length,
+                  total: statusScopeCount,
+                }),
+              )
+            : null,
+        ),
+      ),
     ),
     h(
       "div",
@@ -727,6 +797,15 @@ function IssuesSection({ snapshot, visible, engine, api, t, viewMode, onViewMode
     ),
   );
 }
+
+// 活动卡的状态文案：相位与文案一一对应，避免运行 / 终态各写一套分支。
+const ACTIVITY_PHASE_KEYS = {
+  waiting: "fx.activity.waiting",
+  streaming: "fx.activity.streaming",
+  done: "fx.activity.done",
+  detached: "fx.activity.detached",
+  error: "fx.activity.errorState",
+};
 
 function formatUpdateAge(t, elapsedMs) {
   const seconds = Math.max(0, Math.floor(Number(elapsedMs) / 1000));
@@ -775,41 +854,48 @@ function ActivityCard({ activity, engine, api, t }) {
       ? activity.startedAt
       : null;
   const updateAge = lastUpdateAt ? formatUpdateAge(t, now - lastUpdateAt) : "";
-  let phaseText = "";
-  if (activity.phase === "waiting") phaseText = t("fx.activity.waiting");
-  else if (activity.phase === "streaming") phaseText = t("fx.activity.streaming");
-  else if (activity.phase === "done") phaseText = t("fx.activity.done");
-  else if (activity.phase === "detached") phaseText = t("fx.activity.detached");
+  const kindText =
+    activity.kind === "review"
+      ? t("fx.activity.review")
+      : activity.kind === "verify"
+        ? t("fx.activity.verify")
+        : t("fx.activity.fix");
+  const statusText = t(ACTIVITY_PHASE_KEYS[activity.phase] || ACTIVITY_PHASE_KEYS.waiting);
   return h(
     "section",
     { className: `fx-activity is-${activity.phase}` },
     h(
       "div",
       { className: "fx-activity-head" },
-      h("span", { className: `fx-pulse ${running ? "is-running" : ""}` }, running ? null : iconEl(api, "Check", 12)),
       h(
-        "b",
-        null,
-        activity.kind === "review"
-          ? t("fx.activity.review")
-          : activity.kind === "verify"
-            ? t("fx.activity.verify")
-            : t("fx.activity.fix"),
+        "span",
+        { className: `fx-activity-status is-${activity.phase}` },
+        running ? h("span", { className: "fx-pulse is-running" }) : null,
+        running ? null : iconEl(api, activity.phase === "done" ? "Check" : "CircleAlert", 11),
+        h("span", null, statusText),
       ),
-      elapsed ? h("span", { className: "fx-muted" }, t("fx.activity.elapsed", { time: elapsed })) : null,
+      h("b", { className: "fx-activity-title" }, kindText),
+      elapsed
+        ? h("span", { className: "fx-activity-meta" }, t("fx.activity.elapsed", { time: elapsed }))
+        : null,
       activity.batchTotal > 1
         ? h(
             "span",
-            { className: "fx-muted" },
+            { className: "fx-activity-meta" },
             t("fx.activity.batch", {
               batch: activity.batchNumber || 1,
               total: activity.batchTotal,
             }),
           )
         : null,
-      h("span", { className: "fx-muted fx-activity-id" }, t("fx.activity.session", { id: activity.conversationId.slice(0, 10) })),
+      h(
+        "span",
+        { className: "fx-activity-id", title: activity.conversationId },
+        t("fx.activity.session", { id: activity.conversationId.slice(0, 10) }),
+      ),
     ),
-    h("div", { className: "fx-activity-body" }, phaseText),
+    // 会话进度没有可用的百分比，进度条只表达「仍在流动」，完成即收起。
+    running ? h("div", { className: "fx-activity-track", "aria-hidden": "true" }, h("span", null)) : null,
     h(
       "div",
       { className: "fx-activity-metrics" },
@@ -826,50 +912,92 @@ function ActivityCard({ activity, engine, api, t }) {
     activity.timedOut ? h("div", { className: "fx-warn" }, t("fx.activity.timeout")) : null,
     h(
       "div",
-      { className: "fx-activity-actions" },
+      { className: "fx-activity-foot" },
+      h("div", { className: "fx-hint fx-activity-hint" }, t("fx.activity.hint")),
       h(
-        "button",
-        { className: "fx-btn small", onClick: () => void engine.openConversation(activity.conversationId) },
-        t("fx.activity.open"),
+        "div",
+        { className: "fx-activity-actions" },
+        h(
+          "button",
+          { className: "fx-btn small", onClick: () => void engine.openConversation(activity.conversationId) },
+          t("fx.activity.open"),
+        ),
+        running
+          ? h("button", { className: "fx-btn small", onClick: () => void engine.detachTracking() }, t("fx.activity.detach"))
+          : resumable
+            ? [
+                h(
+                  "button",
+                  { key: "resume", className: "fx-btn small", onClick: () => void engine.resumeActivityTracking() },
+                  t("fx.activity.resume"),
+                ),
+                h(
+                  "button",
+                  { key: "parse", className: "fx-btn small", onClick: () => void engine.retryParse() },
+                  t("fx.activity.parseRetry"),
+                ),
+              ]
+            : null,
+        h(
+          "button",
+          { className: "fx-btn small ghost", onClick: () => void engine.dismissActivity() },
+          t("fx.activity.close"),
+        ),
       ),
-      running
-        ? h("button", { className: "fx-btn small", onClick: () => void engine.detachTracking() }, t("fx.activity.detach"))
-        : resumable
-          ? [
-              h(
-                "button",
-                { key: "resume", className: "fx-btn small", onClick: () => void engine.resumeActivityTracking() },
-                t("fx.activity.resume"),
-              ),
-              h(
-                "button",
-                { key: "parse", className: "fx-btn small", onClick: () => void engine.retryParse() },
-                t("fx.activity.parseRetry"),
-              ),
-            ]
-          : null,
-      h("button", { className: "fx-btn small", onClick: () => void engine.dismissActivity() }, t("fx.activity.close")),
     ),
-    h("div", { className: "fx-hint" }, t("fx.activity.hint")),
   );
 }
 
-function EmptyState({ snapshot, engine, api, t }) {
+// 空状态即新项目首页：一句结论、一个主操作，再用三步说明「审查 → 提取 → 修复」
+// 的工作方式。issue 被清空但还留着历史会话时，额外提供「处理结果」入口。
+function EmptyState({ engine, api, t, cleanupAvailable }) {
+  const steps = [
+    ["fx.empty.step1", "fx.empty.step1Hint"],
+    ["fx.empty.step2", "fx.empty.step2Hint"],
+    ["fx.empty.step3", "fx.empty.step3Hint"],
+  ];
   return h(
     "section",
     { className: "fx-empty" },
-    h("div", { className: "fx-empty-mark" }, iconEl(api, "ListChecks", 22)),
+    h("div", { className: "fx-empty-mark" }, iconEl(api, "ListChecks", 20)),
     h("div", { className: "fx-empty-title" }, t("fx.empty.title")),
     h("p", { className: "fx-empty-desc" }, t("fx.empty.desc")),
     h(
-      "button",
-      { className: "fx-btn primary", onClick: () => engine.openReviewDialog() },
-      t("fx.empty.start"),
+      "div",
+      { className: "fx-empty-actions" },
+      h(
+        "button",
+        { className: "fx-btn primary", onClick: () => engine.openReviewDialog() },
+        iconEl(api, "ScanSearch", 13),
+        h("span", null, t("fx.empty.start")),
+      ),
+      cleanupAvailable
+        ? h(
+            "button",
+            { className: "fx-btn", onClick: () => engine.openCleanupDialog() },
+            h("span", null, t("fx.cleanup.open")),
+          )
+        : null,
+    ),
+    cleanupAvailable ? h("div", { className: "fx-hint" }, t("fx.empty.cleanupHint")) : null,
+    h(
+      "div",
+      { className: "fx-empty-steps" },
+      steps.map(([titleKey, hintKey], index) =>
+        h(
+          "div",
+          { className: "fx-empty-step", key: titleKey },
+          h("span", { className: "fx-empty-step-index" }, String(index + 1)),
+          h(
+            "span",
+            { className: "fx-empty-step-body" },
+            h("span", { className: "fx-empty-step-title" }, t(titleKey)),
+            h("span", { className: "fx-empty-step-hint" }, t(hintKey)),
+          ),
+        ),
+      ),
     ),
     h("div", { className: "fx-hint" }, t("fx.empty.hint")),
-    snapshot.state.lastReviewAt
-      ? h("div", { className: "fx-muted" }, `${formatDateTime(snapshot.state.lastReviewAt)}`)
-      : null,
   );
 }
 

@@ -2,7 +2,7 @@
 // 脚本版由入口渲染到自建浮层容器；关闭动作由入口注入 onClose。
 import { h, iconEl, useStore, makeT, useCallback, useEffect, useMemo, createPortal, useState } from "./host.js";
 import { resolveEngine } from "../engine.js";
-import { currentStep, listVisibleIssues } from "../issues.js";
+import { currentStep, hasCleanupCandidates, listVisibleIssues } from "../issues.js";
 import { Stepper, ProjectPane, IssuesSection, ActivityCard, EmptyState, buildIssueView } from "./components.js";
 import { Dialogs } from "./dialogs.js";
 
@@ -33,7 +33,8 @@ function FixBenchView({ api, onClose, resizable }) {
   const locale = typeof api === "string" ? api : api?.locale;
   const t = useMemo(() => makeT(api), [api, locale]);
   // issue 列表视图偏好只属于当前面板会话：与状态 / 严重度筛选一样不落盘。
-  const [issueView, setIssueView] = useState("file");
+  // 默认按列表展示，需要合并同文件问题时再切到按文件。
+  const [issueView, setIssueView] = useState("list");
   const [collapsedGroups, setCollapsedGroups] = useState(() => new Set());
   const toggleIssueGroup = useCallback((key) => {
     setCollapsedGroups((current) => {
@@ -108,6 +109,8 @@ function FixBenchView({ api, onClose, resizable }) {
 
   const project = snapshot.project;
   const hasIssues = issues.length > 0;
+  // issue 被清空后可能仍留着历史会话：空状态也必须保留清理入口。
+  const hasSessions = hasCleanupCandidates(snapshot.state);
   // toast 必须挂在 body 上：审查弹窗通过 Portal 位于浮层之上，留在面板内会被遮罩或弹窗挡住。
   const toast =
     snapshot.toast && typeof document !== "undefined" && document.body
@@ -200,7 +203,7 @@ function FixBenchView({ api, onClose, resizable }) {
               collapsedGroups,
               onToggleGroup: toggleIssueGroup,
             })
-          : h(EmptyState, { snapshot, engine, api, t }),
+          : h(EmptyState, { engine, api, t, cleanupAvailable: hasSessions }),
       ),
     ),
     toast,

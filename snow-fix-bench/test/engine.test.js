@@ -349,12 +349,13 @@ test("并行上限默认值、区间收敛与持久化", async () => {
   assert.equal(saved.settings.parallelLimit, 10);
   assert.equal(engine.getSnapshot().settings.parallelLimit, 10);
   assert.deepEqual(state.values.get("fixbench:v2:settings"), {
-    schemaVersion: 3,
+    schemaVersion: 4,
     parallelLimit: 10,
     autoFixAfterReview: true,
     autoFixOptIn: false,
     autoCleanupAfterFix: false,
     autoCleanupAction: "archive",
+    autoCleanupSessionKinds: ["fix", "verify"],
     verifyAfterFix: false,
     issueSeverities: ["严重", "一般"],
   });
@@ -3343,7 +3344,8 @@ test("自动清理归档失败时保留会话台账并可重试", async () => {
   await engine.retryParse();
 
   let snapshot = engine.getSnapshot();
-  assert.equal(snapshot.state.issues[0].status, "fixed");
+  // 会话清理失败不再阻断 issue：失败会话保留在台账里，issue 仍按本轮结论归档。
+  assert.equal(snapshot.state.issues[0].status, "archived");
   assert.equal(snapshot.state.sessions.fix.status, "done");
   assert.deepEqual(snapshot.state.sessions.fix.sessionIds, ["conv-fix", "conv-old"]);
   assert.equal(snapshot.state.conversationLog.length, 2);
@@ -3359,8 +3361,12 @@ test("自动清理归档失败时保留会话台账并可重试", async () => {
   assert.deepEqual(snapshot.state.conversationLog, []);
   assert.equal(snapshot.state.issues[0].status, "archived");
   const archives = state.writes.filter((item) => item.action === "conversations.archive");
-  assert.equal(archives.length, 2);
-  assert.deepEqual(archives[1].params.conversationIds.slice().sort(), ["conv-fix", "conv-old"]);
+  // 上一轮自动清理是「一次批量 + 逐项回退两次」，本轮手动清理再批量一次。
+  assert.equal(archives.length, 4);
+  assert.deepEqual(
+    archives[archives.length - 1].params.conversationIds.slice().sort(),
+    ["conv-fix", "conv-old"],
+  );
   engine.unmount();
 });
 

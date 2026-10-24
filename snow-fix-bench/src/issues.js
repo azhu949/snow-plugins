@@ -2,6 +2,7 @@
 import { ISSUE_STATUS, SEVERITY, STORE_VERSION, SESSION_MISSING_POLLS, FALLBACK, VERIFY_STATUSES } from "./constants.js";
 import { nowMs, uid, normalizeText } from "./util.js";
 import { normalizeSeverity, normalizeSeverityScope, severityRank, statusRank } from "./parse.js";
+import { normalizeCleanupSessionKinds } from "./settings.js";
 // ==================== issue 合并与状态 ====================
 
 // 把位置文本拆成文件路径片段：lowerCase 决定是否做大小写归一化，
@@ -640,6 +641,9 @@ function normalizeSession(raw) {
     conversationId: String(raw.conversationId),
     title: String(raw.title || ""),
     startedAt,
+    // 本轮修复的启动时间：续批会把 startedAt 刷成最新一批，自动清理判断审查会话来源时
+    // 必须使用该冻结值；0 表示旧数据未记录，依赖该基准的清理需保守跳过。
+    runStartedAt: Number(raw.runStartedAt) || 0,
     // 活动指标：重开工作台时恢复真实的最后更新时刻与已接收字符数，旧数据回退到会话启动时间。
     // 最后更新时刻不早于启动时间，避免续批残留值让卡片显示「已运行 1 分钟 / 最后更新 3 小时前」。
     receivedChars: staleMetrics ? 0 : Math.max(0, Math.floor(Number(raw.receivedChars) || 0)),
@@ -665,6 +669,8 @@ function normalizeSession(raw) {
     fixIssueIds: Array.isArray(raw.fixIssueIds) ? raw.fixIssueIds.map(String).filter(Boolean) : [],
     autoCleanup: Boolean(raw.autoCleanup),
     cleanupAction: raw.cleanupAction === "delete" ? "delete" : "archive",
+    // 自动清理的会话范围在启动时随本轮冻结：旧数据缺失时回退默认（修复 + 复审）。
+    cleanupSessionKinds: normalizeCleanupSessionKinds(raw.cleanupSessionKinds),
     // 审查启动时冻结的严重度范围：完成解析必须使用同一范围，兼容旧会话回退当前设置。
     issueSeverities:
       Array.isArray(raw.issueSeverities) && raw.issueSeverities.length
@@ -762,7 +768,30 @@ function removeConversationsFromLog(log, ids) {
   return list.filter((entry) => !target.has(entry.conversationId));
 }
 
+// 删除模式清理会话后同步清空引用它们的条目来源：删除不可恢复，会话已不存在，
+// 保留 conversationId 只会让卡片渲染出必然打开失败的「来源会话」入口。
+// 只清 conversationId，reviewedAt / scopeLabel 保留供审计；归档模式不清，会话恢复后入口仍可用。
+function clearIssueSourceConversations(issues, ids) {
+  const list = Array.isArray(issues) ? issues : [];
+  const values = Array.isArray(ids) ? ids : ids instanceof Set ? Array.from(ids) : [];
+  const target = new Set(values.map(String).filter(Boolean));
+  if (!target.size) return list.slice();
+  return list.map((issue) =>
+    target.has(String(issue?.source?.conversationId || ""))
+      ? { ...issue, source: { ...issue.source, conversationId: "" } }
+      : issue,
+  );
+}
+
 const SESSION_KINDS = ["review", "fix", "verify"];
+
+// 是否存在可清理的会话记录：当前一轮的审查 / 修复 / 复审会话，或台账中的历史会话。
+// 面板在没有 issue 时也要据此保留清理入口，否则 issue 被删空后遗留的历史会话无法归档或删除。
+function hasCleanupCandidates(state) {
+  const log = Array.isArray(state?.conversationLog) ? state.conversationLog : [];
+  if (log.length > 0) return true;
+  return SESSION_KINDS.some((kind) => Boolean(state?.sessions?.[kind]));
+}
 
 // 清理分组：区分当前会话与台账中的历史会话。历史条目只有会话 ID，没有独立运行状态，
 // 清理前必须由调用方用宿主 runtime 再核对一次。
@@ -993,8 +1022,10 @@ export {
   normalizeConversationLog,
   appendConversationLog,
   conversationsForKind,
+  hasCleanupCandidates,
   conversationCleanupGroups,
   removeConversationsFromLog,
+  clearIssueSourceConversations,
   findConversationInDomain,
   shouldDeclareSessionMissing,
   planFixBatches,

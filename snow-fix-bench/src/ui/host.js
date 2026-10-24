@@ -19,6 +19,7 @@ function makeT(source) {
 const ICON_PATHS = {
   X: ["M18 6 6 18", "M6 6l12 12"],
   Check: ["M20 6 9 17l-5-5"],
+  Info: ["M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20Z", "M12 16v-4", "M12 8h.01"],
   CircleAlert: ["M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20Z", "M12 8v4", "M12 16h.01"],
   ChevronDown: ["m6 9 6 6 6-6"],
   ChevronRight: ["m9 18 6-6-6-6"],
@@ -41,6 +42,12 @@ const ICON_PATHS = {
     "M16 16h5v5",
   ],
   ScanSearch: ["M11 18a7 7 0 1 0 0-14 7 7 0 0 0 0 14Z", "m21 21-4.34-4.34"],
+  Server: [
+    "M4 3h16a1 1 0 0 1 1 1v4a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1Z",
+    "M4 15h16a1 1 0 0 1 1 1v4a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1v-4a1 1 0 0 1 1-1Z",
+    "M7 6h1",
+    "M7 18h1",
+  ],
   Settings: [
     "M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z",
     "M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z",
@@ -108,9 +115,13 @@ function severityLabel(t, severity) {
   return String(severity || "");
 }
 
-// 严重度标签样式：列表与两个弹窗共用，避免弹窗固定显示为严重色。
+// 严重度标签样式：列表与各确认弹窗共用，避免弹窗固定显示为严重色。
+// 未知值仍落到 is-major，保持既有显示。
 function severityClass(severity) {
-  return severity === SEVERITY.critical ? "is-critical" : "is-major";
+  if (severity === SEVERITY.critical) return "is-critical";
+  if (severity === SEVERITY.major) return "is-major";
+  if (severity === SEVERITY.minor) return "is-minor";
+  return "is-major";
 }
 
 function useStore(engine) {

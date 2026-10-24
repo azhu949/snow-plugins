@@ -4,12 +4,22 @@ import {
   MIN_PARALLEL_LIMIT,
   MAX_PARALLEL_LIMIT,
   DEFAULT_ISSUE_SEVERITIES,
+  CLEANUP_SESSION_KINDS,
+  DEFAULT_AUTO_CLEANUP_SESSION_KINDS,
 } from "./constants.js";
 import { normalizeSeverityScope } from "./parse.js";
 
-// 设置结构版本：schemaVersion 3 新增 verifyAfterFix、issueSeverities 与 autoFixOptIn。
+// 审查弹窗的默认勾选范围：default 不勾选；staged / unstaged 打开时预选对应分组。
+const REVIEW_MODES = ["default", "staged", "unstaged"];
+const DEFAULT_REVIEW_MODE = "default";
+
+function normalizeReviewMode(value) {
+  return REVIEW_MODES.includes(value) ? value : DEFAULT_REVIEW_MODE;
+}
+
+// 设置结构版本：schemaVersion 4 新增 autoCleanupSessionKinds。
 // autoFixAfterReview 默认开启，但未确认前不会静默修改工作区。
-const SETTINGS_SCHEMA_VERSION = 3;
+const SETTINGS_SCHEMA_VERSION = 4;
 
 const DEFAULT_SETTINGS = Object.freeze({
   schemaVersion: SETTINGS_SCHEMA_VERSION,
@@ -19,6 +29,8 @@ const DEFAULT_SETTINGS = Object.freeze({
   autoFixOptIn: false,
   autoCleanupAfterFix: false,
   autoCleanupAction: "archive",
+  // 自动清理可以处理的会话类型：默认与本轮自动清理的原行为一致（修复 + 复审）。
+  autoCleanupSessionKinds: [...DEFAULT_AUTO_CLEANUP_SESSION_KINDS],
   // 修复完成后的只读复审默认关闭：会额外消耗一次完整会话。
   verifyAfterFix: false,
   // 纳入修复范围的严重程度：只有范围内的审查结论才会写入 issue 清单。
@@ -37,6 +49,14 @@ function normalizeParallelLimit(value) {
   return clamp(Math.round(number), MIN_PARALLEL_LIMIT, MAX_PARALLEL_LIMIT);
 }
 
+// 自动清理会话范围：字段缺失或类型非法时回退默认（修复 + 复审）。
+// 显式空数组保留，表示只处理 issue、不动任何会话；顺序固定为 review / fix / verify。
+function normalizeCleanupSessionKinds(value) {
+  if (!Array.isArray(value)) return [...DEFAULT_AUTO_CLEANUP_SESSION_KINDS];
+  const picked = new Set(value.map(String));
+  return CLEANUP_SESSION_KINDS.filter((kind) => picked.has(kind));
+}
+
 function normalizeSettings(raw) {
   // 旧存储无法区分「旧默认值 false」与「用户主动关闭」，升级时不能替用户改写选择：
   // 只在字段缺失或类型非法时使用默认值，显式写入的布尔值一律保留。
@@ -44,7 +64,7 @@ function normalizeSettings(raw) {
     typeof raw?.autoFixAfterReview === "boolean"
       ? raw.autoFixAfterReview
       : DEFAULT_SETTINGS.autoFixAfterReview;
-  return {
+  const settings = {
     schemaVersion: SETTINGS_SCHEMA_VERSION,
     parallelLimit: normalizeParallelLimit(raw?.parallelLimit),
     autoFixAfterReview,
@@ -55,10 +75,25 @@ function normalizeSettings(raw) {
         : raw?.autoFixAfterReview === true,
     autoCleanupAfterFix: Boolean(raw?.autoCleanupAfterFix),
     autoCleanupAction: raw?.autoCleanupAction === "delete" ? "delete" : "archive",
+    autoCleanupSessionKinds: normalizeCleanupSessionKinds(raw?.autoCleanupSessionKinds),
     verifyAfterFix: Boolean(raw?.verifyAfterFix),
     // 非法值、重复值与空数组统一按默认范围处理，保持「严重 + 一般」。
     issueSeverities: normalizeSeverityScope(raw?.issueSeverities),
   };
+  // 审查方式只在用户显式保存过时写回：旧存储不补默认键，避免无意义地改写配置。
+  if (raw && Object.prototype.hasOwnProperty.call(raw, "reviewMode")) {
+    settings.reviewMode = normalizeReviewMode(raw.reviewMode);
+  }
+  return settings;
 }
 
-export { DEFAULT_SETTINGS, SETTINGS_SCHEMA_VERSION, normalizeParallelLimit, normalizeSettings };
+export {
+  DEFAULT_SETTINGS,
+  SETTINGS_SCHEMA_VERSION,
+  REVIEW_MODES,
+  DEFAULT_REVIEW_MODE,
+  normalizeReviewMode,
+  normalizeParallelLimit,
+  normalizeCleanupSessionKinds,
+  normalizeSettings,
+};

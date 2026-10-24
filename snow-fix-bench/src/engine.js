@@ -66,6 +66,7 @@ import {
   conversationsForKind,
   conversationCleanupGroups,
   removeConversationsFromLog,
+  clearIssueSourceConversations,
   currentStep,
   normalizeStatusFilter,
   normalizeSeverityFilter,
@@ -74,7 +75,14 @@ import { buildReviewPrompt, buildFixPrompt, buildVerifyPrompt, estimateVerifyIss
 import { parseReviewResult, parseFixResults, parseVerifyResults, normalizeSeverityScope } from "./parse.js";
 import { createStore } from "./store.js";
 import { createT } from "./i18n.js";
-import { DEFAULT_SETTINGS, normalizeParallelLimit, normalizeSettings } from "./settings.js";
+import {
+  DEFAULT_SETTINGS,
+  DEFAULT_REVIEW_MODE,
+  normalizeParallelLimit,
+  normalizeCleanupSessionKinds,
+  normalizeReviewMode,
+  normalizeSettings,
+} from "./settings.js";
 
 const ENGINE_CACHE = new WeakMap();
 // 活动指标写盘节流：流式输出期间指标持续变化，不能每轮轮询都整份保存状态。
@@ -94,6 +102,13 @@ function sameSeverityScope(left, right) {
   const a = normalizeSeverityScope(left);
   const b = normalizeSeverityScope(right);
   return a.length === b.length && a.every((item, index) => item === b[index]);
+}
+
+// 自动清理会话范围比较：归一化后按固定顺序比对，忽略勾选顺序差异。
+function sameCleanupSessionKinds(left, right) {
+  const a = normalizeCleanupSessionKinds(left);
+  const b = normalizeCleanupSessionKinds(right);
+  return a.length === b.length && a.every((kind, index) => kind === b[index]);
 }
 
 function normalizeProjects(domain) {
@@ -1547,7 +1562,7 @@ function createEngine(api) {
         "info",
         built.currentCode
           ? t(built.repoMissing ? "fx.toast.gitUnavailable" : "fx.review.noChanges")
-          : t("fx.toast.reviewStarted"),
+          : t("fx.toast.reviewStartedScope", { scope: built.scopeLabel }),
       );
       await saveState({ projectId: token.directoryId, state });
       void track({
@@ -2364,6 +2379,8 @@ function createEngine(api) {
       title,
       // 新批次重新计时：上一批的字符数与最后更新时刻不能带入本批，否则重开后卡片显示矛盾。
       startedAt: at,
+      // 本轮启动时间不随续批变化：自动清理据此区分修复期间新发起的审查会话。
+      runStartedAt: Number(currentSession.runStartedAt) || 0,
       receivedChars: 0,
       lastUpdateAt: at,
       status: "running",
@@ -2682,6 +2699,7 @@ function createEngine(api) {
       fixIssueIds: manual ? stillIssues.map((issue) => issue.id) : allIssueIds,
       autoCleanup: manual ? false : Boolean(fixSession.autoCleanup),
       cleanupAction: manual ? "archive" : fixSession.cleanupAction === "delete" ? "delete" : "archive",
+      cleanupSessionKinds: fixSession.cleanupSessionKinds,
       confirmedCount: 0,
       stillPresentCount: 0,
       uncertainCount: 0,
@@ -3038,10 +3056,12 @@ function createEngine(api) {
       allIssueIds: verifySession.fixIssueIds,
       autoCleanup: verifySession.autoCleanup,
       cleanupAction: verifySession.cleanupAction,
+      cleanupSessionKinds: verifySession.cleanupSessionKinds,
     });
   }
 
-  // 自动清理本轮已修复 issue 与本轮全部修复会话，动作为归档或删除。
+  // 自动清理本轮已修复 issue 与本轮会话，动作为归档或删除。
+  // 会话范围由设置里的「自动清理会话范围」决定：未勾选的类型保留，可在「处理结果」中手动清理。
   async function autoCleanupFixRun(session) {
     const snapshot = store.get();
     const projectId = snapshot.project?.directoryId;
@@ -3052,20 +3072,122 @@ function createEngine(api) {
         ? session.allIssueIds
         : session.issueIds) || [],
     );
-    // 复审会话也属于本轮，自动清理时一并归档 / 删除。
+    const cleanupKinds = new Set(normalizeCleanupSessionKinds(session.cleanupSessionKinds));
+    // 本轮修复会话始终用于匹配 issue 的修复来源；是否清理由勾选范围决定。
+    const fixSessionIds =
+      Array.isArray(session.sessionIds) && session.sessionIds.length
+        ? session.sessionIds
+        : [session.conversationId];
+    const fixConversationIds = new Set(fixSessionIds.map((conversationId) => String(conversationId)));
+    // 复审会话也属于本轮，按设置是否勾选「复审会话」决定是否一并归档 / 删除。
     const verifySession = snapshot.state.sessions.verify;
     const verifyForRun =
       verifySession && verifySession.fixConversationId === session.conversationId ? verifySession : null;
-    const sessionIds = Array.from(
+    // 审查会话按本轮目标 issue 的来源会话收集：只有勾选「审查会话」时才纳入清理。
+    // 只处理台账里仍记录的审查会话，避免对已被清理的旧来源重复发起归档 / 删除。
+    const knownReviewIds = new Set(
+      conversationsForKind(snapshot.state, "review").map((entry) => entry.conversationId),
+    );
+    // 修复期间用户新发起的审查若通过指纹命中并重开本轮 issue，会把 issue.source 改写为
+    // 新审查会话（见 mergeReviewIssues）。因此只收集本轮修复启动前已存在的审查会话，
+    // 避免把用户新发起的审查会话当成本轮来源归档 / 删除。
+    const reviewCreatedAt = new Map(
+      conversationsForKind(snapshot.state, "review").map((entry) => [
+        String(entry.conversationId),
+        Number(entry.createdAt) || 0,
+      ]),
+    );
+    // 本轮启动时间只使用 startFix 时冻结的事实值：续批会覆盖 startedAt，台账条目也可能
+    // 因清理或旧数据迁移缺失、时间失真，从台账反推会得到偏大的基准并扩大清理范围。
+    // 旧数据没有该字段时保持为 0，本轮的审查会话清理会保守跳过，避免不可逆误删。
+    const fixRunStartedAt = Number(session.runStartedAt) || 0;
+    // 本轮某条 issue 是否已有定论：与下面固定归档集合共用同一断言，避免两处判定漂移。
+    const isSettledForRun = (issue) =>
+      ((issue.status === ISSUE_STATUS.fixed && issue.verify?.status !== "uncertain") ||
+        issue.status === ISSUE_STATUS.notFound) &&
+      fixConversationIds.has(String(issue.fix?.conversationId || ""));
+    // 未归档且仍未定论的条目还要靠来源会话取证：只要还有一条这样的条目引用某个审查会话，
+    // 该会话就不能清理，否则卡片的「来源会话」入口失效。已归档条目不再阻止清理：删除模式会在
+    // 清理成功后清空它们的来源引用（见下面的 delete 分支），入口随之消失，而不是变成死链。
+    const unresolvedSourceIds = new Set(
+      snapshot.state.issues
+        .filter((issue) => issue.status !== ISSUE_STATUS.archived && !isSettledForRun(issue))
+        .map((issue) => String(issue.source?.conversationId || ""))
+        .filter(Boolean),
+    );
+    // 勾选审查会话时先按台账与来源保护筛出候选会话，再单独判定时间基准：
+    // 这样能把「基准缺失（旧版本启动的轮次）」与「被来源保护过滤」区分开，前者必须提示用户。
+    const reviewCandidates = cleanupKinds.has("review")
+      ? Array.from(
+          new Set(
+            snapshot.state.issues
+              .filter((issue) => targetIds.has(issue.id))
+              .map((issue) => String(issue.source?.conversationId || ""))
+              .filter(
+                (conversationId) =>
+                  Boolean(conversationId) &&
+                  knownReviewIds.has(conversationId) &&
+                  !unresolvedSourceIds.has(conversationId),
+              ),
+          ),
+        )
+      : [];
+    // 旧版本启动的修复轮次没有 runStartedAt：候选会话无法判定是否早于本轮，只能保守跳过。
+    // 这种情况必须计入提示，否则界面显示「处理 N 个会话」却不解释审查会话为何一个都没处理。
+    const reviewBaselineMissing = fixRunStartedAt <= 0 && reviewCandidates.length > 0;
+    const reviewIds = reviewCandidates.filter((conversationId) => {
+      const createdAt = reviewCreatedAt.get(conversationId) || 0;
+      // 审查创建时间或本轮启动时间无法确定时保守跳过，避免误删修复期间的新审查。
+      return createdAt > 0 && fixRunStartedAt > 0 && createdAt < fixRunStartedAt;
+    });
+    let sessionIds = Array.from(
       new Set(
         [
-          ...(Array.isArray(session.sessionIds) ? session.sessionIds : [session.conversationId]),
-          ...(verifyForRun?.sessionIds || []),
+          ...(cleanupKinds.has("fix") ? fixSessionIds : []),
+          ...(cleanupKinds.has("verify") ? verifyForRun?.sessionIds || [] : []),
+          ...reviewIds,
         ].filter(Boolean),
       ),
     );
+    // 审查会话是普通会话，用户可继续追问触发新一轮输出：清理前必须用 runtime 核对运行状态，
+    // 与「处理结果」手动清理的规则保持一致；修复 / 复审的旧批次同样核对，避免被重开时误删。
+    let skippedSessionCount = 0;
+    // runtime 不可读时无法证明任何待清理会话已结束：用独立标志记录，供后面降级删除动作使用。
+    // 不能复用 skippedSessionCount 判断：runtime 可读、个别会话仍在运行时也会累加它。
+    let runtimeUnreadable = false;
+    if (sessionIds.length) {
+      const runState = await readCleanupRunState(sessionIds);
+      // runtime 读取是异步往返：期间可能切换项目，必须重新校验。
+      if (currentProjectId() !== projectId) return;
+      // runtime 不可读时无法证明任何待清理会话已结束：修复 / 复审会话同样可被用户在宿主
+      // 重开后继续运行，持久化状态与台账无法替代宿主运行状态。此时不再整体暂停本轮清理，
+      // 降级为「跳过全部会话、仅继续处理 issue」：会话交给「处理结果」手动确认（与手动清理
+      // 需显式确认的规则一致），issue 的归档仍按本轮修复结论执行，避免受限权限环境下
+      // 自动清理连同已确认的修复结论一起失效。删除动作不可恢复，另行降级为归档（见下）。
+      if (!runState.known) {
+        runtimeUnreadable = true;
+        skippedSessionCount = sessionIds.length;
+        sessionIds = [];
+      }
+      const blockedIds = runState.runningIds;
+      if (blockedIds.size) {
+        const kept = sessionIds.filter((conversationId) => blockedIds.has(String(conversationId)));
+        if (kept.length) {
+          skippedSessionCount = kept.length;
+          sessionIds = sessionIds.filter((conversationId) => !blockedIds.has(String(conversationId)));
+        }
+      }
+    }
     const sessionIdSet = new Set(sessionIds.map((conversationId) => String(conversationId)));
-    const action = session.cleanupAction === "delete" ? "delete" : "archive";
+    const requestedAction = session.cleanupAction === "delete" ? "delete" : "archive";
+    // 删除不可恢复，且此时用户没有任何确认机会：runtime 不可读时把删除降级为归档，
+    // 与手动清理必须勾选风险确认的策略保持一致；用户仍可在「处理结果」中确认后删除。
+    const action = requestedAction === "delete" && runtimeUnreadable ? "archive" : requestedAction;
+    const downgradedToArchive = requestedAction === "delete" && runtimeUnreadable;
+    // 旧轮次缺少启动时间基准而被跳过的审查会话同样要计入提示，否则用户无从得知原因。
+    // 该数量必须与仍在运行被保留的 skippedSessionCount 分开统计：基准缺失文案声称
+    // 「N 个审查会话」，混入修复 / 复审会话会让数字与「处理结果」的实际遗留不符。
+    const baselineSkippedCount = reviewBaselineMissing ? reviewCandidates.length : 0;
     let cleanupError = "";
     const cleanedIds = new Set();
     if (action === "delete") {
@@ -3075,46 +3197,63 @@ function createEngine(api) {
         else if (!cleanupError) cleanupError = result.error || "conversations.remove failed";
       }
     } else if (sessionIds.length) {
+      // 归档优先一次性批量完成；批量失败时逐项回退，避免个别会话异常把整批一起放弃
+      // （与删除分支的逐项执行、以及 runtime 不可读时的「仅跳过会话」原则一致）。
       const result = await runWrite("conversations.archive", { conversationIds: sessionIds });
-      if (result.ok) for (const conversationId of sessionIds) cleanedIds.add(conversationId);
-      else cleanupError = result.error || "conversations.archive failed";
+      if (result.ok) {
+        for (const conversationId of sessionIds) cleanedIds.add(conversationId);
+      } else {
+        cleanupError = result.error || "conversations.archive failed";
+        for (const conversationId of sessionIds) {
+          const retry = await runWrite("conversations.archive", { conversationIds: [conversationId] });
+          if (retry.ok) cleanedIds.add(conversationId);
+        }
+        // 逐项重试后全部成功时不再报告失败，避免没有失败项却提示「未完全成功」。
+        if (cleanedIds.size === sessionIds.length) cleanupError = "";
+      }
     }
     if (currentProjectId() !== projectId) return;
-    // 全部会话都未处理成功时不改动 issue、台账与 sessions：保留完整状态供下一次清理重试。
-    if (cleanupError && !cleanedIds.size) {
-      setToast("error", t("fx.toast.autoCleanupFailed", { error: cleanupError }));
-      return;
-    }
+    // 会话清理失败不再阻断 issue 的归档 / 删除：未成功的会话保留在台账与 conversationLog 中，
+    // 交给「处理结果」手动重试，本轮已确认的修复结论仍照常写入，避免一次会话清理失败让
+    // 整轮自动清理看似什么都没做。
     const latest = store.get();
     // 清理写会话期间可能已有审查完成并重新打开某个 issue：必须以最新状态重新筛选，
     // 只处理仍是 fixed 且修复会话属于本轮的条目，避免误删回归项或归档为错误来源状态。
+    // 修复来源始终以本轮修复会话判定，与是否勾选「修复会话」清理无关。
     const fixedIssues = latest.state.issues.filter(
-      (issue) =>
-        targetIds.has(issue.id) &&
-        // 复审未通过的条目已退回待修复；待确认的条目保留，避免把未验证的结论自动归档。
-        ((issue.status === ISSUE_STATUS.fixed && issue.verify?.status !== "uncertain") ||
-          issue.status === ISSUE_STATUS.notFound) &&
-        sessionIdSet.has(String(issue.fix?.conversationId || "")),
+      // 复审未通过的条目已退回待修复；待确认的条目保留，避免把未验证的结论自动归档。
+      (issue) => targetIds.has(issue.id) && isSettledForRun(issue),
     );
     const fixedIds = new Set(fixedIssues.map((issue) => issue.id));
     let issues = latest.state.issues;
     if (action === "delete") {
       issues = issues.filter((issue) => !fixedIds.has(issue.id));
+      // 删除不可恢复：清空仍引用被删会话的条目来源（含已归档条目），
+      // 避免卡片留下必然打开失败的「来源会话」入口。
+      issues = clearIssueSourceConversations(issues, cleanedIds);
     } else {
       issues = issues.map((issue) => (fixedIds.has(issue.id) ? archiveIssueRecord(issue) : issue));
     }
-    // 只有确认处理成功的会话才从台账移除；未成功的保留在 sessions.fix 供下一次清理重试。
-    const pendingIds = sessionIds.filter((conversationId) => !cleanedIds.has(conversationId));
+    // 只有确认处理成功的会话才从台账移除；未成功或未勾选的会话保留供手动清理。
     const sessions = { ...latest.state.sessions };
     const fixSession = sessions.fix;
     if (!fixSession || !fixSession.conversationId || cleanedIds.has(String(fixSession.conversationId))) {
       sessions.fix = null;
     } else {
-      sessions.fix = { ...fixSession, sessionIds: pendingIds };
+      sessions.fix = {
+        ...fixSession,
+        sessionIds: (Array.isArray(fixSession.sessionIds) ? fixSession.sessionIds : []).filter(
+          (conversationId) => !cleanedIds.has(String(conversationId)),
+        ),
+      };
     }
     // 复审会话同样只在确认清理成功后才移除，失败时保留供下一次清理重试。
     if (verifyForRun && cleanedIds.has(String(verifyForRun.conversationId))) {
       sessions.verify = null;
+    }
+    // 审查会话被清理后同步移除记录，避免面板与「处理结果」把已归档会话当成待处理项。
+    if (sessions.review && cleanedIds.has(String(sessions.review.conversationId))) {
+      sessions.review = null;
     }
     const nextState = {
       ...latest.state,
@@ -3122,19 +3261,50 @@ function createEngine(api) {
       conversationLog: removeConversationsFromLog(latest.state.conversationLog, cleanedIds),
       sessions,
     };
-    // 只关闭本轮修复会话的卡片；等待期间新启动的审查卡片不能被一并清掉。
+    // 只关闭本轮被清理的会话卡片；等待期间新启动的审查卡片不能被一并清掉。
     const activity =
       latest.activity && sessionIdSet.has(String(latest.activity.conversationId || ""))
         ? null
         : latest.activity;
     store.set({ state: nextState, activity, selected: [] });
+    // skipped 只统计仍在运行或无法确认状态的会话，baseline 只统计基准缺失的审查会话：
+    // 各分支文案各用各的数字，避免合计值在任一文案里被错误归因。
+    const toastValues = {
+      count: fixedIssues.length,
+      sessions: cleanedIds.size,
+      skipped: skippedSessionCount,
+      baseline: baselineSkippedCount,
+    };
+    // 提示优先级：清理失败 > 删除降级 > 基准缺失 > 常规归档 / 删除。
+    // 降级与基准缺失都必须走 error 级，避免 6 秒后自动消失时用户错过「删除意图被否决」。
     setToast(
-      cleanupError ? "error" : "success",
+      cleanupError || downgradedToArchive || reviewBaselineMissing ? "error" : "success",
       cleanupError
         ? t("fx.toast.autoCleanupFailed", { error: cleanupError })
-        : action === "delete"
-          ? t("fx.toast.autoCleanupDeleted", { count: fixedIssues.length })
-          : t("fx.toast.autoCleanupDone", { count: fixedIssues.length }),
+        : downgradedToArchive
+          ? t("fx.toast.autoCleanupDowngraded", toastValues)
+          : reviewBaselineMissing
+            ? t(
+                skippedSessionCount
+                  ? action === "delete"
+                    ? "fx.toast.autoCleanupBaselineDeletedSkipped"
+                    : "fx.toast.autoCleanupBaselineArchivedSkipped"
+                  : action === "delete"
+                    ? "fx.toast.autoCleanupBaselineDeleted"
+                    : "fx.toast.autoCleanupBaselineArchived",
+                toastValues,
+              )
+            : action === "delete"
+              ? t(
+                  skippedSessionCount
+                    ? "fx.toast.autoCleanupDeletedSkipped"
+                    : "fx.toast.autoCleanupDeleted",
+                  toastValues,
+                )
+              : t(
+                  skippedSessionCount ? "fx.toast.autoCleanupDoneSkipped" : "fx.toast.autoCleanupDone",
+                  toastValues,
+                ),
     );
     await saveState({ projectId, state: nextState });
   }
@@ -3447,6 +3617,8 @@ function createEngine(api) {
       return false;
     }
     try {
+      // 本轮启动时间在首批创建前冻结：续批会覆盖 startedAt，该值只用于判定审查会话是否早于本轮修复。
+      const runStartedAt = nowMs();
       const selectedIds = Array.isArray(issueIds) ? issueIds.map(String) : [];
       const snapshot = store.get();
       const issues = snapshot.state.issues.filter(
@@ -3555,6 +3727,8 @@ function createEngine(api) {
             conversationId,
             title,
             startedAt: at,
+            // 分批修复共用同一本轮启动时间，用于自动清理时区分修复期间新发起的审查会话。
+            runStartedAt,
             status: "running",
             scopeLabel: isMultiBatch
               ? t("fx.fix.scopeBatch", { count: liveIssues.length, batch: 1, total: batchTotal })
@@ -3569,6 +3743,8 @@ function createEngine(api) {
             sessionIds: [conversationId],
             autoCleanup: Boolean(current.settings?.autoCleanupAfterFix),
             cleanupAction: current.settings?.autoCleanupAction === "delete" ? "delete" : "archive",
+            // 本轮冻结自动清理的会话范围：运行期间改设置不影响已开始的修复轮次。
+            cleanupSessionKinds: normalizeCleanupSessionKinds(current.settings?.autoCleanupSessionKinds),
             lastError: "",
           },
         },
@@ -3703,6 +3879,9 @@ function createEngine(api) {
     } else {
       issues = issues.map((issue) => (selectedSet.has(issue.id) ? archiveIssueRecord(issue) : issue));
     }
+    // 删除不可恢复：清空仍引用被删会话的条目来源（含未选中与已归档条目），
+    // 避免卡片留下必然打开失败的「来源会话」入口；归档模式保留入口，恢复会话后仍可用。
+    issues = clearIssueSourceConversations(issues, removedIds);
     const sessions = { ...latest.state.sessions };
     // 清理时删除 issue 同样要保留旧修复会话的文件占用证据。
     if (issueAction === "delete" && sessions.fix) {
@@ -3934,7 +4113,96 @@ function createEngine(api) {
     await saveState({ projectId: snapshot.project?.directoryId, state });
   }
 
-  function openReviewDialog() {
+  // 已暂存 / 工作区模式：点审查直接开跑，不再弹范围选择框。
+  // 等待 Git 读取与会话创建期间用一个本地标记挡住重复点击。
+  let directReviewPending = false;
+  async function startReviewWithMode(mode) {
+    // 已经开始时静默返回会让用户误以为没点中：给一次加载反馈。
+    if (directReviewPending) {
+      setToast("info", t("fx.review.loading"));
+      return;
+    }
+    const snapshot = store.get();
+    if (!snapshot.project?.path) {
+      setToast("error", t("fx.toast.noProject"));
+      return;
+    }
+    const reviewing = ["waiting", "streaming"].includes(snapshot.activity?.phase);
+    if (snapshot.activity?.kind === "review" && reviewing) {
+      setToast("error", t("fx.toast.reviewBusy"));
+      return;
+    }
+    const directoryId = snapshot.project.directoryId || "";
+    directReviewPending = true;
+    // 立即给出反馈，覆盖 Git 读取与会话创建全程，避免界面静默。
+    setToast("info", t("fx.review.loading"));
+    try {
+      // 直达模式没有可复核的变更列表：每次进入都重新读取 Git 状态，
+      // 否则面板常开期间新暂存 / 新修改的文件不会进入本次审查范围。
+      // loadGit 内部按序号丢弃过期结果，重复点击由 directReviewPending 挡住。
+      await loadGit();
+      const current = store.get();
+      if ((current.project?.directoryId || "") !== directoryId) {
+        setToast("error", t("fx.error.projectSwitched"));
+        return;
+      }
+      const git = current.git;
+      // Git 不可用时不能按「没有变更」静默取消：先给出真实原因，再回退到范围选择弹窗，
+      // 用户可以刷新重试、改选其它范围，或直接审查当前代码。
+      // 降级一律复用本次已读取的 Git 结果：避免二次 loadGit 浪费一次 IPC 往返，
+      // 也防止其失败把弹窗刚展示的正确状态覆盖成错误视图。
+      if (git.error) {
+        setToast("error", t("fx.toast.reviewFailed", { error: git.error }));
+        openReviewScopeDialog({ reuseGit: true });
+        return;
+      }
+      if (git.status?.isRepo === false) {
+        setToast("error", t("fx.toast.reviewFailed", { error: t("fx.review.notRepo") }));
+        openReviewScopeDialog({ reuseGit: true });
+        return;
+      }
+      if (!git.status) {
+        setToast("error", t("fx.toast.reviewFailed", { error: t("fx.toast.reviewGitUnreadable") }));
+        openReviewScopeDialog({ reuseGit: true });
+        return;
+      }
+      const files = git.status.files || [];
+      const prefix = mode === "staged" ? "staged" : "unstaged";
+      const pick = mode === "staged" ? isStagedFile : isUnstagedFile;
+      const keys = files.filter(pick).map((file) => `${prefix}:${file.path}`);
+      if (!keys.length) {
+        // 该模式下没有可审查的变更：不能静默把范围扩大到「当前全部代码」，
+        // 否则与设置语义不符，还可能在大项目上触发一次高成本的全量审查。
+        // 与 Git 不可用 / 清单截断等降级路径保持一致：先说明原因，再打开范围选择弹窗，
+        // 由用户明确选择本次审查范围；复用本次已读取的 Git 结果，不重复 loadGit。
+        setToast("info", t("fx.toast.reviewNoChangesInMode"));
+        openReviewScopeDialog({ reuseGit: true });
+        return;
+      }
+      // 清单被截断时范围可能不完整：不静默开跑，改为打开范围选择（弹窗内已有截断警告条）。
+      if (git.status?.statusLimitHit) {
+        setToast("info", t("fx.toast.reviewScopeTruncated"));
+        openReviewScopeDialog({ reuseGit: true });
+        return;
+      }
+      await startReview({
+        type: "review",
+        directoryId,
+        staged: mode === "staged" ? keys : [],
+        unstaged: mode === "unstaged" ? keys : [],
+        commits: [],
+        note: "",
+      });
+    } catch (error) {
+      setToast("error", String(error?.message || error));
+    } finally {
+      directReviewPending = false;
+    }
+  }
+
+  // 范围选择弹窗本身：默认入口与直接审查的降级路径共用，不按设置再次派发。
+  // reuseGit=true 时复用调用方刚读取的 Git 结果（直接审查的降级路径），跳过二次 loadGit。
+  function openReviewScopeDialog(options = {}) {
     // 与宿主 /review 面板一致：每次打开都重新读取 Git 状态，并且初始不勾选任何变更。
     // 同时允许自动补一次提交记录，打开弹窗即可直接看到提交列表。
     commitAutoTried = false;
@@ -3946,12 +4214,28 @@ function createEngine(api) {
         unstaged: [],
         commits: [],
         note: "",
-        loading: true,
+        loading: !options.reuseGit,
         error: "",
       },
     });
-    // loadGit 完成后由 syncReviewDialog 回填勾选项与加载态。
-    void loadGit();
+    if (options.reuseGit) {
+      // 复用路径不重跑 loadGit：沙箱档的提交列表仍需命令通道自动补一次
+      //（完全权限档 commits 已有值，autoLoadCommits 会直接跳过）。
+      void autoLoadCommits({ directoryId: store.get().project?.directoryId || "", epoch: projectEpoch });
+    } else {
+      // loadGit 完成后由 syncReviewDialog 回填勾选项与加载态。
+      void loadGit();
+    }
+  }
+
+  function openReviewDialog() {
+    // 审查方式为已暂存 / 工作区时直接开始审查，不打开范围选择弹窗。
+    const reviewMode = normalizeReviewMode(store.get().settings?.reviewMode);
+    if (reviewMode !== DEFAULT_REVIEW_MODE) {
+      void startReviewWithMode(reviewMode);
+      return;
+    }
+    openReviewScopeDialog();
   }
 
   function openFixDialog(issueIds, options = {}) {
@@ -4068,8 +4352,11 @@ function createEngine(api) {
       autoFixAfterReview: settings.autoFixAfterReview,
       autoCleanupAfterFix: settings.autoCleanupAfterFix,
       autoCleanupAction: settings.autoCleanupAction,
+      autoCleanupSessionKinds: normalizeCleanupSessionKinds(settings.autoCleanupSessionKinds),
       verifyAfterFix: settings.verifyAfterFix,
       issueSeverities: [...settings.issueSeverities],
+      // 审查方式可能尚未写入存储：缺失时按默认值展示与比较。
+      reviewMode: normalizeReviewMode(settings.reviewMode),
     };
     store.set({
       dialog: {
@@ -4082,8 +4369,10 @@ function createEngine(api) {
         autoFixAfterReview: baseline.autoFixAfterReview,
         autoCleanupAfterFix: baseline.autoCleanupAfterFix,
         autoCleanupAction: baseline.autoCleanupAction,
+        autoCleanupSessionKinds: [...baseline.autoCleanupSessionKinds],
         verifyAfterFix: baseline.verifyAfterFix,
         issueSeverities: [...baseline.issueSeverities],
+        reviewMode: baseline.reviewMode,
       },
     });
   }
@@ -4102,11 +4391,18 @@ function createEngine(api) {
     if (dialog.autoCleanupAction !== baseline.autoCleanupAction) {
       patch.autoCleanupAction = dialog.autoCleanupAction;
     }
+    if (!sameCleanupSessionKinds(dialog.autoCleanupSessionKinds, baseline.autoCleanupSessionKinds)) {
+      patch.autoCleanupSessionKinds = normalizeCleanupSessionKinds(dialog.autoCleanupSessionKinds);
+    }
     if (dialog.verifyAfterFix !== baseline.verifyAfterFix) {
       patch.verifyAfterFix = dialog.verifyAfterFix;
     }
     if (!sameSeverityScope(dialog.issueSeverities, baseline.issueSeverities)) {
       patch.issueSeverities = dialog.issueSeverities;
+    }
+    // 审查方式与默认值相同时也允许显式写回：用户可能是把已保存的方式改回默认。
+    if (normalizeReviewMode(dialog.reviewMode) !== baseline.reviewMode) {
+      patch.reviewMode = normalizeReviewMode(dialog.reviewMode);
     }
     // 只有用户确实改动了自动修复开关才算显式确认；保存其它设置不改动 opt-in。
     if (dialog.autoFixAfterReview !== baseline.autoFixAfterReview) {

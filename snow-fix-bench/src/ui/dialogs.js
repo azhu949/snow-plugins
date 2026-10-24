@@ -7,9 +7,18 @@ import {
   MAX_PARALLEL_LIMIT,
   ISSUE_SEVERITIES,
   DEFAULT_ISSUE_SEVERITIES,
+  CLEANUP_SESSION_KINDS,
 } from "../constants.js";
 import { normalizeSeverityScope } from "../parse.js";
+import { DEFAULT_REVIEW_MODE, REVIEW_MODES, normalizeCleanupSessionKinds } from "../settings.js";
 import { isSessionBusy, isSessionPossiblyRunning, conversationCleanupGroups } from "../issues.js";
+
+// 会话类型与文案键的映射：设置面板与清理弹窗共用同一组标签。
+const CLEANUP_SESSION_LABEL_KEYS = {
+  review: "fx.cleanup.reviewSession",
+  fix: "fx.cleanup.fixSession",
+  verify: "fx.cleanup.verifySession",
+};
 
 function DialogShell({ title, closeLabel, api, onClose, children, footer, error }) {
   return h(
@@ -579,7 +588,7 @@ function CleanupDialog({ dialog, snapshot, engine, api, t }) {
     { className: "fx-cleanup" },
     h("div", { className: "fx-cleanup-title" }, t("fx.cleanup.issues")),
     cleanupIssues.length === 0
-      ? h("div", { className: "fx-empty-small" }, t("fx.issues.empty"))
+      ? h("div", { className: "fx-empty-small" }, t("fx.cleanup.noIssues"))
       : h(
           "div",
           { className: "fx-cleanup-issues" },
@@ -792,18 +801,24 @@ function SettingsDialog({ dialog, engine, api, t }) {
     : DEFAULT_ISSUE_SEVERITIES;
   const autoCleanup = Boolean(dialog.autoCleanupAfterFix);
   const cleanupAction = dialog.autoCleanupAction || "archive";
+  const cleanupSessionKinds = normalizeCleanupSessionKinds(dialog.autoCleanupSessionKinds);
+  const reviewMode = dialog.reviewMode || DEFAULT_REVIEW_MODE;
 
-  // 整行都是 label：点标题、说明或圆钮都能切换，减少小目标点击成本。
+  // 名称行与常显说明：说明常驻可见，键盘、触屏与读屏用户无需悬停即可读到。
+  const nameRow = (label, hint) =>
+    h(
+      "span",
+      { className: "fx-setting-name-block" },
+      h("span", { className: "fx-setting-name" }, label),
+      h("span", { className: "fx-hint" }, hint),
+    );
+
+  // 整行都是 label：点标题或圆钮都能切换，说明常显在名称下方。
   const switchRow = (label, hint, checked, onChange) =>
     h(
       "label",
       { className: "fx-setting is-toggle" },
-      h(
-        "span",
-        { className: "fx-setting-main" },
-        h("span", { className: "fx-setting-name" }, label),
-        h("span", { className: "fx-setting-hint" }, hint),
-      ),
+      h("span", { className: "fx-setting-main" }, nameRow(label, hint)),
       h(
         "span",
         { className: "fx-switch" },
@@ -828,6 +843,40 @@ function SettingsDialog({ dialog, engine, api, t }) {
       h(
         "div",
         { className: "fx-settings-card" },
+        // 审查方式：决定打开审查弹窗时默认勾选的变更范围。
+        h(
+          "div",
+          { className: "fx-setting is-stack" },
+          h(
+            "div",
+            { className: "fx-setting-main" },
+            nameRow(t("fx.settings.reviewMode"), t("fx.settings.reviewModeHint")),
+          ),
+          h(
+            "div",
+            {
+              className: "fx-segment",
+              role: "radiogroup",
+              "aria-label": t("fx.settings.reviewMode"),
+            },
+            REVIEW_MODES.map((mode) =>
+              h(
+                "label",
+                {
+                  className: `fx-segment-item ${reviewMode === mode ? "is-active" : ""}`,
+                  key: mode,
+                },
+                h("input", {
+                  type: "radio",
+                  name: "fx-review-mode",
+                  checked: reviewMode === mode,
+                  onChange: () => engine.updateDialog({ reviewMode: mode }),
+                }),
+                h("span", null, t(`fx.settings.reviewMode.${mode}`)),
+              ),
+            ),
+          ),
+        ),
         h(
           "div",
           { className: "fx-setting" },
@@ -839,10 +888,11 @@ function SettingsDialog({ dialog, engine, api, t }) {
               { className: "fx-setting-name", for: "fx-settings-parallel" },
               t("fx.settings.parallel"),
             ),
-            h("span", { className: "fx-setting-hint" }, t("fx.settings.parallelHint")),
+            // 并行上限决定单次批量规模：说明常显，键盘与触屏用户都能直接读到。
+            h("span", { className: "fx-hint" }, t("fx.settings.parallelHint")),
             h(
               "span",
-              { className: "fx-setting-meta" },
+              { className: "fx-hint" },
               t("fx.settings.parallelRange", {
                 min: MIN_PARALLEL_LIMIT,
                 max: MAX_PARALLEL_LIMIT,
@@ -867,16 +917,18 @@ function SettingsDialog({ dialog, engine, api, t }) {
       "section",
       { className: "fx-settings-section" },
       h("div", { className: "fx-settings-section-title" }, t("fx.settings.severityScope")),
+      // 修复范围说明常显在分组标题下方：不依赖悬停即可读取。
+      h("div", { className: "fx-hint" }, t("fx.settings.severityScopeHint")),
       h(
         "div",
         { className: "fx-settings-card" },
         h(
           "div",
-          { className: "fx-scope-chips" },
+          { className: "fx-check-list" },
           ISSUE_SEVERITIES.map((severity) =>
             h(
               "label",
-              { className: "fx-scope-chip", key: severity },
+              { className: "fx-check-row", key: severity },
               h("input", {
                 type: "checkbox",
                 checked: severities.includes(severity),
@@ -892,7 +944,6 @@ function SettingsDialog({ dialog, engine, api, t }) {
             ),
           ),
         ),
-        h("div", { className: "fx-scope-hint" }, t("fx.settings.severityScopeHint")),
       ),
     ),
     h(
@@ -962,6 +1013,42 @@ function SettingsDialog({ dialog, engine, api, t }) {
                         ? t("fx.settings.cleanupArchive")
                         : t("fx.settings.cleanupDelete"),
                     ),
+                  ),
+                ),
+              ),
+            )
+          : null,
+        autoCleanup
+          ? h(
+              "div",
+              { className: "fx-setting fx-setting-sub is-stack" },
+              h(
+                "div",
+                { className: "fx-setting-main" },
+                h("span", { className: "fx-setting-name" }, t("fx.settings.autoCleanupSessions")),
+                // 会话范围决定哪些会话会被归档 / 删除：说明常显，避免只能靠悬停获取。
+                h("span", { className: "fx-hint" }, t("fx.settings.autoCleanupSessionsHint")),
+              ),
+              h(
+                "div",
+                { className: "fx-check-list" },
+                CLEANUP_SESSION_KINDS.map((kind) =>
+                  h(
+                    "label",
+                    { className: "fx-check-row", key: kind },
+                    h("input", {
+                      type: "checkbox",
+                      checked: cleanupSessionKinds.includes(kind),
+                      onChange: (event) => {
+                        const next = event.target.checked
+                          ? [...cleanupSessionKinds, kind]
+                          : cleanupSessionKinds.filter((item) => item !== kind);
+                        engine.updateDialog({
+                          autoCleanupSessionKinds: normalizeCleanupSessionKinds(next),
+                        });
+                      },
+                    }),
+                    h("span", null, t(CLEANUP_SESSION_LABEL_KEYS[kind])),
                   ),
                 ),
               ),
