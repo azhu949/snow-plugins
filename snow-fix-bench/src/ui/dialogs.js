@@ -797,6 +797,226 @@ function DeleteDialog({ dialog, snapshot, engine, api, t }) {
   );
 }
 
+// API 供应商选择器：可搜索下拉框（参照宿主用量统计的 CustomSelect）。
+// 收起时只占一行；展开层经 portal 渲染到 document.body 并 fixed 锚定在触发按钮上，
+// 逃逸设置卡片 / 弹窗的 overflow 裁剪。列表保持宿主全局设置的档案顺序。
+function ApiProfilePicker({ dialog, engine, api, t, nameRow }) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const [popRect, setPopRect] = useState(null);
+  const rootRef = useRef(null);
+  const triggerRef = useRef(null);
+  const popRef = useRef(null);
+  const searchRef = useRef(null);
+  const profiles = Array.isArray(dialog.apiProfiles) ? dialog.apiProfiles : [];
+  const state = dialog.apiProfilesState;
+  const selected = String(dialog.apiProfile || "");
+  const search = query.trim().toLowerCase();
+  const label = (profile) =>
+    profile.displayName && profile.displayName !== profile.profileName
+      ? `${profile.profileName} · ${profile.displayName}`
+      : profile.profileName;
+  // 搜索只过滤不重排；匹配档案名与显示名，两者都可能被用来搜。
+  const visible = search
+    ? profiles.filter((profile) => {
+        const name = profile.profileName.toLowerCase();
+        const display = profile.displayName.toLowerCase();
+        return name.includes(search) || display.includes(search);
+      })
+    : profiles;
+  const selectedProfile = profiles.find((profile) => profile.profileName === selected);
+  const triggerLabel = selected
+    ? selectedProfile
+      ? label(selectedProfile)
+      : selected
+    : t("fx.settings.apiProfileFollow");
+  // 已保存的档案不在宿主清单里（被删除或改名）：保留选择并提示，避免静默丢失。
+  const missing = selected && state === "ready" && !selectedProfile;
+
+  // 打开时测量并锚定下拉位置；resize / 滚动（含捕获阶段）期间跟随触发按钮。
+  // 下方空间不足且上方更宽裕时向上弹出，避免贴近视口底部的触发按钮被截断。
+  useEffect(() => {
+    if (!open) return undefined;
+    setQuery("");
+    const measure = () => {
+      const rect = triggerRef.current?.getBoundingClientRect();
+      if (!rect) return;
+      const width = Math.max(rect.width, 240);
+      const maxLeft = Math.max(0, window.innerWidth - width - 8);
+      const estimatedHeight = 306;
+      const fitBelow = window.innerHeight - rect.bottom - 4;
+      const top =
+        fitBelow < estimatedHeight && rect.top > fitBelow
+          ? Math.max(8, rect.top - estimatedHeight - 4)
+          : rect.bottom + 4;
+      setPopRect({ top, left: Math.min(rect.left, maxLeft), width });
+    };
+    measure();
+    // 下拉挂载后再聚焦搜索框，与宿主 CustomSelect 的打开体验一致。
+    requestAnimationFrame(() => searchRef.current?.focus());
+    window.addEventListener("resize", measure);
+    window.addEventListener("scroll", measure, true);
+    return () => {
+      window.removeEventListener("resize", measure);
+      window.removeEventListener("scroll", measure, true);
+    };
+  }, [open]);
+
+  // 外点与 Escape 收起：下拉在 portal 里不在容器内，须单独判断。
+  useEffect(() => {
+    if (!open) return undefined;
+    const onPointerDown = (event) => {
+      const target = event.target;
+      if (rootRef.current?.contains(target) || popRef.current?.contains(target)) return;
+      setOpen(false);
+    };
+    const onKeyDown = (event) => {
+      if (event.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("mousedown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [open]);
+
+  const pick = (value) => {
+    setOpen(false);
+    engine.updateDialog({ apiProfile: value });
+  };
+
+  const row = (value, title, badge) =>
+    h(
+      "button",
+      {
+        type: "button",
+        className: `fx-profile-row ${selected === value ? "is-selected" : ""}`,
+        key: value || "__follow__",
+        role: "option",
+        "aria-selected": selected === value ? "true" : "false",
+        onClick: () => pick(value),
+      },
+      h("span", { className: "fx-profile-row-label" }, title),
+      badge || null,
+      selected === value
+        ? h("span", { className: "fx-profile-check" }, iconEl(api, "Check", 12))
+        : null,
+    );
+
+  // 读取失败且没有绑定值时只提示；有绑定值时仍渲染选择器（清单为空时只有
+  // 「跟随全局设置」一行），否则失效的档案名无法在界面上改回跟随全局设置。
+  if (state === "error" && !selected) {
+    return h(
+      "div",
+      { className: "fx-setting is-stack" },
+      h(
+        "div",
+        { className: "fx-setting-main" },
+        nameRow(t("fx.settings.apiProfile"), t("fx.settings.apiProfileHint")),
+      ),
+      h("span", { className: "fx-hint" }, t("fx.settings.apiProfilesFailed")),
+    );
+  }
+
+  return h(
+    "div",
+    { className: "fx-setting is-stack" },
+    h(
+      "div",
+      { className: "fx-setting-main" },
+      nameRow(t("fx.settings.apiProfile"), t("fx.settings.apiProfileHint")),
+    ),
+    h(
+      "div",
+      { className: "fx-combobox", ref: rootRef },
+      h(
+        "button",
+        {
+          type: "button",
+          className: "fx-combobox-trigger",
+          ref: triggerRef,
+          "aria-haspopup": "listbox",
+          "aria-expanded": open ? "true" : "false",
+          // 清单为空但有绑定值时仍可打开：至少能选回「跟随全局设置」。
+          disabled: state === "loading" || (!profiles.length && !selected),
+          onClick: () => setOpen(!open),
+        },
+        h(
+          "span",
+          { className: "fx-combobox-value", title: triggerLabel },
+          state === "loading" ? t("fx.settings.apiProfilesLoading") : triggerLabel,
+        ),
+        h("span", { className: `fx-combobox-caret ${open ? "is-open" : ""}` }, iconEl(api, "ChevronDown", 12)),
+      ),
+      state === "ready" && !profiles.length && !selected
+        ? h("span", { className: "fx-hint" }, t("fx.settings.apiProfilesEmpty"))
+        : null,
+      state === "error" ? h("span", { className: "fx-hint" }, t("fx.settings.apiProfilesFailed")) : null,
+    ),
+    open && popRect
+      ? createPortal(
+          h(
+            "div",
+            {
+              className: "fx-combobox-pop",
+              ref: popRef,
+              style: {
+                position: "fixed",
+                top: `${popRect.top}px`,
+                left: `${popRect.left}px`,
+                width: `${popRect.width}px`,
+              },
+            },
+            h("input", {
+              className: "fx-search fx-profile-search",
+              ref: searchRef,
+              type: "text",
+              placeholder: t("fx.settings.apiProfileSearch"),
+              "aria-label": t("fx.settings.apiProfileSearch"),
+              value: query,
+              onChange: (event) => setQuery(event.target.value),
+            }),
+            h(
+              "div",
+              { className: "fx-profile-list", role: "listbox", "aria-label": t("fx.settings.apiProfile") },
+              row("", t("fx.settings.apiProfileFollow"), h("span", { className: "fx-profile-badge" }, t("fx.settings.apiProfileFollowBadge"))),
+              visible.map((profile) =>
+                row(profile.profileName, label(profile), profile.isActive
+                  ? h("span", { className: "fx-profile-badge is-active" }, t("fx.settings.apiProfileActiveBadge"))
+                  : null),
+              ),
+              search && !visible.length
+                ? h("div", { className: "fx-profile-empty fx-hint", key: "__no-hit__" }, t("fx.settings.apiProfileNoHit"))
+                : null,
+            ),
+          ),
+          document.body,
+        )
+      : null,
+    missing
+      ? h(
+          "div",
+          { className: "fx-warn fx-settings-profile-missing" },
+          h(
+            "span",
+            { className: "fx-settings-profile-missing-text" },
+            t("fx.settings.apiProfileMissing", { name: selected }),
+          ),
+          h(
+            "button",
+            {
+              type: "button",
+              className: "fx-btn small",
+              onClick: () => engine.updateDialog({ apiProfile: "" }),
+            },
+            t("fx.settings.apiProfileClear"),
+          ),
+        )
+      : null,
+  );
+}
+
 function SettingsDialog({ dialog, engine, api, t }) {
   const [busy, setBusy] = useState(false);
   const severities = Array.isArray(dialog.issueSeverities)
@@ -914,6 +1134,14 @@ function SettingsDialog({ dialog, engine, api, t }) {
             onChange: (event) => engine.updateDialog({ parallelLimit: event.target.value }),
           }),
         ),
+        // API 供应商：可搜索下拉框，顺序与宿主全局设置的档案列表一致。
+        h(ApiProfilePicker, {
+          dialog,
+          engine,
+          api,
+          t,
+          nameRow,
+        }),
       ),
     ),
     h(

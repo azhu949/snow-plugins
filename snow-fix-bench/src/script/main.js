@@ -542,7 +542,12 @@ function mount() {
     // 浮层内部（含拖动标题栏）不关闭；工作台弹窗打开时交给弹窗自己处理，
     // 避免一次点击同时关掉弹窗和工作台。
     if (!visible || root.contains(target)) return;
-    if (document.querySelector(".fx-review-overlay")) return;
+    // 审查弹窗与 toast 都通过 Portal 挂在 body 上、浮层之外，
+    // API 供应商下拉的弹出层同理：点击它们不是「点外面」。
+    // 旧逻辑是「页面上存在审查弹窗即全局锁定浮层」；现改为仅点击审查弹窗 /
+    // toast / 下拉层内不关闭。审查弹窗遮罩全屏覆盖，常规点击下新旧行为等价；
+    // 此改动使无审查弹窗时点击 toast / 下拉框不再误关浮层。
+    if (target.closest(".fx-review-overlay, .fx-toast-layer, .fx-combobox-pop")) return;
     setVisible(false);
   }
 

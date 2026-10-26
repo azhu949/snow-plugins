@@ -40,13 +40,15 @@ function normalizeCustomPrompts(raw) {
   return slots;
 }
 
-// 设置结构版本：schemaVersion 4 新增 autoCleanupSessionKinds。
+// 设置结构版本：schemaVersion 5 新增 apiProfile（会话绑定的 API 档案）。
 // autoFixAfterReview 默认开启，但未确认前不会静默修改工作区。
-const SETTINGS_SCHEMA_VERSION = 4;
+const SETTINGS_SCHEMA_VERSION = 5;
 
 const DEFAULT_SETTINGS = Object.freeze({
   schemaVersion: SETTINGS_SCHEMA_VERSION,
   parallelLimit: DEFAULT_PARALLEL_LIMIT,
+  // 审查 / 修复 / 复审会话创建时绑定的 API 档案名；空串表示不绑定、跟随宿主全局激活档案。
+  apiProfile: "",
   autoFixAfterReview: true,
   // 用户是否已显式确认自动修复：默认开启不等于已确认，首次触发仍要先确认一次。
   autoFixOptIn: false,
@@ -80,6 +82,10 @@ function normalizeCleanupSessionKinds(value) {
   return CLEANUP_SESSION_KINDS.filter((kind) => picked.has(kind));
 }
 
+function normalizeApiProfile(value) {
+  return typeof value === "string" ? value.trim().slice(0, 200) : "";
+}
+
 function normalizeSettings(raw) {
   // 旧存储无法区分「旧默认值 false」与「用户主动关闭」，升级时不能替用户改写选择：
   // 只在字段缺失或类型非法时使用默认值，显式写入的布尔值一律保留。
@@ -90,6 +96,7 @@ function normalizeSettings(raw) {
   const settings = {
     schemaVersion: SETTINGS_SCHEMA_VERSION,
     parallelLimit: normalizeParallelLimit(raw?.parallelLimit),
+    apiProfile: normalizeApiProfile(raw?.apiProfile),
     autoFixAfterReview,
     // 旧记录里显式开启视为已确认；没有记录或字段缺失时需要首次确认。
     autoFixOptIn:
@@ -119,6 +126,7 @@ export {
   DEFAULT_REVIEW_MODE,
   normalizeReviewMode,
   normalizeParallelLimit,
+  normalizeApiProfile,
   normalizeCleanupSessionKinds,
   normalizeCustomPrompts,
   normalizeCustomPromptSlot,

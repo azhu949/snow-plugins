@@ -79,6 +79,7 @@ import {
   DEFAULT_SETTINGS,
   DEFAULT_REVIEW_MODE,
   normalizeParallelLimit,
+  normalizeApiProfile,
   normalizeCleanupSessionKinds,
   normalizeCustomPrompts,
   normalizeCustomPromptSlot,
@@ -275,6 +276,10 @@ function createEngine(api) {
   // 每个会话尚未落盘的活动指标：流式期间只更新内存，保存时再合并进 state.sessions。
   const sessionMetrics = new Map();
   let toastTimer = null;
+  // 已判失效的 API 档案名：createConversation 回退成功后记录，本运行期间
+  // 后续批次（续批/复审）直接跳过绑定，避免写盘失败（设置仍残留失效档案名）时
+  // 每批都先失败一次再回退、重复无效创建调用与重复提示。
+  const invalidApiProfiles = new Set();
   let persistBlocked = false;
   let gitSeq = 0;
   let treeSeq = 0;
@@ -487,6 +492,79 @@ function createEngine(api) {
     } catch (error) {
       return { ok: false, action: actionId, error: String(error?.message || error) };
     }
+  }
+
+  // 创建会话：宿主的 conversations.create 会先校验档案是否存在，档案被删除或改名时
+  // 抛 "Unknown API profile" 且不建会话（校验在建会话之前，重试不会留下重复会话）。
+  // 只对这种失败去掉绑定重试一次，避免审查 / 修复 / 续批 / 复审全部无法启动；
+  // 其余失败原样返回，调用方现有的错误处理语义不变。
+  async function createConversation(params) {
+    const bound = normalizeApiProfile(params?.apiProfile);
+    // 已判失效的档案跳过首次带绑定尝试：回退逻辑已判定过该档案不可用，直接以
+    // 空档案创建，避免写盘失败（设置仍残留失效档案名）时续批/复审每批都先失败
+    // 一次再回退、重复无效创建调用；首次回退时已提示过，这里不再重复提示。
+    if (bound && invalidApiProfiles.has(bound)) {
+      // 设置当前仍指向该档案才视为残留失效值，跳过绑定避免重复失败重试；
+      // 设置已改选其它档案或已清空时缓存不再适用，删除后走正常绑定路径，
+      // 防止用户重新绑定后被静默忽略。
+      if (normalizeApiProfile(store.get().settings?.apiProfile) === bound) {
+        return runWrite("conversations.create", { ...params, apiProfile: "" });
+      }
+      invalidApiProfiles.delete(bound);
+    }
+    const created = await runWrite("conversations.create", params);
+    if (created.ok || !bound) return created;
+    if (!/Unknown API profile/i.test(String(created.error || ""))) return created;
+    const fallback = await runWrite("conversations.create", { ...params, apiProfile: "" });
+    if (!fallback.ok) return fallback;
+    // 回退说明随结果返回，由调用方并入随后的成功提示：直接在这里写 toast 会被
+    // 创建成功后的提示覆盖，用户几乎看不到回退原因。
+    const cleared = await clearInvalidApiProfile(bound);
+    // 设置未能清空（写盘失败、store 回滚保留失效档案名）时记录该档案：
+    // 本运行期间后续批次命中缓存直接跳过绑定，避免重复失败重试。
+    if (!cleared) invalidApiProfiles.add(bound);
+    return { ...fallback, apiProfileFallback: bound, apiProfileCleared: cleared };
+  }
+
+  // 回退成功说明设置里的档案绑定已失效：清空绑定，避免之后每轮创建会话都先失败再重试。
+  // 只清理仍然是同一个档案名的设置，避免覆盖用户在等待期间做出的新选择。
+  async function clearInvalidApiProfile(name) {
+    // 已被其它流程清理或用户已改选其它档案：绑定已不再指向该档案，无需重复清理。
+    if (normalizeApiProfile(store.get().settings?.apiProfile) !== name) {
+      invalidApiProfiles.delete(name);
+      return true;
+    }
+    const result = await setSettings({ apiProfile: "" });
+    // persisted === false 且无 error 表示设置读取失败、只改了内存，本次运行仍已生效；
+    // 有 error 表示写盘失败且内存已回滚，交给提示文案让用户手动处理。
+    const cleared = result.ok || (result.persisted === false && !result.error);
+    if (!cleared) return false;
+    // 设置已成功清空：移除失效缓存，用户重新绑定同名档案后不再被误判跳过绑定。
+    invalidApiProfiles.delete(name);
+    const dialog = store.get().dialog;
+    // 设置弹窗同时打开时同步选择与基线，避免用户保存弹窗时把失效值再写回去。
+    if (dialog && dialog.type === "settings" && normalizeApiProfile(dialog.apiProfile) === name) {
+      store.set({
+        dialog: {
+          ...dialog,
+          apiProfile: "",
+          baseline: { ...dialog.baseline, apiProfile: "" },
+        },
+      });
+    }
+    return true;
+  }
+
+  // 把 API 档案回退说明并入本次成功提示：创建成功的提示由调用方统一发出，
+  // 这里只做文案拼接，避免回退提示被随后的成功提示覆盖。
+  function withApiProfileFallback(created, text) {
+    const name = normalizeApiProfile(created?.apiProfileFallback);
+    if (!name) return text;
+    const key =
+      created.apiProfileCleared === false
+        ? "fx.toast.apiProfileFallbackManual"
+        : "fx.toast.apiProfileFallback";
+    return `${text} ${t(key, { name })}`;
   }
 
   function setToast(kind, text) {
@@ -1508,11 +1586,13 @@ function createEngine(api) {
         branch: store.get().git.status?.currentBranch || "",
         repoPath: token.path,
       });
-      const created = await runWrite("conversations.create", {
+      const created = await createConversation({
         directoryId: token.directoryId,
         title,
         text: reviewText,
         autoReply: true,
+        // 会话绑定设置中的 API 档案；空串表示跟随全局激活档案。
+        apiProfile: normalizeApiProfile(store.get().settings?.apiProfile),
       });
       if (!created.ok) {
         throw new Error(t("fx.toast.reviewFailed", { error: created.error || "conversations.create failed" }));
@@ -1571,9 +1651,12 @@ function createEngine(api) {
       });
       setToast(
         "info",
-        built.currentCode
-          ? t(built.repoMissing ? "fx.toast.gitUnavailable" : "fx.review.noChanges")
-          : t("fx.toast.reviewStartedScope", { scope: built.scopeLabel }),
+        withApiProfileFallback(
+          created,
+          built.currentCode
+            ? t(built.repoMissing ? "fx.toast.gitUnavailable" : "fx.review.noChanges")
+            : t("fx.toast.reviewStartedScope", { scope: built.scopeLabel }),
+        ),
       );
       await saveState({ projectId: token.directoryId, state });
       void track({
@@ -2314,11 +2397,13 @@ function createEngine(api) {
       total: session.batchTotal,
       time: formatStamp(new Date()),
     });
-    const created = await runWrite("conversations.create", {
+    const created = await createConversation({
       directoryId: project.directoryId,
       title,
       text: prompt,
       autoReply: true,
+      // 续批沿用同一份设置快照之外的实时设置：档案变更在下一批生效。
+      apiProfile: normalizeApiProfile(snapshot.settings?.apiProfile),
     });
     if (!created.ok) {
       if (!isProjectCurrent(guard)) return "error";
@@ -2435,11 +2520,14 @@ function createEngine(api) {
     });
     setToast(
       "info",
-      t("fx.toast.fixBatchStarted", {
-        batch: batchNumber,
-        total: currentSession.batchTotal,
-        count: nextSession.issueIds.length,
-      }),
+      withApiProfileFallback(
+        created,
+        t("fx.toast.fixBatchStarted", {
+          batch: batchNumber,
+          total: currentSession.batchTotal,
+          count: nextSession.issueIds.length,
+        }),
+      ),
     );
     await saveState({ projectId: project.directoryId, state: nextState });
     void track({
@@ -2632,11 +2720,12 @@ function createEngine(api) {
       total: batchTotal,
       time: formatStamp(new Date()),
     });
-    const created = await runWrite("conversations.create", {
+    const created = await createConversation({
       directoryId: project.directoryId,
       title,
       text: prompt,
       autoReply: true,
+      apiProfile: normalizeApiProfile(snapshot.settings?.apiProfile),
     });
     if (!created.ok) {
       setToast(
@@ -2748,11 +2837,14 @@ function createEngine(api) {
     });
     setToast(
       "info",
-      liveTotal > 1
-        ? t("fx.toast.verifyBatchStarted", { batch: 1, total: liveTotal, count: stillIssues.length })
-        : manual
-          ? t("fx.toast.verifyRestarted", { count: stillIssues.length })
-          : t("fx.toast.verifyStarted", { count: stillIssues.length }),
+      withApiProfileFallback(
+        created,
+        liveTotal > 1
+          ? t("fx.toast.verifyBatchStarted", { batch: 1, total: liveTotal, count: stillIssues.length })
+          : manual
+            ? t("fx.toast.verifyRestarted", { count: stillIssues.length })
+            : t("fx.toast.verifyStarted", { count: stillIssues.length }),
+      ),
     );
     await saveState({ projectId: project.directoryId, state: nextState });
     if (!isProjectCurrent(guard)) return "error";
@@ -2812,11 +2904,12 @@ function createEngine(api) {
       total: batchTotal,
       time: formatStamp(new Date()),
     });
-    const created = await runWrite("conversations.create", {
+    const created = await createConversation({
       directoryId: project.directoryId,
       title,
       text: prompt,
       autoReply: true,
+      apiProfile: normalizeApiProfile(snapshot.settings?.apiProfile),
     });
     if (!created.ok) {
       await failVerify(
@@ -2926,7 +3019,10 @@ function createEngine(api) {
     });
     setToast(
       "info",
-      t("fx.toast.verifyBatchStarted", { batch: batchNumber, total: batchTotal, count: liveIssues.length }),
+      withApiProfileFallback(
+        created,
+        t("fx.toast.verifyBatchStarted", { batch: batchNumber, total: batchTotal, count: liveIssues.length }),
+      ),
     );
     await saveState({ projectId: project.directoryId, state: nextState });
     if (!isProjectCurrent(guard)) return "error";
@@ -3687,11 +3783,12 @@ function createEngine(api) {
             count: batchIssues.length,
             time,
           });
-      const created = await runWrite("conversations.create", {
+      const created = await createConversation({
         directoryId: token.directoryId,
         title,
         text: prompt,
         autoReply: true,
+        apiProfile: normalizeApiProfile(store.get().settings?.apiProfile),
       });
       if (!created.ok) {
         throw new Error(t("fx.toast.fixFailed", { error: created.error || "conversations.create failed" }));
@@ -3796,9 +3893,12 @@ function createEngine(api) {
       });
       setToast(
         "info",
-        options.auto
-          ? t("fx.toast.autoFixStarted", { count: issues.length })
-          : t("fx.toast.fixStarted"),
+        withApiProfileFallback(
+          created,
+          options.auto
+            ? t("fx.toast.autoFixStarted", { count: issues.length })
+            : t("fx.toast.fixStarted"),
+        ),
       );
       await saveState({ projectId: token.directoryId, state: nextState });
       void track({
@@ -4371,6 +4471,7 @@ function createEngine(api) {
     // 否则未改动字段会带着默认值写回，静默重置本地存储里用户已保存的配置。
     const baseline = {
       parallelLimit: settings.parallelLimit,
+      apiProfile: normalizeApiProfile(settings.apiProfile),
       autoFixAfterReview: settings.autoFixAfterReview,
       autoCleanupAfterFix: settings.autoCleanupAfterFix,
       autoCleanupAction: settings.autoCleanupAction,
@@ -4388,6 +4489,9 @@ function createEngine(api) {
         loadFailed: Boolean(snapshot.settingsLoadFailed),
         baseline,
         parallelLimit: baseline.parallelLimit,
+        apiProfile: baseline.apiProfile,
+        apiProfiles: [],
+        apiProfilesState: "loading",
         autoFixAfterReview: baseline.autoFixAfterReview,
         autoCleanupAfterFix: baseline.autoCleanupAfterFix,
         autoCleanupAction: baseline.autoCleanupAction,
@@ -4397,6 +4501,37 @@ function createEngine(api) {
         reviewMode: baseline.reviewMode,
       },
     });
+    void loadApiProfilesIntoDialog();
+  }
+
+  // 读取宿主 API 档案清单（apiProfiles 域，密钥字段已被宿主剥离）。
+  // 非实时域只在打开弹窗时读取一次；读取失败不阻断设置，仅在列表处提示。
+  // 保留宿主返回顺序（sort_order + 名称），与全局设置的档案列表一致。
+  async function loadApiProfilesIntoDialog() {
+    let profiles = [];
+    let state = "error";
+    try {
+      const response = await api.metadata.get(["apiProfiles"]);
+      // 域读取成功时 domains.apiProfiles 必为数组（空数组表示确实没有档案）；
+      // 值为 null、键缺失或落在 unknown / denied 都说明这次读取不可用，按失败处理，
+      // 否则会退化成「宿主没有档案」的误导提示。
+      const domain = response?.domains?.apiProfiles;
+      if (Array.isArray(domain)) {
+        profiles = domain
+          .map((item) => ({
+            profileName: String(item?.profileName || "").trim(),
+            displayName: typeof item?.displayName === "string" ? item.displayName.trim() : "",
+            isActive: item?.isActive === true,
+          }))
+          .filter((item) => item.profileName);
+        state = "ready";
+      }
+    } catch {
+      // 读取失败时保持空清单：用户仍可保存其它设置，档案项显示读取失败提示。
+    }
+    const dialog = store.get().dialog;
+    if (!dialog || dialog.type !== "settings") return;
+    store.set({ dialog: { ...dialog, apiProfiles: profiles, apiProfilesState: state } });
   }
 
   // 自定义提示词编辑弹窗：展示三类插槽的只读固定规则与可编辑附加要求。
@@ -4464,9 +4599,17 @@ function createEngine(api) {
     // 只提交用户相对打开弹窗时的基线真正改动过的字段：读取失败后重读成功时，
     // 未改动字段保持存储里的原值，而不是被弹窗展示的默认值覆盖。
     const baseline = dialog.baseline || store.get().settings;
+    // 用户显式保存设置即视为重新确认当前档案绑定：清除该档案的失效缓存。
+    // 同名档案可能已被重建并重新选中（此时 dialog 与基线相同、不会生成 patch），
+    // 缓存若不清理，后续会话会命中缓存跳过绑定、静默改用全局档案。
+    invalidApiProfiles.delete(normalizeApiProfile(dialog.apiProfile));
     const patch = {};
     if (normalizeParallelLimit(dialog.parallelLimit) !== baseline.parallelLimit) {
       patch.parallelLimit = dialog.parallelLimit;
+    }
+    // 档案名与基线不同才提交：显式改回空串（跟随全局激活档案）同样有效。
+    if (normalizeApiProfile(dialog.apiProfile) !== normalizeApiProfile(baseline.apiProfile)) {
+      patch.apiProfile = normalizeApiProfile(dialog.apiProfile);
     }
     if (dialog.autoCleanupAfterFix !== baseline.autoCleanupAfterFix) {
       patch.autoCleanupAfterFix = dialog.autoCleanupAfterFix;

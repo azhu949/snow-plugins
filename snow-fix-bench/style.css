@@ -1899,6 +1899,198 @@
   border-color: var(--fx-accent);
 }
 
+/* API 供应商选择器：可搜索下拉框，收起时单行，展开后搜索 + 限高滚动列表 */
+.fx-combobox {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-width: 320px;
+}
+
+.fx-combobox-trigger {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 4px 6px;
+  border: 1px solid var(--fx-line-soft);
+  border-radius: var(--fx-r-sm);
+  background: var(--bg-primary, transparent);
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.fx-combobox-trigger:focus {
+  outline: none;
+  border-color: var(--fx-accent);
+}
+
+.fx-combobox-trigger:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.fx-combobox-value {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fx-combobox-caret {
+  flex: none;
+  display: inline-flex;
+  color: var(--fx-text-3);
+  transition: transform 0.12s ease;
+}
+
+.fx-combobox-caret.is-open {
+  transform: rotate(180deg);
+}
+
+/* 弹出层：经 portal 渲染到 document.body、fixed 定位，不会被设置卡片 /
+   弹窗的 overflow:hidden 裁剪。Portal 后弹出层不再是 .fx-overlay / .fx-panel
+   的后代，--fx-* 变量与面板基准排版都不再继承，这里按 .fx-toast-layer 的同一
+   口径重新提供。z-index 必须高于工作台浮层（.fx-overlay 为 2147483000）与
+   审查弹窗（.fx-review-overlay 为 2147483100），并明确高于 .fx-toast-layer
+   （2147483200）：同值时按 DOM 顺序后者会压住弹出层。 */
+.fx-combobox-pop {
+  z-index: 2147483210;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 6px;
+  border: 1px solid var(--fx-line);
+  border-radius: var(--fx-r);
+  background: var(--bg-primary, #ffffff);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.24);
+  /* 取值与 .fx-overlay / .fx-panel 的 token 块一致，Portal 后不会继承。 */
+  --fx-line: var(--border-color, rgba(128, 134, 146, 0.26));
+  --fx-line-soft: rgba(128, 134, 146, 0.18);
+  --fx-line-soft: color-mix(in srgb, var(--fx-line) 62%, transparent);
+  --fx-hover: var(--bg-hover, rgba(128, 134, 146, 0.14));
+  --fx-surface-2: var(--bg-tertiary, rgba(128, 134, 146, 0.12));
+  --fx-accent: var(--accent-blue, #4f8cff);
+  --fx-accent-soft: rgba(79, 140, 255, 0.14);
+  --fx-accent-soft: color-mix(in srgb, var(--fx-accent) 14%, transparent);
+  --fx-text-3: var(--text-tertiary, rgba(128, 134, 146, 0.92));
+  --fx-r-sm: 6px;
+  --fx-r: 8px;
+  /* 面板字号与行高同样不随 Portal 继承，按 .fx-panel 的基准显式补回。 */
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+/* 弹出层子树显式使用 border-box：脱离 .fx-panel * 后不再依赖宿主 reset。 */
+.fx-combobox-pop,
+.fx-combobox-pop *,
+.fx-combobox-pop *::before,
+.fx-combobox-pop *::after {
+  box-sizing: border-box;
+}
+
+.fx-profile-search {
+  flex: none;
+  width: 100%;
+  max-width: none;
+}
+
+.fx-profile-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  overflow-y: auto;
+  /* 上限约 8 行：更多档案在弹出层内滚动，面板高度不受影响 */
+  max-height: 264px;
+  min-height: 44px;
+}
+
+.fx-profile-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  padding: 5px 8px;
+  border: none;
+  border-radius: var(--fx-r-sm);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.fx-profile-row:hover {
+  background: var(--fx-hover);
+}
+
+.fx-profile-row.is-selected {
+  background: var(--fx-surface-2);
+}
+
+.fx-profile-row-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fx-profile-row.is-selected .fx-profile-row-label {
+  font-weight: 600;
+}
+
+/* 选中项行尾的 Check 图标，与宿主 CustomSelect 一致 */
+.fx-profile-check {
+  flex: none;
+  display: inline-flex;
+  color: var(--fx-accent);
+}
+
+/* 右侧徽标：跟随全局设置为中性色，当前启用档案为强调色 */
+.fx-profile-badge {
+  flex: none;
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid var(--fx-line-soft);
+  font-size: 9.5px;
+  color: var(--fx-text-3);
+  white-space: nowrap;
+}
+
+.fx-profile-badge.is-active {
+  border-color: transparent;
+  background: var(--fx-accent-soft, rgba(79, 140, 255, 0.14));
+  color: var(--fx-accent);
+  font-weight: 600;
+}
+
+.fx-profile-empty {
+  padding: 6px 8px;
+}
+
+/* 已保存档案不在清单中的提示：警告色独立区，右侧提供一键改回跟随全局的入口 */
+.fx-settings-profile-missing {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+}
+
+.fx-settings-profile-missing-text {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.fx-settings-profile-missing .fx-btn {
+  flex: none;
+}
+
 /* 开关：整行 label 可点击，圆钮同时给出开 / 关状态 */
 .fx-switch {
   position: relative;

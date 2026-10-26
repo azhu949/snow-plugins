@@ -349,8 +349,9 @@ test("并行上限默认值、区间收敛与持久化", async () => {
   assert.equal(saved.settings.parallelLimit, 10);
   assert.equal(engine.getSnapshot().settings.parallelLimit, 10);
   assert.deepEqual(state.values.get("fixbench:v2:settings"), {
-    schemaVersion: 4,
+    schemaVersion: 5,
     parallelLimit: 10,
+    apiProfile: "",
     autoFixAfterReview: true,
     autoFixOptIn: false,
     autoCleanupAfterFix: false,
@@ -5143,5 +5144,182 @@ test("复审批次超过上限时自动拆分并在全部完成后收尾", async
   assert.equal(snapshot.state.issues.filter((issue) => issue.verify?.status === "confirmed").length, total);
   assert.equal(snapshot.state.conversationLog.filter((entry) => entry.kind === "verify").length, 2);
   assert.equal(snapshot.activity.phase, "done");
+  engine.unmount();
+});
+
+// —— API 档案失效回退与失效缓存 ——
+
+test("档案失效时创建会话回退为空档案并清空设置", async () => {
+  const { api, state } = createMockApi({
+    createResults: [{ ok: false, action: "conversations.create", error: "Unknown API profile: pro" }],
+  });
+  const engine = resolveEngine(api);
+  await engine.mount();
+  await engine.setSettings({ apiProfile: "pro" });
+
+  await engine.startReview({ staged: [], unstaged: [], commits: [], note: "" });
+
+  const creates = state.writes.filter((item) => item.action === "conversations.create");
+  assert.equal(creates.length, 2);
+  assert.equal(creates[0].params.apiProfile, "pro");
+  assert.equal(creates[1].params.apiProfile, "");
+  // 回退成功后设置被清空，避免后续会话每次都先失败一次再重试。
+  assert.equal(engine.getSnapshot().settings.apiProfile, "");
+  assert.match(engine.getSnapshot().toast.text, /档案「pro」不可用/);
+  assert.ok(!engine.getSnapshot().toast.text.includes("设置未能保存"));
+  engine.unmount();
+});
+
+test("档案失效且回退创建也失败时不清理设置", async () => {
+  const { api, state } = createMockApi({
+    createResults: [
+      { ok: false, action: "conversations.create", error: "Unknown API profile: pro" },
+      { ok: false, action: "conversations.create", error: "Unknown API profile: pro" },
+    ],
+  });
+  const engine = resolveEngine(api);
+  await engine.mount();
+  await engine.setSettings({ apiProfile: "pro" });
+
+  await assert.rejects(
+    () => engine.startReview({ staged: [], unstaged: [], commits: [], note: "" }),
+    /审查启动失败/,
+  );
+  assert.equal(state.createCalls, 2);
+  assert.equal(engine.getSnapshot().settings.apiProfile, "pro");
+  engine.unmount();
+});
+
+test("非档案类创建错误不触发回退", async () => {
+  const { api, state } = createMockApi({
+    createResults: [{ ok: false, action: "conversations.create", error: "boom" }],
+  });
+  const engine = resolveEngine(api);
+  await engine.mount();
+  await engine.setSettings({ apiProfile: "pro" });
+
+  await assert.rejects(
+    () => engine.startReview({ staged: [], unstaged: [], commits: [], note: "" }),
+    /审查启动失败/,
+  );
+  // 只尝试一次带绑定创建，不进行空档案回退。
+  assert.equal(state.createCalls, 1);
+  assert.equal(engine.getSnapshot().settings.apiProfile, "pro");
+  engine.unmount();
+});
+
+test("清空设置写盘失败时记录失效缓存，后续创建命中缓存跳过绑定", async () => {
+  const { api, state } = createMockApi({
+    createResults: [{ ok: false, action: "conversations.create", error: "Unknown API profile: pro" }],
+  });
+  const engine = resolveEngine(api);
+  await engine.mount();
+  await engine.setSettings({ apiProfile: "pro" });
+
+  // 回退成功后清空设置写盘失败：设置回滚保留失效档案名，缓存记录该档案。
+  const originalSetJson = api.storage.setJson.bind(api.storage);
+  api.storage.setJson = async (key, value) => {
+    if (key === "fixbench:v2:settings") throw new Error("disk full");
+    return originalSetJson(key, value);
+  };
+  await engine.startReview({ staged: [], unstaged: [], commits: [], note: "" });
+  assert.equal(engine.getSnapshot().settings.apiProfile, "pro");
+  assert.match(engine.getSnapshot().toast.text, /设置未能保存/);
+
+  // 恢复写盘并结束第一次审查的跟踪，允许再次创建会话。
+  api.storage.setJson = originalSetJson;
+  await engine.detachTracking();
+  const before = state.createCalls;
+  await engine.startReview({ staged: [], unstaged: [], commits: [], note: "" });
+  const creates = state.writes.filter((item) => item.action === "conversations.create");
+  assert.equal(state.createCalls - before, 1);
+  assert.equal(creates[creates.length - 1].params.apiProfile, "");
+  engine.unmount();
+});
+
+test("用户在等待期间改选档案时不再重复清理新选择", async () => {
+  const gate = createDeferred();
+  const { api, state } = createMockApi({
+    createResults: [{ ok: false, action: "conversations.create", error: "Unknown API profile: pro" }],
+    writeGate: (action, params) =>
+      action === "conversations.create" && params.apiProfile === "" ? gate : null,
+  });
+  const engine = resolveEngine(api);
+  await engine.mount();
+  await engine.setSettings({ apiProfile: "pro" });
+
+  const pending = engine
+    .startReview({ staged: [], unstaged: [], commits: [], note: "" })
+    .catch((error) => error);
+  // writeGate 在 createCalls 自增之前挂起，用已入队的创建调用数判断回退创建已挂起。
+  await waitFor(
+    () => state.writes.filter((item) => item.action === "conversations.create").length >= 2,
+  );
+  // 回退创建挂起期间用户改选其它档案。
+  await engine.setSettings({ apiProfile: "other" });
+  gate.resolve();
+  await pending;
+
+  // 新选择不能被回退逻辑清空。
+  assert.equal(engine.getSnapshot().settings.apiProfile, "other");
+  assert.ok(!engine.getSnapshot().toast.text.includes("设置未能保存"));
+  engine.unmount();
+});
+
+test("设置弹窗保存后失效缓存被清除，重新绑定同名档案生效", async () => {
+  const { api, state } = createMockApi({
+    createResults: [{ ok: false, action: "conversations.create", error: "Unknown API profile: pro" }],
+  });
+  const engine = resolveEngine(api);
+  await engine.mount();
+  await engine.setSettings({ apiProfile: "pro" });
+
+  // 清空设置写盘失败 → 缓存记录失效档案 pro（设置残留失效名）。
+  const originalSetJson = api.storage.setJson.bind(api.storage);
+  api.storage.setJson = async (key, value) => {
+    if (key === "fixbench:v2:settings") throw new Error("disk full");
+    return originalSetJson(key, value);
+  };
+  await engine.startReview({ staged: [], unstaged: [], commits: [], note: "" });
+  assert.equal(engine.getSnapshot().settings.apiProfile, "pro");
+
+  // 恢复写盘：用户重建同名档案后，打开设置弹窗重新选中 pro 并保存。
+  // 弹窗选择与基线相同，不生成 patch，但保存动作必须清除失效缓存。
+  api.storage.setJson = originalSetJson;
+  engine.openSettingsDialog();
+  assert.equal(engine.getSnapshot().dialog.apiProfile, "pro");
+  await engine.confirmDialog();
+  assert.equal(engine.getSnapshot().dialog, null);
+
+  // 结束第一次审查的跟踪，允许再次创建会话验证缓存已清除。
+  await engine.detachTracking();
+  await engine.startReview({ staged: [], unstaged: [], commits: [], note: "" });
+  const creates = state.writes.filter((item) => item.action === "conversations.create");
+  assert.equal(creates.length, 3);
+  assert.equal(creates[2].params.apiProfile, "pro");
+  engine.unmount();
+});
+
+test("档案失效回退成功时同步清空设置弹窗中的失效选择", async () => {
+  const gate = createDeferred();
+  const { api, state } = createMockApi({
+    createResults: [{ ok: false, action: "conversations.create", error: "Unknown API profile: pro" }],
+    writeGate: (action) => (action === "conversations.activate" ? gate : null),
+  });
+  const engine = resolveEngine(api);
+  await engine.mount();
+  await engine.setSettings({ apiProfile: "pro" });
+  engine.openSettingsDialog();
+  assert.equal(engine.getSnapshot().dialog.apiProfile, "pro");
+
+  // 创建会话期间回退清空设置：弹窗中的失效选择必须同步清空，避免保存时写回。
+  const pending = engine
+    .startReview({ staged: [], unstaged: [], commits: [], note: "" })
+    .catch((error) => error);
+  await waitFor(() => engine.getSnapshot().dialog?.apiProfile === "");
+  const dialog = engine.getSnapshot().dialog;
+  assert.equal(dialog.baseline.apiProfile, "");
+  gate.resolve();
+  await pending;
   engine.unmount();
 });
