@@ -187,6 +187,192 @@ function buildCommitLogCommand(limit) {
   );
 }
 
+// 不能安全带进命令行的字符：控制字符、引号与反引号、shell 元字符，以及 CMD 的
+// %VAR% 展开与延迟展开的 !VAR!（双引号内同样生效）。
+const STAGE_PATH_UNSAFE_CHARS = /[\u0000-\u001F\u007F"'`$;&|<>%!]/;
+
+// 命令行参数安全性判定：git status 返回的文件名同属不可信数据（仓库内容），
+// 与模型输出的路径共用这一判定。拒绝绝对路径、盘符、git pathspec magic 前缀、
+// 上级目录与无法安全带进命令行的字符。
+function isStagePathSafe(value) {
+  const file = String(value ?? "");
+  if (!file || file.length > 300) return false;
+  if (file.startsWith("/") || file.startsWith("~") || file.startsWith(":")) return false;
+  if (/^[A-Za-z]:/.test(file)) return false;
+  if (STAGE_PATH_UNSAFE_CHARS.test(file)) return false;
+  return !file.split("/").some((segment) => segment === "..");
+}
+
+// 自动暂存只接受相对路径：修复结果里的 files 来自模型输出，属于不可信数据。
+// 拒绝绝对路径、盘符、上级目录与 git pathspec magic；控制字符、引号与 shell 元字符
+// 无法安全带进命令行，同样拒绝。其余字符原样保留（如 Next.js 的 [id]、(group)、
+// 含空格的路径），git add 一侧用 --literal-pathspecs 关闭通配符与排除语义。
+// CMD 的 %VAR% 展开与延迟展开的 !VAR! 即便在双引号内也会生效，因此同样拒绝。
+// 被拒绝的候选由调用方收集并提示，不能静默丢弃。
+function normalizeStagePath(value) {
+  const file = String(value ?? "").trim().replace(/\\/g, "/");
+  if (!file || file.length > 300) return "";
+  if (
+    file.startsWith("/") ||
+    file.startsWith("~") ||
+    file.startsWith(":") ||
+    /^[A-Za-z]:/.test(file)
+  ) {
+    return "";
+  }
+  if (STAGE_PATH_UNSAFE_CHARS.test(file)) return "";
+  const segments = file.split("/").filter((segment) => segment && segment !== ".");
+  if (!segments.length || segments.some((segment) => segment === "..")) return "";
+  return segments.join("/");
+}
+
+// 比较用的路径键：只做与 normalizeStagePath 同一基准的归一（trim、反斜杠转斜杠、
+// 折叠 ./ 与重复斜杠），不做安全判定。用于把 git status 侧被拒绝的路径与候选
+// 原始字符串对齐，避免同一路径既算候选失败又算仓库级提示。
+function stagePathKey(value) {
+  return String(value ?? "")
+    .trim()
+    .replace(/\\/g, "/")
+    .replace(/\/{2,}/g, "/")
+    .replace(/^\.\//, "");
+}
+
+// git add 命令行：--literal-pathspecs 关闭 pathspec 的通配符、排除与 magic 语义，
+// 让 [id]、(group)、*.ts 这类文件名按字面量处理；-- 之后不会再把路径解析成选项。
+// 路径已通过 normalizeStagePath 过滤并按仓库根归一，并用双引号包裹：双引号在 CMD /
+// PowerShell / Bash 下都是引号，含空格的路径不会被拆词；单引号只被 Bash / PowerShell
+// 识别，终端为 CMD 时连不含空格的路径都会因为引号进入 pathspec 而整批失败。
+function buildGitAddCommand(files) {
+  return `git --literal-pathspecs add -- ${files.map((file) => `"${file}"`).join(" ")}`;
+}
+
+// git status --porcelain=v1 -z 输出：每条记录为 `XY path`，以 NUL 分隔；
+// 重命名 / 复制记录后面紧跟一条旧路径，必须跳过，避免把旧路径当成本轮改动。
+// 若终端通道剥掉了 NUL，退化为按行解析（此时只接受最后一段路径，宁可少暂存）。
+// 同时保留 X / Y 两位状态：暂存基线需要区分「工作区已删除」（没有内容可做指纹）。
+function parseStatusEntries(stdout) {
+  const entries = new Map();
+  const text = String(stdout || "");
+  if (text.includes("\u0000")) {
+    const parts = text.split("\u0000");
+    for (let index = 0; index < parts.length; index += 1) {
+      const entry = parts[index];
+      if (!entry || entry.length < 4) continue;
+      const status = entry.slice(0, 2);
+      const file = entry.slice(3);
+      if (!file) continue;
+      if (status[0] === "R" || status[0] === "C") index += 1;
+      entries.set(file, { indexStatus: status[0], workdirStatus: status[1] });
+    }
+    return entries;
+  }
+  for (const line of text.split(/\r?\n/)) {
+    if (!line || line.length < 4) continue;
+    const status = line.slice(0, 2);
+    let file = line.slice(3);
+    const arrow = file.indexOf(" -> ");
+    if (arrow >= 0) file = file.slice(arrow + 4);
+    if (file.startsWith('"') && file.endsWith('"') && file.length >= 2) {
+      file = file.slice(1, -1);
+    }
+    if (file) {
+      entries.set(file.replace(/\\/g, "/"), { indexStatus: status[0], workdirStatus: status[1] });
+    }
+  }
+  return entries;
+}
+
+// 工作区内容指纹：hash-object 只计算哈希，不写对象库、不改索引。
+// 逐文件比较指纹才能区分「修复启动前就有改动」与「本轮改了同一个文件」，
+// 只比较路径会把后者整批跳过，长期有未提交改动的工作区里自动暂存会一直不生效。
+// 单条命令的字符预算：改动文件多时合并成尽量少的终端调用（命令行长度上限内）。
+// 基线指纹（hash-object）与收尾暂存（git add）共用这一预算。
+const STAGE_COMMAND_CHARS = 3000;
+// 基线指纹的采集上限：改动文件过多时不做指纹，退化为旧的路径规则。
+const STAGE_HASH_LIMIT = 200;
+// 指纹三态：有效哈希表示有内容；DELETED 表示修复启动时工作区已删除（没有内容）；
+// UNKNOWN 表示读取失败，收尾时不得据此判断改动。旧数据用空串同时表示后两者，
+// 归一化时一律按 UNKNOWN 处理：宁可少暂存，也不把修复前已有的改动推进索引。
+const STAGE_HASH_DELETED = "!deleted";
+const STAGE_HASH_UNKNOWN = "!unknown";
+
+function normalizeStageHash(value) {
+  const text = String(value ?? "").trim();
+  if (!text) return STAGE_HASH_UNKNOWN;
+  if (text === STAGE_HASH_DELETED || text === STAGE_HASH_UNKNOWN) return text;
+  return text;
+}
+
+// 与 git add 同一套引号规则：只有双引号才能在 CMD 下保持单参数，否则基线指纹采集
+// 对所有路径都取不到哈希，收尾时会把「两侧都取不到」误判成「内容未变」而跳过暂存。
+function buildHashObjectsCommand(files) {
+  return `git --literal-pathspecs hash-object -- ${files.map((file) => `"${file}"`).join(" ")}`;
+}
+
+// 按字符预算把路径切成若干批：每个路径按自身长度计费（路径两端的引号与分隔空格共 3 个字符），
+// 避免一批命令超过命令行上限。指纹采集与 git add 共用这一分片口径。
+function chunkStagePaths(files) {
+  const chunks = [];
+  let current = [];
+  let size = 0;
+  for (const file of files) {
+    const cost = file.length + 3;
+    if (current.length && size + cost > STAGE_COMMAND_CHARS) {
+      chunks.push(current);
+      current = [];
+      size = 0;
+    }
+    current.push(file);
+    size += cost;
+  }
+  if (current.length) chunks.push(current);
+  return chunks;
+}
+
+// 基线里工作区已删除的路径没有内容可做指纹：记为空串，运行后重新出现即视为改动。
+function isWorktreeMissing(entry) {
+  if (!entry) return false;
+  if (entry.workdirStatus === "D") return true;
+  return entry.indexStatus === "D" && entry.workdirStatus === " ";
+}
+
+// 修复结果里的 files 没有声明基准：既可能相对仓库根（与审查提示词的 location 约定一致），
+// 也可能相对项目目录（与插件打开 issue 位置时一致）。只接受在当前改动集合里存在的候选；
+// 两个基准同时命中时无法判定，宁可跳过也不把仓库根下的同名文件加入索引。
+function resolveStagePaths(files, prefix, changed) {
+  const resolved = [];
+  const ambiguous = [];
+  const unconfirmed = [];
+  const seen = new Set();
+  for (const file of files) {
+    // 两个基准独立构造：不能用 startsWith(prefix) 预判基准，否则项目相对路径本身
+    // 以 prefix 开头时两个候选会被合并成同一个键，歧义在判定前就被消除。
+    const projectRelative = prefix ? `${prefix}${file}` : file;
+    const rootHit = changed.has(file);
+    const projectHit = changed.has(projectRelative);
+    let picked = "";
+    if (rootHit && projectHit) {
+      if (file === projectRelative) {
+        picked = file;
+      } else {
+        ambiguous.push(file);
+        continue;
+      }
+    } else if (rootHit) {
+      picked = file;
+    } else if (projectHit) {
+      picked = projectRelative;
+    } else {
+      unconfirmed.push(file);
+      continue;
+    }
+    if (seen.has(picked)) continue;
+    seen.add(picked);
+    resolved.push(picked);
+  }
+  return { resolved, ambiguous, unconfirmed };
+}
+
 // 解析 git log 的 %x1f 分隔输出，容忍空行与提交信息内的分隔符。
 export function parseCommitLog(stdout, limit) {
   const commits = [];
@@ -262,6 +448,9 @@ function createEngine(api) {
     // 审查完成时若用户正在使用其它弹窗，本次自动修复范围暂存到这里，等待列表入口重新打开。
     pendingAutoFix: null,
     toast: null,
+    // 最近几条提示的堆叠展示：一次收尾会连续出现「修复完成 → 暂存失败 → 复审启动」，
+    // 单槽提示会让后一条瞬间盖住前一条，错误信息根本来不及看。
+    toasts: [],
   });
 
   let mounted = 0;
@@ -276,10 +465,19 @@ function createEngine(api) {
   // 每个会话尚未落盘的活动指标：流式期间只更新内存，保存时再合并进 state.sessions。
   const sessionMetrics = new Map();
   let toastTimer = null;
+  // 堆叠提示各自独立计时：错误提示停留更久，连续提示不会互相覆盖。
+  let toastSeq = 0;
+  const toastTimers = new Map();
+  const TOAST_MS = 4500;
+  const TOAST_ERROR_MS = 9000;
+  const TOAST_STACK_MAX = 3;
   // 已判失效的 API 档案名：createConversation 回退成功后记录，本运行期间
   // 后续批次（续批/复审）直接跳过绑定，避免写盘失败（设置仍残留失效档案名）时
   // 每批都先失败一次再回退、重复无效创建调用与重复提示。
   const invalidApiProfiles = new Set();
+  // 已执行过自动暂存的本轮修复：复审收尾与修复收尾共用同一把去重键（修复会话集合），
+  // 避免同一轮改动被 git add 两次、提示重复弹出。
+  const stagedRuns = new Set();
   let persistBlocked = false;
   let gitSeq = 0;
   let treeSeq = 0;
@@ -567,8 +765,41 @@ function createEngine(api) {
     return `${text} ${t(key, { name })}`;
   }
 
+  // 展示栈满时优先淘汰最早的非错误条目：一次收尾会连续产生「修复完成 → 暂存失败 →
+  // 清理完成」，按插入顺序截断会让错误提示被随后的成功提示挤掉。全部是错误时仍淘汰
+  // 最早一条，避免提示层与计时器无界增长；刚插入的条目不会被自己挤掉。
+  function pruneToasts(list, keepId) {
+    while (list.length > TOAST_STACK_MAX) {
+      let index = list.findIndex((item) => item.id !== keepId && item.kind !== "error");
+      if (index < 0) index = list.findIndex((item) => item.id !== keepId);
+      if (index < 0) break;
+      const [dropped] = list.splice(index, 1);
+      const timer = toastTimers.get(dropped.id);
+      if (timer) {
+        clearTimeout(timer);
+        toastTimers.delete(dropped.id);
+      }
+    }
+    return list;
+  }
+
   function setToast(kind, text) {
+    if (!text) return;
+    const id = ++toastSeq;
     store.set({ toast: { kind, text } });
+    // 展示栈保留最近几条，其中错误条目优先保留。
+    const stack = store.get().toasts || [];
+    const last = stack[stack.length - 1];
+    if (!last || last.text !== text || last.kind !== kind) {
+      store.set({ toasts: pruneToasts([...stack, { id, kind, text }], id) });
+      const timer = setTimeout(() => {
+        toastTimers.delete(id);
+        const current = store.get().toasts || [];
+        const next = current.filter((item) => item.id !== id);
+        if (next.length !== current.length) store.set({ toasts: next });
+      }, kind === "error" ? TOAST_ERROR_MS : TOAST_MS);
+      toastTimers.set(id, timer);
+    }
     if (toastTimer) clearTimeout(toastTimer);
     toastTimer = setTimeout(() => {
       const current = store.get().toast;
@@ -581,7 +812,11 @@ function createEngine(api) {
       clearTimeout(toastTimer);
       toastTimer = null;
     }
-    if (store.get().toast) store.set({ toast: null });
+    for (const timer of toastTimers.values()) clearTimeout(timer);
+    toastTimers.clear();
+    if (store.get().toast || (store.get().toasts || []).length) {
+      store.set({ toast: null, toasts: [] });
+    }
   }
 
   // 弹窗内的动作失败同时写入 dialog.error：toast 会消失，内联错误必须保留到用户重试或关闭。
@@ -2539,6 +2774,519 @@ function createEngine(api) {
     return "started";
   }
 
+  // 借宿主内置终端 MCP 工具执行插件固定的命令：两个工具名都试，结果统一解析。
+  // 与提交记录读取一致，命令只由插件生成，不接受用户自由输入。
+  async function callTerminalTool(project, args) {
+    let result = null;
+    let lastError = "";
+    for (const toolFullName of BASH_TOOL_NAMES) {
+      result = await runWrite("mcpTools.call", {
+        toolFullName,
+        projectId: project.directoryId,
+        args,
+      });
+      if (result.ok) break;
+      lastError = String(result.error || "");
+      if (!/no longer available|Invalid MCP tool name|Unknown tool/i.test(lastError)) break;
+    }
+    if (!result || !result.ok) {
+      if (result?.denied?.reason === "write-declaration-missing") {
+        return { ok: false, error: t("fx.review.commitsDenied") };
+      }
+      const unavailable =
+        /no longer available|Unknown tool|Invalid MCP tool name|is disabled by default|is disabled for the current project|disabled by Lite mode/i.test(
+          lastError,
+        );
+      return {
+        ok: false,
+        error: unavailable ? t("fx.review.commitsToolUnavailable") : lastError || "mcpTools.call failed",
+      };
+    }
+    const payload = readToolPayload(result.data);
+    if (!payload) return { ok: false, error: "empty tool result" };
+    const stdout = String(payload.stdout || "");
+    const stderr = String(payload.stderr || "");
+    const exitCode = payload.exitCode;
+    if (payload.error || (typeof exitCode === "number" && exitCode !== 0)) {
+      const detail = String(payload.error || stderr || `exit code ${exitCode}`).trim();
+      return { ok: false, error: detail.split(/\r?\n/)[0] || "command failed" };
+    }
+    return { ok: true, stdout, stderr };
+  }
+
+  // 本轮实际改动的文件：按修复会话归属收集，覆盖分批的所有批次。
+  // 不按最终结论过滤：not_found / blocked 的修复记录里也可能有实际改动，
+  // 用户要的是「本轮改了什么就暂存什么」。
+  // 被路径过滤拒绝的候选单独返回：它们不会进入 git add，但必须让用户看到，
+  // 否则「已自动暂存 N 个文件」的提示会掩盖本轮仍有文件未暂存。
+  function collectRunChangedFiles(session) {
+    const snapshot = store.get();
+    const runIds = new Set(
+      (Array.isArray(session.sessionIds) && session.sessionIds.length
+        ? session.sessionIds
+        : [session.conversationId]
+      )
+        .map((conversationId) => String(conversationId || ""))
+        .filter(Boolean),
+    );
+    const files = [];
+    const rejected = [];
+    const seen = new Set();
+    const rejectedSeen = new Set();
+    for (const issue of snapshot.state.issues) {
+      if (!runIds.has(String(issue.fix?.conversationId || ""))) continue;
+      for (const raw of Array.isArray(issue.fix?.files) ? issue.fix.files : []) {
+        const file = normalizeStagePath(raw);
+        if (!file) {
+          const shown = String(raw ?? "").trim();
+          if (shown && !rejectedSeen.has(shown)) {
+            rejectedSeen.add(shown);
+            rejected.push(shown);
+          }
+          continue;
+        }
+        if (seen.has(file)) continue;
+        seen.add(file);
+        files.push(file);
+      }
+    }
+    return { files, rejected };
+  }
+
+  // 读取工作区改动清单：仓库根相对路径集合。候选确认与 git add 共用这一基准，
+  // 避免同一批模型输出的路径在不同命令里按不同目录解析。entries 供基线采集判定
+  // 「工作区已删除」（这类路径没有内容可做指纹）。
+  // Git 文件名来自仓库内容，属于不可信数据：只有通过命令行安全判定的路径才进入
+  // 基线指纹与候选确认；被拒绝的路径单独返回，收尾只把与本轮候选无关的这类路径
+  // 作为仓库级信息说明，不计入候选失败。
+  async function readWorktreeChanges(project, repoRoot) {
+    const result = await callTerminalTool(project, {
+      command: "git status --porcelain=v1 -z -uall",
+      description: t("fx.stage.statusDescription"),
+      workingDirectory: repoRoot,
+      timeout: 30000,
+    });
+    if (!result.ok) {
+      return {
+        ok: false,
+        paths: new Set(),
+        entries: new Map(),
+        rejected: [],
+        error: result.error || "git status failed",
+      };
+    }
+    const entries = new Map();
+    const rejected = [];
+    for (const [file, entry] of parseStatusEntries(result.stdout)) {
+      if (isStagePathSafe(file)) entries.set(file, entry);
+      else rejected.push(String(file));
+    }
+    return { ok: true, paths: new Set(entries.keys()), entries, rejected, error: "" };
+  }
+
+  // 读取一批工作区路径的内容指纹：先按字符预算合并成尽量少的命令，输出行数对不上
+  // （个别路径在采集期间消失或改成了目录）时对半拆分重试，只有单个路径才逐项失败。
+  // 改动文件多时这里决定暂存要跑几轮终端调用：合并 + 二分避免「一个坏路径拖成 N 次调用」。
+  async function readWorktreeHashes(project, repoRoot, files, description) {
+    const hashes = new Map();
+    const list = (Array.isArray(files) ? files : []).filter(Boolean);
+    const hashChunk = async (chunk) => {
+      if (!chunk.length) return;
+      const result = await callTerminalTool(project, {
+        command: buildHashObjectsCommand(chunk),
+        description,
+        workingDirectory: repoRoot,
+        timeout: 30000,
+      });
+      const lines = result.ok ? String(result.stdout || "").split(/\r?\n/).filter(Boolean) : [];
+      if (result.ok && lines.length === chunk.length) {
+        chunk.forEach((file, index) => hashes.set(file, lines[index]));
+        return;
+      }
+      if (chunk.length === 1) {
+        // 单路径读取失败：显式记为未知，不能与「已确认删除」共用空串，
+        // 否则收尾比较会把未知指纹当成本轮内容变化。
+        hashes.set(chunk[0], STAGE_HASH_UNKNOWN);
+        return;
+      }
+      const middle = Math.ceil(chunk.length / 2);
+      await hashChunk(chunk.slice(0, middle));
+      await hashChunk(chunk.slice(middle));
+    };
+    for (const chunk of chunkStagePaths(list)) await hashChunk(chunk);
+    return hashes;
+  }
+
+  // 修复启动时冻结工作区改动基线：收尾暂存据此判断「本轮是否真的改了这个文件」。
+  // 路径清单用于披露「修复启动前已有改动」；内容指纹用于区分本轮改动与既有改动。
+  // 采集失败只记录原因，不阻断修复启动；暂存时降级为仅提示、不执行 git add。
+  async function captureStageBaseline(project) {
+    const at = nowMs();
+    const base = { at, repoRoot: "", prefix: "", paths: [], hashes: null, rejected: [], error: "" };
+    if (!project?.path || String(project.path).startsWith("ssh://")) {
+      return { ...base, error: t("fx.stage.sshUnsupported") };
+    }
+    try {
+      const root = await callTerminalTool(project, {
+        command: "git rev-parse --show-toplevel --show-prefix",
+        description: t("fx.stage.statusDescription"),
+        workingDirectory: project.path,
+        timeout: 20000,
+      });
+      const lines = String(root.ok ? root.stdout || "" : "").split(/\r?\n/);
+      const repoRoot = String(lines[0] || "").trim();
+      const prefix = String(lines[1] || "").trim().replace(/\\/g, "/");
+      if (!root.ok || !repoRoot) {
+        return { ...base, error: root.error || "git rev-parse returned no path" };
+      }
+      const changes = await readWorktreeChanges(project, repoRoot);
+      if (!changes.ok) {
+        return {
+          ...base,
+          repoRoot,
+          prefix,
+          rejected: changes.rejected || [],
+          error: changes.error,
+        };
+      }
+      const paths = Array.from(changes.paths).sort();
+      // 指纹只对工作区仍存在的路径采集：已删除的路径记为删除态，运行后重新出现即为改动。
+      const hashTargets = paths.filter((file) => !isWorktreeMissing(changes.entries.get(file)));
+      if (hashTargets.length > STAGE_HASH_LIMIT) {
+        // 改动文件过多时逐文件取指纹代价太高：不采集，收尾暂存退化为旧的路径规则。
+        return {
+          at,
+          repoRoot,
+          prefix,
+          paths,
+          hashes: null,
+          rejected: changes.rejected || [],
+          error: "",
+        };
+      }
+      const hashes = hashTargets.length
+        ? await readWorktreeHashes(project, repoRoot, hashTargets, t("fx.stage.statusDescription"))
+        : new Map();
+      const snapshot = {};
+      for (const file of paths) {
+        // 三态分开记录：删除只看 git status，读取失败记未知，收尾比较不再猜测。
+        if (isWorktreeMissing(changes.entries.get(file))) {
+          snapshot[file] = STAGE_HASH_DELETED;
+          continue;
+        }
+        const hash = hashes.get(file);
+        snapshot[file] = typeof hash === "string" && hash ? hash : STAGE_HASH_UNKNOWN;
+      }
+      return {
+        at,
+        repoRoot,
+        prefix,
+        paths,
+        hashes: snapshot,
+        rejected: changes.rejected || [],
+        error: "",
+      };
+    } catch (error) {
+      return { ...base, error: String(error?.message || error) };
+    }
+  }
+
+  // 提示中的文件名列表：只列前几个，避免 toast 过长；空列表返回空串。
+  const STAGE_FILE_LIST_MAX = 4;
+  function formatStageFileList(files) {
+    const list = (Array.isArray(files) ? files : []).filter(Boolean);
+    if (!list.length) return "";
+    const shown = list.slice(0, STAGE_FILE_LIST_MAX);
+    const separator = /^zh/i.test(String(api.locale || "")) ? "、" : ", ";
+    const names = shown.join(separator);
+    return list.length > shown.length
+      ? t("fx.stage.fileListMore", { names, count: list.length - shown.length })
+      : names;
+  }
+
+  // 全部批次完成后的自动暂存：只暂存能在当前改动集合中确认、且与修复启动时内容不同的文件，
+  // 不使用 git add -A，也不提交。files 来自模型输出，可能未改动或路径基准不一致：
+  // 无法确认的条目只提示，不执行 git add。
+  async function stageRunChanges(session, project) {
+    const projectId = project?.directoryId;
+    if (!projectId) return "empty";
+    const guard = captureProject();
+    if (!guard?.directoryId || guard.directoryId !== projectId) return "empty";
+    if (String(project.path || "").startsWith("ssh://")) {
+      setToast("error", t("fx.stage.sshUnsupported"));
+      return "error";
+    }
+    const { files, rejected: rejectedCandidates } = collectRunChangedFiles(session);
+    // 候选拒绝与仓库级拒绝分账：只有本轮修复声明的候选路径被安全判定拒绝，
+    // 才算「候选未暂存」；git status 里与本轮无关的特殊文件名只做中性说明。
+    const candidateRejected = [];
+    const candidateRejectedKeys = new Set();
+    for (const raw of rejectedCandidates) {
+      const shown = String(raw ?? "").trim();
+      if (!shown) continue;
+      const key = stagePathKey(shown);
+      if (candidateRejectedKeys.has(key)) continue;
+      candidateRejectedKeys.add(key);
+      candidateRejected.push(shown);
+    }
+    const repoRejected = [];
+    const repoRejectedKeys = new Set();
+    const addRepoRejected = (list) => {
+      for (const file of Array.isArray(list) ? list : []) {
+        const shown = String(file ?? "").trim();
+        if (!shown) continue;
+        const key = stagePathKey(shown);
+        if (candidateRejectedKeys.has(key) || repoRejectedKeys.has(key)) continue;
+        repoRejectedKeys.add(key);
+        repoRejected.push(shown);
+      }
+    };
+    if (!files.length) {
+      // 全部候选都被路径过滤拒绝时不能静默返回：用户需要知道本轮有文件未暂存。
+      if (candidateRejected.length) {
+        setToast(
+          "error",
+          t("fx.toast.stagePathRejected", {
+            count: candidateRejected.length,
+            files: formatStageFileList(candidateRejected),
+          }),
+        );
+        return "error";
+      }
+      return "empty";
+    }
+    // 修复启动时冻结的基线是暂存的唯一可信边界。没有基线说明本轮启动时并未开启自动暂存
+    // （开关随本轮冻结）：静默跳过，不把「用户没有要求暂存」变成收尾时的错误提示。
+    const baseline =
+      session.stageBaseline && typeof session.stageBaseline === "object" ? session.stageBaseline : null;
+    if (!baseline) return "empty";
+    // baseline.rejected 是修复启动时的仓库级特殊文件名快照：收尾只按当前 git status
+    // 披露这类路径（启动后可能已被还原或改名），它不参与候选失败统计。
+    // 基线采集确有失败时才提示：本轮确实要求暂存，用户需要知道没暂存及原因。
+    const baselineProblem = String(baseline.error || "");
+    if (baselineProblem) {
+      setToast(
+        "error",
+        t("fx.toast.stageNoBaseline", {
+          error: baselineProblem,
+          files: formatStageFileList(files),
+        }),
+      );
+      return "error";
+    }
+    const baselinePaths = new Set(
+      Array.isArray(baseline.paths) ? baseline.paths.map(String).filter(Boolean) : [],
+    );
+    const description = t("fx.stage.description");
+    // 一次取仓库根与项目相对仓库根的前缀：files 可能按任一基准给出，
+    // 后续用真实改动集合判定，统一换算为仓库根相对路径后再 git add。
+    const root = await callTerminalTool(project, {
+      command: "git rev-parse --show-toplevel --show-prefix",
+      description,
+      workingDirectory: project.path,
+      timeout: 20000,
+    });
+    if (!isProjectCurrent(guard)) return "empty";
+    const rootLines = String(root.ok ? root.stdout || "" : "").split(/\r?\n/);
+    const repoRoot = String(rootLines[0] || "").trim();
+    const prefix = String(rootLines[1] || "").trim().replace(/\\/g, "/");
+    if (!root.ok || !repoRoot) {
+      setToast(
+        "error",
+        t("fx.toast.stageFailed", { error: root.error || "git rev-parse returned no path" }),
+      );
+      return "error";
+    }
+    // 仓库根变化（项目搬移 / 多仓库工作区）时旧基线不可比，同样降级为仅提示。
+    if (String(baseline.repoRoot || "") !== repoRoot) {
+      setToast(
+        "error",
+        t("fx.toast.stageNoBaseline", {
+          error: t("fx.stage.repoChanged"),
+          files: formatStageFileList(files),
+        }),
+      );
+      return "error";
+    }
+    const changes = await readWorktreeChanges(project, repoRoot);
+    if (!isProjectCurrent(guard)) return "empty";
+    if (!changes.ok) {
+      setToast("error", t("fx.toast.stageStatusUnavailable", { error: changes.error }));
+      return "error";
+    }
+    // 仓库内与本轮候选无关的特殊文件名：只做中性附注，不计入失败统计。
+    addRepoRejected(changes.rejected);
+    const { resolved, ambiguous, unconfirmed } = resolveStagePaths(files, prefix, changes.paths);
+    const skipped = [...ambiguous, ...unconfirmed];
+    // 路径过滤拒绝的候选同样未暂存：计入失败数，并在提示里说明原因。
+    const filteredNote = candidateRejected.length
+      ? t("fx.stage.pathFiltered", { count: candidateRejected.length })
+      : "";
+    const repoFilteredNote = repoRejected.length
+      ? t("fx.stage.repoPathFiltered", { count: repoRejected.length })
+      : "";
+    if (!resolved.length) {
+      setToast(
+        "error",
+        t("fx.toast.stageUnconfirmed", {
+          count: files.length,
+          files: formatStageFileList(skipped.length ? skipped : files),
+          filtered: filteredNote,
+        }),
+      );
+      return "error";
+    }
+    // 本轮是否真的改动了候选文件：与修复启动时的内容指纹比较。
+    // 只比较路径会把「启动前已有改动、本轮又改了同一个文件」整批跳过，
+    // 长期有未提交改动的工作区里自动暂存会一直看起来没生效。
+    const priorHashes =
+      baseline.hashes && typeof baseline.hashes === "object" && !Array.isArray(baseline.hashes)
+        ? baseline.hashes
+        : null;
+    const fresh = [];
+    const skippedByBaseline = [];
+    // 任一侧指纹未知时无法判断内容是否变化：既不暂存也不按「未改动」处理，收尾单独提示。
+    const unknownFingerprint = [];
+    if (priorHashes) {
+      const tracked = resolved.filter((file) =>
+        Object.prototype.hasOwnProperty.call(priorHashes, file),
+      );
+      const currentHashes = await readWorktreeHashes(project, repoRoot, tracked, description);
+      if (!isProjectCurrent(guard)) return "empty";
+      for (const file of resolved) {
+        if (!Object.prototype.hasOwnProperty.call(priorHashes, file)) {
+          // 启动时这个路径没有改动：本轮新增的改动，直接暂存。
+          fresh.push(file);
+          continue;
+        }
+        const prior = normalizeStageHash(priorHashes[file]);
+        if (prior === STAGE_HASH_UNKNOWN) {
+          unknownFingerprint.push(file);
+          continue;
+        }
+        const current = normalizeStageHash(currentHashes.get(file));
+        if (current === STAGE_HASH_UNKNOWN) {
+          // 读取失败不能当作内容变化；只有 git status 明确报告删除时才按删除处理。
+          if (isWorktreeMissing(changes.entries.get(file))) {
+            // 启动时已删除且当前仍删除：本轮没有改动它。
+            if (prior === STAGE_HASH_DELETED) skippedByBaseline.push(file);
+            else fresh.push(file);
+          } else {
+            unknownFingerprint.push(file);
+          }
+          continue;
+        }
+        // 启动时已删除、当前有内容说明本轮让它重新出现；两侧都有内容时直接比较。
+        if (prior === STAGE_HASH_DELETED || current !== prior) fresh.push(file);
+        else skippedByBaseline.push(file);
+      }
+    } else {
+      // 旧基线没有内容指纹：沿用路径规则，启动前已有改动的文件不暂存。
+      for (const file of resolved) {
+        if (baselinePaths.has(file)) skippedByBaseline.push(file);
+        else fresh.push(file);
+      }
+    }
+    if (!fresh.length) {
+      setToast(
+        "error",
+        priorHashes
+          ? unknownFingerprint.length
+            ? t("fx.toast.stageHashUnknown", {
+                count: unknownFingerprint.length,
+                files: formatStageFileList(unknownFingerprint),
+              })
+            : t("fx.toast.stageUnchanged", {
+                count: skippedByBaseline.length,
+                files: formatStageFileList(skippedByBaseline.length ? skippedByBaseline : resolved),
+              })
+          : t("fx.toast.stageBaselineSkipped", {
+              count: skippedByBaseline.length,
+              files: formatStageFileList(skippedByBaseline),
+            }),
+      );
+      return "error";
+    }
+    const add = (paths) =>
+      callTerminalTool(project, {
+        command: buildGitAddCommand(paths),
+        description,
+        workingDirectory: repoRoot,
+        timeout: 60000,
+      });
+    const staged = [];
+    let firstError = "";
+    // 按字符预算分批提交：改动文件多时一条 git add 会超过命令行长度上限，
+    // 整批失败又退化成逐文件串行调用（收尾长时间卡住）。分片失败时在分片内二分重试，
+    // 与指纹采集同一做法：只有确实无法暂存的单个路径记为失败，调用次数停在分片数加对数级。
+    const pending = chunkStagePaths(fresh);
+    while (pending.length) {
+      const chunk = pending.shift();
+      const result = await add(chunk);
+      if (!isProjectCurrent(guard)) return "empty";
+      if (result.ok) {
+        staged.push(...chunk);
+        continue;
+      }
+      if (!firstError) firstError = result.error;
+      if (chunk.length === 1) continue;
+      // 左半先入队：暂存顺序与 fresh 一致，提示里的文件列表不变。
+      const middle = Math.ceil(chunk.length / 2);
+      pending.unshift(chunk.slice(0, middle), chunk.slice(middle));
+    }
+    // 本轮暂存候选里「修复启动前就有改动」的文件：git add 会连同既有改动一起暂存，
+    // 必须在成功提示里披露，避免用户以为索引里只有本轮修复的改动。
+    const carriedPriorChanges = priorHashes
+      ? fresh.filter((file) => Object.prototype.hasOwnProperty.call(priorHashes, file)).length
+      : 0;
+    const notes = [];
+    if (carriedPriorChanges) {
+      notes.push(t("fx.stage.priorChanges", { count: carriedPriorChanges }));
+    }
+    if (skippedByBaseline.length) {
+      notes.push(
+        priorHashes
+          ? t("fx.stage.unchangedNote", { count: skippedByBaseline.length })
+          : t("fx.stage.baselineSkipped", { count: skippedByBaseline.length }),
+      );
+    }
+    if (unknownFingerprint.length) {
+      notes.push(t("fx.stage.hashUnknownNote", { count: unknownFingerprint.length }));
+    }
+    if (filteredNote) notes.push(filteredNote);
+    if (repoFilteredNote) notes.push(repoFilteredNote);
+    const noteText = notes.join("");
+    // 只有「本该暂存的候选没进索引」才算失败：与启动时内容一致的候选不属于失败。
+    // 指纹未知的候选同样没有进索引，计入未暂存数量，避免成功提示掩盖仍有文件未暂存。
+    const failed =
+      fresh.length - staged.length + skipped.length + candidateRejected.length + unknownFingerprint.length;
+    if (!failed) {
+      setToast(
+        "success",
+        t("fx.toast.stagedFiles", {
+          count: staged.length,
+          files: formatStageFileList(staged),
+          skipped: noteText,
+        }),
+      );
+      return "done";
+    }
+    if (staged.length) {
+      setToast(
+        "error",
+        t("fx.toast.stagedPartialFiles", {
+          staged: staged.length,
+          files: formatStageFileList(staged),
+          failed,
+          filtered: noteText,
+        }),
+      );
+    } else {
+      setToast("error", t("fx.toast.stageFailed", { error: firstError || "git add failed" }));
+    }
+    return "error";
+  }
+
   // 全部批次完成：收尾会话状态；开启复审时先只读复核，再按需自动清理。
   async function finishFixRun(session) {
     const snapshot = store.get();
@@ -2555,13 +3303,140 @@ function createEngine(api) {
     store.set({ state: doneState });
     setToast("success", t("fx.toast.fixAllDone", { batches: session.batchTotal }));
     await saveState({ projectId, state: doneState });
+    // 开了复审时，暂存与清理都等复审结束再执行：整条自动化链的最后一步才改写索引，
+    // 修复刚结束就把改动塞进索引会让复审期间的 git 状态和用户预期不一致。
+    let verifyOutcome = "empty";
     if (store.get().settings?.verifyAfterFix) {
-      const outcome = await startVerify(session);
-      // 复审已启动、已有复审在运行，或启动失败需要用户重试时，都不能先自动清理：
-      // 未完成复核的修复结论不能被自动归档 / 删除。
-      if (outcome !== "empty") return;
+      verifyOutcome = await startVerify(session);
+      // 复审已接管收尾：暂存与清理都由复审收尾触发。
+      if (verifyOutcome === "started") return;
     }
-    if (session.autoCleanup) await autoCleanupFixRun(session);
+    // 复审没有接管（关闭 / 本轮没有可复核目标 / 启动失败）：自动化链到此结束，先暂存再清理。
+    // 启动失败时仍不自动清理：未完成复核的修复结论不能被自动归档 / 删除。
+    await stageFixRun(session, store.get().project);
+    if (verifyOutcome === "empty" && session.autoCleanup) await autoCleanupFixRun(session);
+  }
+
+  // 一轮修复的会话集合：修复会话用自身会话集合，复审会话用启动时冻结的修复会话集合。
+  function stageRunIdsOf(session) {
+    const source =
+      Array.isArray(session?.fixSessionIds) && session.fixSessionIds.length
+        ? session.fixSessionIds
+        : Array.isArray(session?.sessionIds) && session.sessionIds.length
+          ? session.sessionIds
+          : [session?.conversationId];
+    const ids = source.map(String).filter(Boolean);
+    return Array.from(new Set(ids)).sort();
+  }
+
+  function stageRunKeyOf(ids) {
+    return Array.isArray(ids) ? ids.join("|") : "";
+  }
+
+  // 已持久化的暂存结果：staging / done / error / empty 都表示本轮已经处理过。
+  // 重载后不重放旧基线，避免把用户随后的改动再次推进索引。
+  function isStageRunRecorded(ids) {
+    const target = stageRunKeyOf(ids);
+    if (!target) return false;
+    const sessions = store.get().state.sessions;
+    return ["fix", "verify"].some((kind) => {
+      const session = sessions[kind];
+      if (!session || !session.stageRunState) return false;
+      const recorded =
+        Array.isArray(session.stageRunIds) && session.stageRunIds.length
+          ? stageRunKeyOf(session.stageRunIds)
+          : stageRunKeyOf(stageRunIdsOf(session));
+      return recorded === target;
+    });
+  }
+
+  // 把暂存状态写回本轮会话：只更新三个标记字段，其余字段以最新快照为准，
+  // 避免用调用方传入的旧会话对象覆盖并发写入的状态。
+  async function markStageRun(ids, outcome) {
+    const snapshot = store.get();
+    const projectId = snapshot.project?.directoryId;
+    if (!projectId) return;
+    const guard = captureProject();
+    if (!guard || guard.directoryId !== projectId) return;
+    const target = stageRunKeyOf(ids);
+    const nextSessions = { ...snapshot.state.sessions };
+    let changed = false;
+    for (const kind of ["fix", "verify"]) {
+      const session = nextSessions[kind];
+      if (!session || stageRunKeyOf(stageRunIdsOf(session)) !== target) continue;
+      nextSessions[kind] = {
+        ...session,
+        stageRunIds: ids,
+        stageRunState: outcome,
+        stageRunAt: nowMs(),
+      };
+      changed = true;
+    }
+    if (!changed) return;
+    const nextState = { ...snapshot.state, sessions: nextSessions };
+    store.set({ state: nextState });
+    await saveState({ projectId, state: nextState });
+  }
+
+  // 自动暂存统一入口：一轮修复只暂存一次。复审开启时由复审收尾调用，
+  // 关闭复审（或本轮没有可复核目标）时由修复收尾调用，保证暂存永远是自动化链的最后一步。
+  async function stageFixRun(session, project) {
+    if (!session || session.stageEnabled !== true) return;
+    const ids = stageRunIdsOf(session);
+    const runKey = stageRunKeyOf(ids);
+    if (!runKey || stagedRuns.has(runKey)) return;
+    // 已持久化的暂存结果同样算已完成：重载、恢复跟踪与重新解析都不会用旧基线再跑一次。
+    if (isStageRunRecorded(ids)) {
+      stagedRuns.add(runKey);
+      return;
+    }
+    // 先占位再执行：复审收尾与修复收尾不会因为并发回调各跑一次 git add。
+    stagedRuns.add(runKey);
+    let outcome = "error";
+    try {
+      // 执行前落盘占位：暂存途中重载也不会把本轮当成未处理而重放。
+      await markStageRun(ids, "staging");
+      outcome = (await stageRunChanges(session, project)) || "error";
+    } catch (error) {
+      setToast("error", t("fx.toast.stageFailed", { error: String(error?.message || error) }));
+    } finally {
+      await markStageRun(ids, outcome);
+    }
+  }
+
+  // 复审结束后的收尾暂存：只读复审不改工作区，所以把暂存放到整条自动化链的最后。
+  // 暂存只依赖复审会话启动时冻结的修复轮次上下文（会话集合与基线）：
+  // 用户在复审期间清理已结束的修复会话，不会让本轮暂存静默失效。
+  async function stageAfterVerify(verifySession) {
+    if (!verifySession || verifySession.stageEnabled !== true) return;
+    if (!verifySession.fixConversationId) return;
+    const snapshot = store.get();
+    const project = snapshot.project;
+    if (!project?.directoryId) return;
+    const fixConversationId = String(verifySession.fixConversationId);
+    const fixSession = snapshot.state.sessions.fix;
+    // 新一轮修复已接管时，旧轮的基线不能用来暂存新轮的改动。
+    if (fixSession && fixSession.conversationId !== fixConversationId) return;
+    // 修复会话已被清理时，仍要排除新一轮修复正在启动、尚未写入会话的窗口。
+    if (!fixSession) {
+      if (starting.has("fix")) return;
+      const activity = snapshot.activity;
+      if (
+        activity?.kind === "fix" &&
+        !["done", "error", "detached", "dismissed"].includes(activity.phase)
+      ) {
+        return;
+      }
+    }
+    await stageFixRun(
+      {
+        conversationId: fixConversationId,
+        sessionIds: verifySession.fixSessionIds,
+        stageEnabled: verifySession.stageEnabled,
+        stageBaseline: verifySession.stageBaseline || null,
+      },
+      project,
+    );
   }
 
   // 复审启动互斥：检查与创建之间没有 await，先用预约同步占位，避免重复创建会话。
@@ -2620,7 +3495,16 @@ function createEngine(api) {
     });
   }
 
-  // 列表「复审 / 重新复审」入口：先确认条数与批次数，再创建会话，避免一键批量消耗模型调用。
+  // 复核目标构成：verify=仅「已修复」，recheck=仅「不存在」，mixed=两者都有。
+  // 三类共用同一套只读会话管道，只在标题、确认文案与结果提示上区分语义。
+  function verifyModeOf(issues) {
+    const list = Array.isArray(issues) ? issues : [];
+    const notFound = list.filter((issue) => issue.status === ISSUE_STATUS.notFound).length;
+    if (!notFound) return "verify";
+    return notFound === list.length ? "recheck" : "mixed";
+  }
+
+  // 列表「复审 / 定向审查」入口：先确认条数与批次数，再创建会话，避免一键批量消耗模型调用。
   function openVerifyDialog(issueIds) {
     const snapshot = store.get();
     if (snapshot.dialog) return false;
@@ -2643,6 +3527,8 @@ function createEngine(api) {
     store.set({
       dialog: {
         type: "verify",
+        // 目标构成在打开时固定：确认框据此选择「复审 / 定向审查 / 混合复核」文案。
+        mode: verifyModeOf(issues),
         issueIds: issues.map((issue) => issue.id),
         batchTotal: Math.max(1, batches.length),
         error: "",
@@ -2701,19 +3587,32 @@ function createEngine(api) {
       issues = snapshot.state.issues.filter(
         (issue) =>
           targetIds.has(issue.id) &&
+          // 自动复审只复核本轮修复产出的结论；「不存在」条目属于取证结论，
+          // 必须由用户显式发起定向审查，不能在修复收尾时顺带消耗一次会话。
+          issue.status === ISSUE_STATUS.fixed &&
           // 已确认的条目不再重复送审：遗漏结论不能把 confirmed 降级为 uncertain。
           isVerifySelectable(issue) &&
           fixSessionIds.has(String(issue.fix?.conversationId || "")),
       );
     }
     if (!issues.length) return "empty";
+    // 目标构成在启动时固定：续批与结果提示沿用同一口径，避免按最新 issue 状态漂移。
+    const verifyMode = verifyModeOf(issues);
+    const recheckOnly = verifyMode === "recheck";
+    const mixedMode = verifyMode === "mixed";
+    // 标题按目标构成选择：定向审查不声称复核「已修复」条目，混合复核也不声称只含已修复条目。
+    const titleKeyOf = (batch) => {
+      if (recheckOnly) return batch ? "fx.title.recheckBatch" : "fx.title.recheck";
+      if (mixedMode) return batch ? "fx.title.verifyBatch" : "fx.title.verifyMixed";
+      return batch ? "fx.title.verifyBatch" : "fx.title.verify";
+    };
     // 复审按条数与字符预算拆批：单会话容纳全部 issue 会先撞上模型输出上限。
     const batches = planVerifyScope(issues);
     const firstBatch = batches[0] || [];
     const queue = batches.slice(1).flat().map((issue) => issue.id);
     const batchTotal = Math.max(1, batches.length);
     const prompt = buildVerifyPrompt({ locale: api.locale, issues: firstBatch, customPrompts: snapshot.settings?.customPrompts });
-    const title = t(batchTotal > 1 ? "fx.title.verifyBatch" : "fx.title.verify", {
+    const title = t(titleKeyOf(batchTotal > 1), {
       project: project.name || project.path,
       count: firstBatch.length,
       batch: 1,
@@ -2789,16 +3688,29 @@ function createEngine(api) {
       title,
       startedAt: at,
       status: "running",
-      scopeLabel:
-        liveTotal > 1
-          ? t("fx.verify.scopeBatch", { count: stillIssues.length, batch: 1, total: liveTotal })
-          : t("fx.verify.scope", { count: stillIssues.length }),
+      scopeLabel: recheckOnly
+        ? liveTotal > 1
+          ? t("fx.verify.recheckScopeBatch", { count: stillIssues.length, batch: 1, total: liveTotal })
+          : t("fx.verify.recheckScope", { count: stillIssues.length })
+        : mixedMode
+          ? liveTotal > 1
+            ? t("fx.verify.mixedScopeBatch", { count: stillIssues.length, batch: 1, total: liveTotal })
+            : t("fx.verify.mixedScope", {
+                count: stillIssues.length,
+                fixed: stillIssues.filter((issue) => issue.status === ISSUE_STATUS.fixed).length,
+                notFound: stillIssues.filter((issue) => issue.status === ISSUE_STATUS.notFound).length,
+              })
+          : liveTotal > 1
+            ? t("fx.verify.scopeBatch", { count: stillIssues.length, batch: 1, total: liveTotal })
+            : t("fx.verify.scope", { count: stillIssues.length }),
       issueIds: stillIssues.map((issue) => issue.id),
       sessionIds: [conversationId],
       batchNumber: 1,
       batchTotal: liveTotal,
       batchSize: MAX_VERIFY_BATCH_ISSUES,
       queue: liveQueue,
+      // 本轮目标构成：verify / mixed / recheck。续批据此沿用对应标题与提示文案。
+      mode: verifyMode,
       // 复审完成后据此恢复本轮修复的自动清理目标；手动复审不参与自动清理。
       fixConversationId: manual ? "" : fixSession.conversationId,
       fixSessionIds: Array.from(fixSessionIds),
@@ -2806,6 +3718,10 @@ function createEngine(api) {
       autoCleanup: manual ? false : Boolean(fixSession.autoCleanup),
       cleanupAction: manual ? "archive" : fixSession.cleanupAction === "delete" ? "delete" : "archive",
       cleanupSessionKinds: fixSession.cleanupSessionKinds,
+      // 自动暂存随复审一起收尾：开关与启动基线随复审会话持久化，
+      // 复审分批 / 重开工作台后仍能在最后一步按同一份基线暂存。
+      stageEnabled: manual ? false : fixSession.stageEnabled === true,
+      stageBaseline: manual ? null : fixSession.stageBaseline || null,
       confirmedCount: 0,
       stillPresentCount: 0,
       uncertainCount: 0,
@@ -2840,9 +3756,15 @@ function createEngine(api) {
       withApiProfileFallback(
         created,
         liveTotal > 1
-          ? t("fx.toast.verifyBatchStarted", { batch: 1, total: liveTotal, count: stillIssues.length })
+          ? t(recheckOnly ? "fx.toast.recheckBatchStarted" : "fx.toast.verifyBatchStarted", {
+              batch: 1,
+              total: liveTotal,
+              count: stillIssues.length,
+            })
           : manual
-            ? t("fx.toast.verifyRestarted", { count: stillIssues.length })
+            ? t(recheckOnly ? "fx.toast.recheckStarted" : "fx.toast.verifyRestarted", {
+                count: stillIssues.length,
+              })
             : t("fx.toast.verifyStarted", { count: stillIssues.length }),
       ),
     );
@@ -2870,6 +3792,9 @@ function createEngine(api) {
     ) {
       return "error";
     }
+    // 本轮目标构成沿用启动时记录：定向审查的续批仍用定向审查标题与提示文案。
+    const recheckOnly = session.mode === "recheck";
+    const mixedMode = session.mode === "mixed";
     const fixSessionIds = new Set(
       (Array.isArray(session.fixSessionIds) ? session.fixSessionIds : []).map(String).filter(Boolean),
     );
@@ -2897,13 +3822,24 @@ function createEngine(api) {
     const batchNumber = Math.max(1, Number(session.batchNumber) || 1) + 1;
     const batchTotal = batchNumber + Math.max(0, batches.length - 1);
     const prompt = buildVerifyPrompt({ locale: api.locale, issues: batch, customPrompts: snapshot.settings?.customPrompts });
-    const title = t(batchTotal > 1 ? "fx.title.verifyBatch" : "fx.title.verify", {
-      project: project.name || project.path,
-      count: batch.length,
-      batch: batchNumber,
-      total: batchTotal,
-      time: formatStamp(new Date()),
-    });
+    const title = t(
+      recheckOnly
+        ? batchTotal > 1
+          ? "fx.title.recheckBatch"
+          : "fx.title.recheck"
+        : batchTotal > 1
+          ? "fx.title.verifyBatch"
+          : mixedMode
+            ? "fx.title.verifyMixed"
+            : "fx.title.verify",
+      {
+        project: project.name || project.path,
+        count: batch.length,
+        batch: batchNumber,
+        total: batchTotal,
+        time: formatStamp(new Date()),
+      },
+    );
     const created = await createConversation({
       directoryId: project.directoryId,
       title,
@@ -2977,10 +3913,21 @@ function createEngine(api) {
       receivedChars: 0,
       lastUpdateAt: at,
       status: "running",
-      scopeLabel:
-        batchTotal > 1
-          ? t("fx.verify.scopeBatch", { count: liveIssues.length, batch: batchNumber, total: batchTotal })
-          : t("fx.verify.scope", { count: liveIssues.length }),
+      scopeLabel: recheckOnly
+        ? batchTotal > 1
+          ? t("fx.verify.recheckScopeBatch", { count: liveIssues.length, batch: batchNumber, total: batchTotal })
+          : t("fx.verify.recheckScope", { count: liveIssues.length })
+        : mixedMode
+          ? batchTotal > 1
+            ? t("fx.verify.mixedScopeBatch", { count: liveIssues.length, batch: batchNumber, total: batchTotal })
+            : t("fx.verify.mixedScope", {
+                count: liveIssues.length,
+                fixed: liveIssues.filter((issue) => issue.status === ISSUE_STATUS.fixed).length,
+                notFound: liveIssues.filter((issue) => issue.status === ISSUE_STATUS.notFound).length,
+              })
+          : batchTotal > 1
+            ? t("fx.verify.scopeBatch", { count: liveIssues.length, batch: batchNumber, total: batchTotal })
+            : t("fx.verify.scope", { count: liveIssues.length }),
       issueIds: liveIssues.map((issue) => issue.id),
       sessionIds: [
         ...(Array.isArray(current.sessionIds) ? current.sessionIds : [current.conversationId]),
@@ -3021,7 +3968,11 @@ function createEngine(api) {
       "info",
       withApiProfileFallback(
         created,
-        t("fx.toast.verifyBatchStarted", { batch: batchNumber, total: batchTotal, count: liveIssues.length }),
+        t(recheckOnly ? "fx.toast.recheckBatchStarted" : "fx.toast.verifyBatchStarted", {
+          batch: batchNumber,
+          total: batchTotal,
+          count: liveIssues.length,
+        }),
       ),
     );
     await saveState({ projectId: project.directoryId, state: nextState });
@@ -3053,6 +4004,11 @@ function createEngine(api) {
     });
     setToast("error", message);
     await saveState({ projectId: snapshot.project?.directoryId, state: nextState });
+    // 复审的三种终态失败（解析失败 / 结论过期 / 续批会话创建失败）都不会走到
+    // finishVerify 的暂存，按文档「中断即暂存」在这里补一次自动化链收尾。
+    // stageAfterVerify 自带开关、同一轮修复与换代轮次守卫；复审不改工作区，
+    // 提前暂存不会漏掉落盘改动，重新解析成功后也只会暂存一次。
+    await stageAfterVerify(nextState.sessions.verify);
     return true;
   }
 
@@ -3148,13 +4104,23 @@ function createEngine(api) {
     });
     setToast(
       finishedSession.stillPresentCount ? "error" : "success",
-      t("fx.toast.verifyDone", {
-        confirmed: finishedSession.confirmedCount,
-        still: finishedSession.stillPresentCount,
-        uncertain: finishedSession.uncertainCount,
-      }),
+      t(
+        finishedSession.mode === "recheck"
+          ? "fx.toast.recheckDone"
+          : finishedSession.mode === "mixed"
+            ? "fx.toast.mixedDone"
+            : "fx.toast.verifyDone",
+        {
+          confirmed: finishedSession.confirmedCount,
+          still: finishedSession.stillPresentCount,
+          uncertain: finishedSession.uncertainCount,
+        },
+      ),
     );
     await saveState({ projectId: finalSnapshot.project?.directoryId, state: doneState });
+    // 复审是自动化链的最后一环：先暂存本轮改动，再按需自动清理（清理会删掉本轮 issue，
+    // 暂存必须排在它前面才能读到本轮改动的文件清单）。
+    await stageAfterVerify(finishedSession);
     if (finishedSession.autoCleanup) await autoCleanupAfterVerify(finishedSession);
     return true;
   }
@@ -3218,17 +4184,20 @@ function createEngine(api) {
     // 因清理或旧数据迁移缺失、时间失真，从台账反推会得到偏大的基准并扩大清理范围。
     // 旧数据没有该字段时保持为 0，本轮的审查会话清理会保守跳过，避免不可逆误删。
     const fixRunStartedAt = Number(session.runStartedAt) || 0;
-    // 本轮某条 issue 是否已有定论：与下面固定归档集合共用同一断言，避免两处判定漂移。
-    const isSettledForRun = (issue) =>
-      ((issue.status === ISSUE_STATUS.fixed && issue.verify?.status !== "uncertain") ||
-        issue.status === ISSUE_STATUS.notFound) &&
+    // 自动清理只处理本轮「已修复」且复审未待确认的条目。
+    // 「不存在」是未改动代码的取证结论，误判成本不对称：一律保留，交由用户定向审查确认后
+    // 再在「处理结果」中显式勾选清理。该断言同时决定来源会话保护范围（见下）。
+    const isFixedForRun = (issue) =>
+      issue.status === ISSUE_STATUS.fixed &&
+      issue.verify?.status !== "uncertain" &&
       fixConversationIds.has(String(issue.fix?.conversationId || ""));
     // 未归档且仍未定论的条目还要靠来源会话取证：只要还有一条这样的条目引用某个审查会话，
     // 该会话就不能清理，否则卡片的「来源会话」入口失效。已归档条目不再阻止清理：删除模式会在
     // 清理成功后清空它们的来源引用（见下面的 delete 分支），入口随之消失，而不是变成死链。
+    // 被保留的「不存在」条目会阻止其来源会话被清理，这是保留证据链的预期代价。
     const unresolvedSourceIds = new Set(
       snapshot.state.issues
-        .filter((issue) => issue.status !== ISSUE_STATUS.archived && !isSettledForRun(issue))
+        .filter((issue) => issue.status !== ISSUE_STATUS.archived && !isFixedForRun(issue))
         .map((issue) => String(issue.source?.conversationId || ""))
         .filter(Boolean),
     );
@@ -3339,7 +4308,8 @@ function createEngine(api) {
     // 修复来源始终以本轮修复会话判定，与是否勾选「修复会话」清理无关。
     const fixedIssues = latest.state.issues.filter(
       // 复审未通过的条目已退回待修复；待确认的条目保留，避免把未验证的结论自动归档。
-      (issue) => targetIds.has(issue.id) && isSettledForRun(issue),
+      // 只收「已修复」：保留的「不存在」条目不在自动清理范围内。
+      (issue) => targetIds.has(issue.id) && isFixedForRun(issue),
     );
     const fixedIds = new Set(fixedIssues.map((issue) => issue.id));
     let issues = latest.state.issues;
@@ -3518,6 +4488,9 @@ function createEngine(api) {
         timedOut ? t("fx.activity.timeout") : displayError,
       );
       await saveState({ projectId: token.projectId, state: nextState });
+      // 复审中断（报错 / 超时）：自动化链无法继续，本轮改动不再等复审结论，直接收尾暂存。
+      // 用户之后重新解析成功时，stageFixRun 的去重键会阻止重复 git add。
+      if (job.kind === "verify") await stageAfterVerify(nextState.sessions.verify);
     } finally {
       metricsSavedAt.delete(token.conversationId);
       // 终态保存已在 try / catch 中完成，之后不再需要该会话的暂存指标。
@@ -3571,6 +4544,8 @@ function createEngine(api) {
       };
       store.set({ state, activity: { ...activity, phase: "detached", message: "" } });
       await saveState({ projectId: snapshot.project?.directoryId, state });
+      // 复审停止跟踪：只读复审不会再改动工作区，本轮暂存不必继续等复审结论。
+      if (sessionKey === "verify") await stageAfterVerify(state.sessions.verify);
       return;
     }
     setActivity({ phase: "detached", message: "" });
@@ -3757,6 +4732,12 @@ function createEngine(api) {
       }
       // 并行上限同时决定单会话的 issue 条数：超出的 issue 进入后续批次。
       const batchSize = Math.max(1, Number(snapshot.settings?.parallelLimit) || 1);
+      // 自动暂存开关与改动基线一起在首批创建前冻结：修复启动前已有的改动不属于本轮，
+      // 运行期间改设置也不影响本轮，避免中途打开开关时拿到空基线、收尾时误报缺少基线。
+      // 采集失败只记录原因，不阻断修复启动；收尾暂存会降级为仅提示。
+      const stageEnabled = snapshot.settings?.autoStageAfterFix === true;
+      const stageBaseline = stageEnabled ? await captureStageBaseline(token) : null;
+      if (!isProjectCurrent(token)) throw new Error(t("fx.error.projectSwitched"));
       const batches = planFixBatches(issues.map((issue) => issue.id), batchSize);
       const batchIds = batches[0] || [];
       const queue = batches.slice(1).flat();
@@ -3859,6 +4840,9 @@ function createEngine(api) {
             queue,
             allIssueIds: issues.map((issue) => issue.id),
             claimedIssueFiles: claimIssueFiles(issues),
+            // 自动暂存的开关与启动基线随会话持久化：续批与重开都不重新采集，也不跟随设置变化。
+            stageEnabled,
+            stageBaseline,
             sessionIds: [conversationId],
             autoCleanup: Boolean(current.settings?.autoCleanupAfterFix),
             cleanupAction: current.settings?.autoCleanupAction === "delete" ? "delete" : "archive",
@@ -4043,6 +5027,46 @@ function createEngine(api) {
     await saveState({ projectId: token.directoryId, state: nextState });
   }
 
+  // 「归档全部 / 删除全部」：清理弹窗内的直达入口，不依赖逐项勾选与选择。
+  // issue 目标为全部未归档条目，会话目标为弹窗列出的全部审查 / 修复 / 复审会话，
+  // 两者使用同一动作；其余校验（运行中会话、历史会话风险确认）与「确认处理」完全一致。
+  async function confirmCleanupAll(action) {
+    const snapshot = store.get();
+    const dialog = snapshot.dialog;
+    if (!dialog || dialog.type !== "cleanup") return;
+    const issueIds = snapshot.state.issues
+      .filter((issue) => issue.status !== ISSUE_STATUS.archived)
+      .map((issue) => issue.id);
+    if (!issueIds.length) {
+      setToast("info", t("fx.cleanup.noIssues"));
+      return;
+    }
+    // 上一次失败的提示先清掉，避免用户确认后仍看到旧错误。
+    // 基于最新快照写回：弹窗打开期间用户可能还在调整勾选与会话动作。
+    const current = store.get();
+    if (current.dialog && current.dialog.type === "cleanup" && current.dialog.error) {
+      store.set({ dialog: { ...current.dialog, error: "" } });
+    }
+    const sessionAction = action === "delete" ? "delete" : "archive";
+    try {
+      await applyCleanup({
+        issueIds,
+        issueAction: sessionAction,
+        // 「全部」要求会话也一并处理：不使用弹窗里逐项的保留 / 归档 / 删除选择。
+        sessions: { review: sessionAction, fix: sessionAction, verify: sessionAction },
+        riskAcknowledged: dialog.riskAcknowledged === true,
+      });
+    } catch (error) {
+      // 与 confirmDialog 一致：弹窗仍打开时把失败原因留在弹窗内，便于用户调整后重试。
+      const message = String(error?.message || error);
+      const current = store.get().dialog;
+      if (current && current.type === "cleanup") {
+        store.set({ dialog: { ...current, error: message } });
+      }
+      setToast("error", message);
+    }
+  }
+
   async function archiveIssue(issueId) {
     const snapshot = store.get();
     const issues = snapshot.state.issues.map((issue) =>
@@ -4216,6 +5240,9 @@ function createEngine(api) {
     const sessionKey = sessionKeyOf(activity.kind);
     const session = snapshot.state.sessions[sessionKey];
     let state = snapshot.state;
+    // 复审是只读的：关闭运行中的复审卡片等于本轮自动化链到此结束，与「停止跟踪」一致，
+    // 落盘后补一次收尾暂存；修复卡片不暂存——宿主会话仍可能在写工作区。
+    let stageVerifySession = null;
     if (session && session.conversationId === activity.conversationId && session.status === "running") {
       // 关闭运行中的修复卡片等于放弃本次跟踪：先释放修复中状态，避免 issue 永久停在修复中。
       const issues =
@@ -4230,9 +5257,11 @@ function createEngine(api) {
           [sessionKey]: { ...session, status: "dismissed", lastError: "" },
         },
       };
+      if (sessionKey === "verify") stageVerifySession = state.sessions.verify;
     }
     store.set({ state, activity: null });
     await saveState({ projectId: snapshot.project?.directoryId, state });
+    if (stageVerifySession) await stageAfterVerify(stageVerifySession);
   }
 
   // 已暂存 / 工作区模式：点审查直接开跑，不再弹范围选择框。
@@ -4434,10 +5463,9 @@ function createEngine(api) {
     const snapshot = store.get();
     const fixedIds = snapshot.state.issues
       // 复审待确认的条目默认不选中，避免一键清理把未验证的结论归档或删除。
+      // 「不存在」条目同样默认不选中：自动清理已保留它们，手动处理也必须显式勾选。
       .filter(
-        (issue) =>
-          issue.status === ISSUE_STATUS.notFound ||
-          (issue.status === ISSUE_STATUS.fixed && issue.verify?.status !== "uncertain"),
+        (issue) => issue.status === ISSUE_STATUS.fixed && issue.verify?.status !== "uncertain",
       )
       .map((issue) => issue.id);
     const sessions = snapshot.state.sessions;
@@ -4477,6 +5505,8 @@ function createEngine(api) {
       autoCleanupAction: settings.autoCleanupAction,
       autoCleanupSessionKinds: normalizeCleanupSessionKinds(settings.autoCleanupSessionKinds),
       verifyAfterFix: settings.verifyAfterFix,
+      // 自动暂存默认关闭：旧设置没有该键时按 false 展示与比较。
+      autoStageAfterFix: settings.autoStageAfterFix === true,
       issueSeverities: [...settings.issueSeverities],
       // 审查方式可能尚未写入存储：缺失时按默认值展示与比较。
       reviewMode: normalizeReviewMode(settings.reviewMode),
@@ -4497,6 +5527,7 @@ function createEngine(api) {
         autoCleanupAction: baseline.autoCleanupAction,
         autoCleanupSessionKinds: [...baseline.autoCleanupSessionKinds],
         verifyAfterFix: baseline.verifyAfterFix,
+        autoStageAfterFix: baseline.autoStageAfterFix,
         issueSeverities: [...baseline.issueSeverities],
         reviewMode: baseline.reviewMode,
       },
@@ -4622,6 +5653,11 @@ function createEngine(api) {
     }
     if (dialog.verifyAfterFix !== baseline.verifyAfterFix) {
       patch.verifyAfterFix = dialog.verifyAfterFix;
+    }
+    // 自动暂存开关：显式关闭同样要写回，patch=false 时归一化不保留该键，
+    // 读取时按默认关闭处理。
+    if (Boolean(dialog.autoStageAfterFix) !== Boolean(baseline.autoStageAfterFix)) {
+      patch.autoStageAfterFix = Boolean(dialog.autoStageAfterFix);
     }
     if (!sameSeverityScope(dialog.issueSeverities, baseline.issueSeverities)) {
       patch.issueSeverities = dialog.issueSeverities;
@@ -4749,6 +5785,7 @@ function createEngine(api) {
     openPromptsDialog,
     setSettings,
     updateDialog,
+    confirmCleanupAll,
     confirmDialog,
     detachTracking,
     retryParse,

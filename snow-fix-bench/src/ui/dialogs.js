@@ -442,6 +442,10 @@ function FixDialog({ dialog, snapshot, engine, api, t }) {
     "div",
     { className: "fx-fix-confirm" },
     h("p", null, t("fx.fix.confirm", { count: issues.length })),
+    // 自动暂存会在收尾阶段执行 git add：开启时必须在确认框内披露，条件与引擎执行条件一致。
+    snapshot.settings?.autoStageAfterFix === true
+      ? h("div", { className: "fx-warn" }, t("fx.fix.stageNotice"))
+      : null,
     dialog.notice ? h("div", { className: "fx-warn" }, dialog.notice) : null,
     h(
       "div",
@@ -495,10 +499,20 @@ function VerifyDialog({ dialog, snapshot, engine, api, t }) {
   const [busy, setBusy] = useState(false);
   const issues = snapshot.state.issues.filter((issue) => dialog.issueIds.includes(issue.id));
   const batches = Math.max(1, Number(dialog.batchTotal) || 1);
+  // 目标构成决定标题与确认文案：定向审查复核的是「不存在」结论，不是修复结果。
+  const mode = dialog.mode === "recheck" || dialog.mode === "mixed" ? dialog.mode : "verify";
+  const notFoundCount = issues.filter((issue) => issue.status === ISSUE_STATUS.notFound).length;
+  const fixedCount = issues.length - notFoundCount;
+  const confirmKey =
+    mode === "recheck"
+      ? "fx.verify.confirmRecheck"
+      : mode === "mixed"
+        ? "fx.verify.confirmMixed"
+        : "fx.verify.confirm";
   const body = h(
     "div",
     { className: "fx-fix-confirm" },
-    h("p", null, t("fx.verify.confirm", { count: issues.length, batches })),
+    h("p", null, t(confirmKey, { count: issues.length, batches, fixed: fixedCount, notFound: notFoundCount })),
     h(
       "div",
       { className: "fx-fix-issues" },
@@ -509,6 +523,8 @@ function VerifyDialog({ dialog, snapshot, engine, api, t }) {
           h("span", { className: `fx-sev ${severityClass(issue.severity)}` }, severityLabel(t, issue.severity)),
           h("span", { className: "fx-fix-title" }, issue.title),
           h("span", { className: "fx-muted" }, issue.location),
+          // 复核目标类型必须可见：两类条目的结论语义不同，不能只靠数量判断。
+          h("span", { className: `fx-status is-${issue.status}` }, statusLabel(t, issue.status)),
         ),
       ),
     ),
@@ -528,19 +544,30 @@ function VerifyDialog({ dialog, snapshot, engine, api, t }) {
           setBusy(false);
         },
       },
-      busy ? t("fx.verify.busy") : t("fx.verify.start"),
+      busy ? t("fx.verify.busy") : t(mode === "recheck" ? "fx.verify.recheckStart" : "fx.verify.start"),
     ),
   );
   return h(
     DialogShell,
-    { title: t("fx.verify.title"), closeLabel: t("fx.close"), api, error: dialog.error, onClose: () => engine.closeDialog(), footer },
+    {
+      title: t(mode === "recheck" ? "fx.verify.recheckTitle" : "fx.verify.title"),
+      closeLabel: t("fx.close"),
+      api,
+      error: dialog.error,
+      onClose: () => engine.closeDialog(),
+      footer,
+    },
     body,
   );
 }
 
 function CleanupDialog({ dialog, snapshot, engine, api, t }) {
   const [busy, setBusy] = useState(false);
+  // 全部归档 / 全部删除的待确认动作：点击按钮先在内联确认条里二次确认，再直接执行。
+  const [pendingAll, setPendingAll] = useState(null);
   const cleanupIssues = snapshot.state.issues.filter((issue) => issue.status !== ISSUE_STATUS.archived);
+  // 删除全部会连同修复中的条目一并删除：与批量删除确认框口径一致，先标明影响条数。
+  const fixingCount = cleanupIssues.filter((issue) => issue.status === ISSUE_STATUS.fixing).length;
   const selectedSet = new Set(dialog.issueIds);
   // 历史台账会话不在当前跟踪中，删除或归档前需要显式确认风险。
   const sessions = conversationCleanupGroups(snapshot.state, dialog.sessions)
@@ -580,6 +607,28 @@ function CleanupDialog({ dialog, snapshot, engine, api, t }) {
     const action = dialog.sessions[key] || "keep";
     return action === "archive" || action === "delete";
   });
+  // 「全部处理」与底部确认共用同一组阻塞条件：运行中会话、可能仍在运行的会话、
+  // 历史会话风险确认都直接体现在按钮状态上，避免确认后才被引擎拒绝。
+  const allBlocked =
+    busy ||
+    blockedByBusy ||
+    blockedByRisky ||
+    (needsRiskAck && dialog.riskAcknowledged !== true);
+  // 「全部」会强制归档 / 删除全部会话，因此任何仍在运行或可能仍在运行的会话都会让整体操作失败。
+  // 逐项的 blockedByBusy / blockedByRisky 只统计被选为归档或删除的会话，不能直接复用。
+  const bulkBlocked =
+    busy ||
+    busyKeys.size > 0 ||
+    riskyKeys.size > 0 ||
+    (needsRiskAck && dialog.riskAcknowledged !== true);
+  const bulkBlockedHint =
+    busyKeys.size > 0 || riskyKeys.size > 0
+      ? t("fx.cleanup.allRunningHint")
+      : needsRiskAck && dialog.riskAcknowledged !== true
+        ? t("fx.cleanup.allRiskHint")
+        : "";
+  // 确认文案要给出实际会话数：只看 issue 条数容易低估「全部」的处理范围。
+  const bulkSessionCount = sessions.reduce((sum, entry) => sum + entry.conversations.length, 0);
   const toggleIssue = (issueId) => {
     const next = selectedSet.has(issueId)
       ? dialog.issueIds.filter((id) => id !== issueId)
@@ -716,27 +765,118 @@ function CleanupDialog({ dialog, snapshot, engine, api, t }) {
       : null,
     h("div", { className: "fx-warn" }, t("fx.cleanup.deleteWarn")),
   );
+  // 整体处理入口放在底栏左侧，与「取消 / 确认处理」同一行：
+  // 让用户清楚它们与右侧按钮处理的是同一批 issue 与会话。
+  const bulkButtons = cleanupIssues.length
+    ? h(
+        "div",
+        { className: "fx-cleanup-bulk" },
+        h(
+          "button",
+          {
+            type: "button",
+            className: "fx-btn",
+            disabled: bulkBlocked,
+            title: bulkBlockedHint || undefined,
+            onClick: () => setPendingAll(pendingAll === "archive" ? null : "archive"),
+          },
+          t("fx.cleanup.archiveAll"),
+        ),
+        h(
+          "button",
+          {
+            type: "button",
+            className: "fx-btn danger",
+            disabled: bulkBlocked,
+            title: bulkBlockedHint || undefined,
+            onClick: () => setPendingAll(pendingAll === "delete" ? null : "delete"),
+          },
+          t("fx.cleanup.deleteAll"),
+        ),
+      )
+    : null;
+  // 二次确认条紧贴底栏按钮：确认后 issue 与会话按同一动作整体处理。
+  const bulkConfirm =
+    pendingAll && cleanupIssues.length
+      ? h(
+          "div",
+          { className: `fx-cleanup-bulk-confirm${pendingAll === "delete" ? " is-danger" : ""}` },
+          h(
+            "span",
+            { className: "fx-cleanup-bulk-text" },
+            t(
+              pendingAll === "delete" ? "fx.cleanup.confirmDeleteAll" : "fx.cleanup.confirmArchiveAll",
+              { count: cleanupIssues.length, sessions: bulkSessionCount },
+            ),
+          ),
+          pendingAll === "delete" && fixingCount > 0
+            ? h(
+                "div",
+                { className: "fx-warn fx-cleanup-bulk-warn" },
+                t("fx.delete.fixingHint", { count: fixingCount }),
+              )
+            : null,
+          h(
+            "div",
+            { className: "fx-cleanup-bulk-actions" },
+            h(
+              "button",
+              {
+                type: "button",
+                className: "fx-btn small ghost",
+                disabled: busy,
+                onClick: () => setPendingAll(null),
+              },
+              t("fx.cleanup.cancel"),
+            ),
+            h(
+              "button",
+              {
+                type: "button",
+                className: `fx-btn small ${pendingAll === "delete" ? "danger" : "primary"}`,
+                disabled: busy,
+                onClick: async () => {
+                  setBusy(true);
+                  await engine.confirmCleanupAll(pendingAll);
+                  setBusy(false);
+                  setPendingAll(null);
+                },
+              },
+              t(pendingAll === "delete" ? "fx.cleanup.deleteAllOk" : "fx.cleanup.archiveAllOk"),
+            ),
+          ),
+        )
+      : null;
   const footer = h(
     "div",
-    { className: "fx-dialog-actions" },
-    h("button", { className: "fx-btn", onClick: () => engine.closeDialog() }, t("fx.cleanup.cancel")),
+    { className: "fx-cleanup-foot" },
+    bulkConfirm,
     h(
-      "button",
-      {
-        className: "fx-btn primary",
-        disabled:
-          busy ||
-          blockedByBusy ||
-          blockedByRisky ||
-          (needsRiskAck && dialog.riskAcknowledged !== true) ||
-          (dialog.issueIds.length === 0 && sessions.length === 0),
-        onClick: async () => {
-          setBusy(true);
-          await engine.confirmDialog();
-          setBusy(false);
-        },
-      },
-      t("fx.cleanup.confirm"),
+      "div",
+      { className: "fx-dialog-actions fx-cleanup-foot-actions" },
+      bulkButtons,
+      h(
+        "div",
+        { className: "fx-cleanup-foot-main" },
+        h("button", { className: "fx-btn", onClick: () => engine.closeDialog() }, t("fx.cleanup.cancel")),
+        h(
+          "button",
+          {
+            className: "fx-btn primary",
+            // 批量确认条展开时先处理它，避免把右侧确认误当成对批量动作的确认。
+            disabled:
+              allBlocked ||
+              pendingAll !== null ||
+              (dialog.issueIds.length === 0 && sessions.length === 0),
+            onClick: async () => {
+              setBusy(true);
+              await engine.confirmDialog();
+              setBusy(false);
+            },
+          },
+          t("fx.cleanup.confirm"),
+        ),
+      ),
     ),
   );
   return h(
@@ -800,7 +940,7 @@ function DeleteDialog({ dialog, snapshot, engine, api, t }) {
 // API 供应商选择器：可搜索下拉框（参照宿主用量统计的 CustomSelect）。
 // 收起时只占一行；展开层经 portal 渲染到 document.body 并 fixed 锚定在触发按钮上，
 // 逃逸设置卡片 / 弹窗的 overflow 裁剪。列表保持宿主全局设置的档案顺序。
-function ApiProfilePicker({ dialog, engine, api, t, nameRow }) {
+function ApiProfilePicker({ dialog, engine, api, t, headRow }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [popRect, setPopRect] = useState(null);
@@ -910,11 +1050,8 @@ function ApiProfilePicker({ dialog, engine, api, t, nameRow }) {
     return h(
       "div",
       { className: "fx-setting is-stack" },
-      h(
-        "div",
-        { className: "fx-setting-main" },
-        nameRow(t("fx.settings.apiProfile"), t("fx.settings.apiProfileHint")),
-      ),
+      headRow(t("fx.settings.apiProfile"), null),
+      h("span", { className: "fx-hint" }, t("fx.settings.apiProfileHint")),
       h("span", { className: "fx-hint" }, t("fx.settings.apiProfilesFailed")),
     );
   }
@@ -922,14 +1059,11 @@ function ApiProfilePicker({ dialog, engine, api, t, nameRow }) {
   return h(
     "div",
     { className: "fx-setting is-stack" },
-    h(
-      "div",
-      { className: "fx-setting-main" },
-      nameRow(t("fx.settings.apiProfile"), t("fx.settings.apiProfileHint")),
-    ),
-    h(
-      "div",
-      { className: "fx-combobox", ref: rootRef },
+    headRow(
+      t("fx.settings.apiProfile"),
+      h(
+        "div",
+        { className: "fx-combobox", ref: rootRef },
       h(
         "button",
         {
@@ -953,7 +1087,9 @@ function ApiProfilePicker({ dialog, engine, api, t, nameRow }) {
         ? h("span", { className: "fx-hint" }, t("fx.settings.apiProfilesEmpty"))
         : null,
       state === "error" ? h("span", { className: "fx-hint" }, t("fx.settings.apiProfilesFailed")) : null,
+      ),
     ),
+    h("span", { className: "fx-hint" }, t("fx.settings.apiProfileHint")),
     open && popRect
       ? createPortal(
           h(
@@ -1054,6 +1190,15 @@ function SettingsDialog({ dialog, engine, api, t }) {
       ),
     );
 
+  // 首行：名称在左、控件在右；说明由调用方放在下一行，跨整行展示。
+  const headRow = (label, control) =>
+    h(
+      "div",
+      { className: "fx-setting-head" },
+      h("span", { className: "fx-setting-name" }, label),
+      control,
+    );
+
   const body = h(
     "div",
     { className: "fx-settings" },
@@ -1070,35 +1215,35 @@ function SettingsDialog({ dialog, engine, api, t }) {
         h(
           "div",
           { className: "fx-setting is-stack" },
-          h(
-            "div",
-            { className: "fx-setting-main" },
-            nameRow(t("fx.settings.reviewMode"), t("fx.settings.reviewModeHint")),
-          ),
-          h(
-            "div",
-            {
-              className: "fx-segment",
-              role: "radiogroup",
-              "aria-label": t("fx.settings.reviewMode"),
-            },
-            REVIEW_MODES.map((mode) =>
-              h(
-                "label",
-                {
-                  className: `fx-segment-item ${reviewMode === mode ? "is-active" : ""}`,
-                  key: mode,
-                },
-                h("input", {
-                  type: "radio",
-                  name: "fx-review-mode",
-                  checked: reviewMode === mode,
-                  onChange: () => engine.updateDialog({ reviewMode: mode }),
-                }),
-                h("span", null, t(`fx.settings.reviewMode.${mode}`)),
+          headRow(
+            t("fx.settings.reviewMode"),
+            h(
+              "div",
+              {
+                className: "fx-segment",
+                role: "radiogroup",
+                "aria-label": t("fx.settings.reviewMode"),
+              },
+              REVIEW_MODES.map((mode) =>
+                h(
+                  "label",
+                  {
+                    className: `fx-segment-item ${reviewMode === mode ? "is-active" : ""}`,
+                    key: mode,
+                  },
+                  h("input", {
+                    type: "radio",
+                    name: "fx-review-mode",
+                    checked: reviewMode === mode,
+                    onChange: () => engine.updateDialog({ reviewMode: mode }),
+                  }),
+                  h("span", null, t(`fx.settings.reviewMode.${mode}`)),
+                ),
               ),
             ),
           ),
+          // 说明跨整行：右侧分段控件不再挤压文字宽度。
+          h("span", { className: "fx-hint" }, t("fx.settings.reviewModeHint")),
         ),
         h(
           "div",
@@ -1135,13 +1280,13 @@ function SettingsDialog({ dialog, engine, api, t }) {
           }),
         ),
         // API 供应商：可搜索下拉框，顺序与宿主全局设置的档案列表一致。
-        h(ApiProfilePicker, {
-          dialog,
-          engine,
-          api,
-          t,
-          nameRow,
-        }),
+          h(ApiProfilePicker, {
+            dialog,
+            engine,
+            api,
+            t,
+            headRow,
+          }),
       ),
     ),
     h(
@@ -1195,6 +1340,12 @@ function SettingsDialog({ dialog, engine, api, t }) {
           t("fx.settings.verifyHint"),
           dialog.verifyAfterFix,
           (checked) => engine.updateDialog({ verifyAfterFix: checked }),
+        ),
+        switchRow(
+          t("fx.settings.stageAfterFix"),
+          t("fx.settings.stageAfterFixHint"),
+          dialog.autoStageAfterFix === true,
+          (checked) => engine.updateDialog({ autoStageAfterFix: checked }),
         ),
         switchRow(
           t("fx.settings.autoCleanup"),
@@ -1253,36 +1404,34 @@ function SettingsDialog({ dialog, engine, api, t }) {
           ? h(
               "div",
               { className: "fx-setting fx-setting-sub is-stack" },
-              h(
-                "div",
-                { className: "fx-setting-main" },
-                h("span", { className: "fx-setting-name" }, t("fx.settings.autoCleanupSessions")),
-                // 会话范围决定哪些会话会被归档 / 删除：说明常显，避免只能靠悬停获取。
-                h("span", { className: "fx-hint" }, t("fx.settings.autoCleanupSessionsHint")),
-              ),
-              h(
-                "div",
-                { className: "fx-check-list" },
-                CLEANUP_SESSION_KINDS.map((kind) =>
-                  h(
-                    "label",
-                    { className: "fx-check-row", key: kind },
-                    h("input", {
-                      type: "checkbox",
-                      checked: cleanupSessionKinds.includes(kind),
-                      onChange: (event) => {
-                        const next = event.target.checked
-                          ? [...cleanupSessionKinds, kind]
-                          : cleanupSessionKinds.filter((item) => item !== kind);
-                        engine.updateDialog({
-                          autoCleanupSessionKinds: normalizeCleanupSessionKinds(next),
-                        });
-                      },
-                    }),
-                    h("span", null, t(CLEANUP_SESSION_LABEL_KEYS[kind])),
+              headRow(
+                t("fx.settings.autoCleanupSessions"),
+                h(
+                  "div",
+                  { className: "fx-check-list" },
+                  CLEANUP_SESSION_KINDS.map((kind) =>
+                    h(
+                      "label",
+                      { className: "fx-check-row", key: kind },
+                      h("input", {
+                        type: "checkbox",
+                        checked: cleanupSessionKinds.includes(kind),
+                        onChange: (event) => {
+                          const next = event.target.checked
+                            ? [...cleanupSessionKinds, kind]
+                            : cleanupSessionKinds.filter((item) => item !== kind);
+                          engine.updateDialog({
+                            autoCleanupSessionKinds: normalizeCleanupSessionKinds(next),
+                          });
+                        },
+                      }),
+                      h("span", null, t(CLEANUP_SESSION_LABEL_KEYS[kind])),
+                    ),
                   ),
                 ),
               ),
+              // 说明跨整行：会话范围说明较长，不能挤在复选框左侧的窄列里。
+              h("span", { className: "fx-hint" }, t("fx.settings.autoCleanupSessionsHint")),
             )
           : null,
       ),

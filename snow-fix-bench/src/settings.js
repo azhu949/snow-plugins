@@ -116,6 +116,11 @@ function normalizeSettings(raw) {
   if (raw && Object.prototype.hasOwnProperty.call(raw, "reviewMode")) {
     settings.reviewMode = normalizeReviewMode(raw.reviewMode);
   }
+  // 自动暂存默认关闭：只在用户显式开启时写回，关闭时不写键。
+  // 与 reviewMode 同理，避免给旧存储补默认键、改写既有配置结构。
+  if (raw && raw.autoStageAfterFix === true) {
+    settings.autoStageAfterFix = true;
+  }
   return settings;
 }
 

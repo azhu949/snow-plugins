@@ -233,13 +233,17 @@ function normalizeIssueVerify(raw) {
   };
 }
 
-// 回写复审结论：
-// - 只回写当前仍为 fixed 的条目：复审期间被新审查重开或被新修复接管的条目，
+// 可被复核结论改写的状态：已修复（验证修复是否生效）与已确认不存在（核验旧取证结论）。
+// 两类目标的结论语义不同，但都允许被新结论推翻，回写规则共用同一份白名单。
+const VERIFIABLE_STATUSES = new Set([ISSUE_STATUS.fixed, ISSUE_STATUS.notFound]);
+
+// 回写复核结论：
+// - 只回写当前仍为 fixed / not_found 的条目：复核期间被新审查重开或被新修复接管的条目，
 //   其结论已经过期，不能再写入 verify。
-// - confirmed：保持已修复，把证据写入 verify。
-// - still_present：记录结论后退回待修复。
-// - uncertain：保持修复结论，标记待确认，不参与自动清理。
-// 未返回结论的条目同样只在仍为 fixed 时标记 uncertain；
+// - confirmed：已修复项保持已修复；不存在项保持不存在，表示「复核后仍然不存在」。
+// - still_present：记录结论后退回待修复（已修复项表示修复没生效，不存在项表示旧结论被推翻）。
+// - uncertain：保持原状态，标记待确认，不参与自动清理。
+// 未返回结论的条目同样只在仍为可复核状态时标记 uncertain；
 // 已经确认过的条目不能被“复审遗漏”降级，保留原结论与证据。
 function applyVerifyResults(issues, results, meta) {
   const list = Array.isArray(issues) ? issues.slice() : [];
@@ -274,8 +278,9 @@ function applyVerifyResults(issues, results, meta) {
       },
       updatedAt: nowMs(),
     };
-    // 复审未通过：已修复项退回待修复；已归档或被重开的条目不会走到这里。
-    if (status === "still_present" && issue.status === ISSUE_STATUS.fixed) {
+    // 复核未通过：已修复项退回待修复，已确认不存在项退回待修复（旧取证结论被推翻）；
+    // 已归档或被重开的条目不会走到这里。
+    if (status === "still_present" && VERIFIABLE_STATUSES.has(issue.status)) {
       next.status = ISSUE_STATUS.open;
     }
     list[index] = next;
@@ -286,8 +291,8 @@ function applyVerifyResults(issues, results, meta) {
     const issue = list[index];
     if (allowed && !allowed.has(issue.id)) continue;
     if (!belongsToFixRound(issue)) continue;
-    // 复审运行期间 issue 可能被新审查重开或被新修复接管：迟到的结论不再写入。
-    if (issue.status !== ISSUE_STATUS.fixed) continue;
+    // 复核运行期间 issue 可能被新审查重开或被新修复接管：迟到的结论不再写入。
+    if (!VERIFIABLE_STATUSES.has(issue.status)) continue;
     // 同一 issueId 的重复行只保留第一条，避免重复计数或后写覆盖。
     if (seen.has(issue.id)) continue;
     seen.add(issue.id);
@@ -309,7 +314,7 @@ function applyVerifyResults(issues, results, meta) {
       if (index === undefined) continue;
       const issue = list[index];
       // 已被审查重开、已归档或被新修复接管的条目不再补写待确认。
-      if (issue.status !== ISSUE_STATUS.fixed) continue;
+      if (!VERIFIABLE_STATUSES.has(issue.status)) continue;
       // 已确认条目来自上一轮人工复核：本次模型漏答不能把 confirmed 降级为 uncertain。
       if (issue.verify?.status === "confirmed") continue;
       // 新一轮修复产生的已修复结果不能因旧复审缺少结论而被标记待确认。
@@ -335,9 +340,11 @@ function isFixSelectable(issue) {
   return Boolean(issue) && !FIX_BLOCKED_STATUSES.has(issue.status);
 }
 
-// 已修复但复审未确认的条目允许重新复审；confirmed 已有定论，不再重复消耗会话。
+// 可只读复核的目标：已修复且复审未确认（验证修复是否生效），以及已确认不存在且未复核过
+// （定向审查旧取证结论是否仍然成立）。confirmed 已有定论，不再重复消耗会话。
 function isVerifySelectable(issue) {
-  return Boolean(issue) && issue.status === ISSUE_STATUS.fixed && issue.verify?.status !== "confirmed";
+  if (!issue || issue.verify?.status === "confirmed") return false;
+  return issue.status === ISSUE_STATUS.fixed || issue.status === ISSUE_STATUS.notFound;
 }
 
 // 按文件聚合视图的未定位分组键：与真实文件路径不会冲突。
@@ -617,6 +624,41 @@ function createIssueState(project) {
 
 const SESSION_STATUSES = new Set(["running", "done", "error", "detached", "dismissed"]);
 
+// 自动暂存的修复启动基线：只恢复已知结构；缺失或损坏时为 null，
+// 收尾暂存据此降级为仅提示、不执行 git add。
+// hashes 是每个改动路径的内容指纹，用于区分「启动前就有改动」与「本轮改了同一文件」；
+// 旧数据没有该字段时为 null，收尾暂存退回按路径判断。
+function normalizeStageBaseline(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  const at = Number(raw.at) || 0;
+  if (!at) return null;
+  const paths = Array.isArray(raw.paths)
+    ? Array.from(
+        new Set(
+          raw.paths
+            .map((value) => String(value || "").trim())
+            .filter((value) => value && value.length <= 300),
+        ),
+      )
+    : [];
+  const hashes = {};
+  if (raw.hashes && typeof raw.hashes === "object" && !Array.isArray(raw.hashes)) {
+    for (const [file, hash] of Object.entries(raw.hashes)) {
+      const path = String(file || "").trim();
+      if (!path || path.length > 300) continue;
+      hashes[path] = String(hash || "").trim().slice(0, 64);
+    }
+  }
+  return {
+    at,
+    repoRoot: String(raw.repoRoot || ""),
+    prefix: String(raw.prefix || "").replace(/\\/g, "/"),
+    paths,
+    hashes: Object.keys(hashes).length ? hashes : null,
+    error: String(raw.error || ""),
+  };
+}
+
 function normalizeSession(raw) {
   if (!raw || typeof raw !== "object" || !raw.conversationId) return null;
   const batchNumber = Math.max(1, Number(raw.batchNumber) || 1);
@@ -637,6 +679,11 @@ function normalizeSession(raw) {
   const lastUpdateAt = Number(raw.lastUpdateAt) || 0;
   // 最后更新时刻早于本批启动时间说明指标来自上一批：字符数不能沿用旧累计值。
   const staleMetrics = lastUpdateAt < startedAt;
+  // 自动暂存开关随本轮冻结：旧数据没有该字段时按是否采集到基线回退，
+  // 有基线说明启动时开关是开的（保持旧轮次的暂存行为），没有则视为关闭（收尾静默跳过）。
+  const stageBaseline = normalizeStageBaseline(raw.stageBaseline);
+  const stageEnabled =
+    typeof raw.stageEnabled === "boolean" ? raw.stageEnabled : stageBaseline !== null;
   return {
     conversationId: String(raw.conversationId),
     title: String(raw.title || ""),
@@ -650,6 +697,9 @@ function normalizeSession(raw) {
     lastUpdateAt: Math.max(lastUpdateAt, startedAt),
     status: SESSION_STATUSES.has(raw.status) ? raw.status : "running",
     scopeLabel: String(raw.scopeLabel || ""),
+    // 复审目标构成（verify / mixed / recheck）：只接受白名单取值。
+    // 缺失或未知值保持 null，续批与完成提示按通用复审处理（与旧数据行为一致）。
+    mode: raw.mode === "verify" || raw.mode === "recheck" || raw.mode === "mixed" ? raw.mode : null,
     issueIds: Array.isArray(raw.issueIds) ? raw.issueIds.map(String) : [],
     // 分批修复：当前批次、总批次、每批上限、剩余队列与本轮会话记录。
     batchNumber,
@@ -658,6 +708,23 @@ function normalizeSession(raw) {
     queue: Array.isArray(raw.queue) ? raw.queue.map(String) : [],
     allIssueIds: Array.isArray(raw.allIssueIds) ? raw.allIssueIds.map(String) : [],
     claimedIssueFiles,
+    // 自动暂存的启动基线与开关：重开后仍按同一轮判断是否暂存，避免误暂存或误报。
+    stageEnabled,
+    stageBaseline,
+    // 暂存去重状态：重载后据此判定本轮是否已经处理过暂存，避免用旧基线重复 git add。
+    stageRunIds: Array.isArray(raw.stageRunIds)
+      ? Array.from(
+          new Set(
+            raw.stageRunIds
+              .map((id) => String(id || "").trim())
+              .filter((id) => id && id.length <= 200),
+          ),
+        ).slice(0, 64)
+      : [],
+    stageRunState: ["staging", "done", "error", "empty"].includes(raw.stageRunState)
+      ? raw.stageRunState
+      : "",
+    stageRunAt: Number(raw.stageRunAt) || 0,
     sessionIds: Array.isArray(raw.sessionIds)
       ? raw.sessionIds.map(String).filter(Boolean)
       : [String(raw.conversationId)],

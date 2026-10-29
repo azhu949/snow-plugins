@@ -1114,6 +1114,10 @@
   color: var(--fx-amber);
 }
 
+.fx-verify-badge.is-confirmed {
+  color: var(--fx-green);
+}
+
 .fx-regressed {
   color: var(--fx-orange);
 }
@@ -1444,6 +1448,10 @@
   max-width: min(560px, calc(100vw - 32px));
   transform: translateX(-50%);
   pointer-events: none;
+  /* 多条提示纵向堆叠：连续的收尾提示不会互相覆盖，错误提示能停留到读完。 */
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
   /* Portal 到 body 后不再继承面板变量，这里按同一口径重新提供。 */
   --fx-line: var(--border-color, rgba(128, 134, 146, 0.26));
   --fx-danger: var(--accent-red, #e5484d);
@@ -1603,6 +1611,76 @@
   font-weight: 600;
   letter-spacing: 0.04em;
   color: var(--fx-text-3);
+}
+
+/* 底栏整单处理入口：与右侧「取消 / 确认处理」同一行，处理对象是同一批 issue 与会话。 */
+.fx-cleanup-foot {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.fx-dialog-actions.fx-cleanup-foot-actions {
+  justify-content: space-between;
+  flex-wrap: wrap;
+}
+
+.fx-cleanup-bulk {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.fx-cleanup-foot-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+
+/* 二次确认条：紧贴底栏按钮展开，不再弹一层对话框。 */
+.fx-cleanup-bulk-confirm {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--fx-line-soft);
+  border-radius: var(--fx-r);
+  background: var(--fx-orange-soft);
+}
+
+.fx-cleanup-bulk-confirm.is-danger {
+  border-color: color-mix(in srgb, var(--fx-danger) 45%, transparent);
+  background: var(--fx-danger-soft);
+}
+
+.fx-cleanup-bulk-text {
+  flex: 1 1 220px;
+  min-width: 0;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.fx-cleanup-bulk-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+}
+
+/* 删除全部时的影响提示单独占一行，不被确认按钮挤成窄列。 */
+.fx-cleanup-bulk-warn {
+  flex: 1 1 100%;
+  margin-top: 0;
+}
+
+/* 危险确认条里不再叠一层橙色底色，直接用危险色文字。 */
+.fx-cleanup-bulk-confirm.is-danger .fx-cleanup-bulk-warn {
+  padding: 0;
+  background: transparent;
+  color: var(--fx-danger);
 }
 
 .fx-cleanup-issues {
@@ -1846,17 +1924,28 @@
   background: var(--fx-hover);
 }
 
-/* 选项较多的设置行：说明占满左侧，分段控件空间不足时换到下一行。 */
+/* 选项较多的设置行：首行名称 + 控件，说明跨整行，避免文字被挤在左列。 */
 .fx-setting.is-stack {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 5px;
+}
+
+/* 首行：名称在左、控件贴右；窄宽度时控件换行，说明始终在最后一行占满宽度。 */
+.fx-setting-head {
+  display: flex;
+  align-items: center;
   flex-wrap: wrap;
-  align-items: flex-start;
+  gap: 8px 12px;
 }
 
-.fx-setting.is-stack .fx-setting-main {
-  flex: 1 1 220px;
+.fx-setting-head > .fx-setting-name {
+  flex: 1 1 auto;
 }
 
-.fx-setting.is-stack .fx-segment {
+.fx-setting-head > .fx-segment,
+.fx-setting-head > .fx-check-list,
+.fx-setting-head > .fx-combobox {
   margin-left: auto;
 }
 

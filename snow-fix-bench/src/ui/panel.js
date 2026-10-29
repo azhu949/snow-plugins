@@ -112,16 +112,30 @@ function FixBenchView({ api, onClose, resizable }) {
   // issue 被清空后可能仍留着历史会话：空状态也必须保留清理入口。
   const hasSessions = hasCleanupCandidates(snapshot.state);
   // toast 必须挂在 body 上：审查弹窗通过 Portal 位于浮层之上，留在面板内会被遮罩或弹窗挡住。
+  // 展示最近几条提示：一次收尾会连续出现「修复完成 → 暂存失败 → 复审启动」，
+  // 只留最新一条会让错误提示瞬间被绿色提示盖住。
+  const toastItems =
+    Array.isArray(snapshot.toasts) && snapshot.toasts.length
+      ? snapshot.toasts
+      : snapshot.toast
+        ? [{ id: "current", kind: snapshot.toast.kind, text: snapshot.toast.text }]
+        : [];
   const toast =
-    snapshot.toast && typeof document !== "undefined" && document.body
+    toastItems.length && typeof document !== "undefined" && document.body
       ? createPortal(
           h(
             "div",
             { className: "fx-toast-layer" },
-            h(
-              "div",
-              { className: `fx-toast is-${snapshot.toast.kind || "info"}`, role: "status" },
-              snapshot.toast.text,
+            toastItems.map((item) =>
+              h(
+                "div",
+                {
+                  key: item.id ?? `${item.kind || "info"}:${item.text}`,
+                  className: `fx-toast is-${item.kind || "info"}`,
+                  role: "status",
+                },
+                item.text,
+              ),
             ),
           ),
           document.body,

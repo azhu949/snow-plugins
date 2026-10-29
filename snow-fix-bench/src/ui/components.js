@@ -195,6 +195,46 @@ function ProjectPane({ snapshot, engine, api, t }) {
   );
 }
 
+// 复核对象类型：优先用复审写入时冻结的 fixRef，其次按归档来源、当前修复记录与修复前快照回退。
+// 不能直接看当前 status / fix：归档会改写 status，进入新一轮修复会把 fix 清空或改成 blocked，
+// 历史结论就会在「已确认不存在 / 结论被推翻」与「复审已确认 / 复审未通过」之间反转。
+function verifyTargetKind(issue) {
+  const ref = String(issue?.verify?.fixRef?.result || "");
+  if (ref === ISSUE_STATUS.notFound || ref === ISSUE_STATUS.fixed) return ref;
+  // 归档项的 status 已被 archived 覆盖，用归档前状态还原被复核的对象类型；
+  // archivedFrom 为 open 时无法区分「结论被推翻」与「审查重开」，跳过继续回退。
+  if (issue?.status === ISSUE_STATUS.archived) {
+    if (issue.archivedFrom === ISSUE_STATUS.notFound) return ISSUE_STATUS.notFound;
+    if (issue.archivedFrom === ISSUE_STATUS.fixed) return ISSUE_STATUS.fixed;
+  }
+  // 产生终态结论的修复会清空 verify（applyFixResults），二者共存时 fix 就是被复审的那一轮。
+  const fix = String(issue?.fix?.result || "");
+  if (fix === ISSUE_STATUS.notFound || fix === ISSUE_STATUS.fixed) return fix;
+  // 旧数据再次进入修复时 fix 已被占位覆盖，退回进入修复前的快照。
+  const snapshot = String(issue?.fixingFrom?.fix?.result || "");
+  if (snapshot === ISSUE_STATUS.notFound || snapshot === ISSUE_STATUS.fixed) return snapshot;
+  // 旧数据缺少全部快照：按修复复审文案兜底，不新增第五种文案。
+  return ISSUE_STATUS.fixed;
+}
+
+// 复核结论的展示文案按目标类型区分：已确认不存在的条目不能说成「已修复」，
+// 旧取证结论被推翻时也不能沿用「复审未通过」。
+function verifyLabelText(issue, t) {
+  const status = issue.verify?.status;
+  const target = verifyTargetKind(issue);
+  if (status === "confirmed") {
+    return t(
+      target === ISSUE_STATUS.notFound
+        ? "fx.issues.verifyNotFoundConfirmed"
+        : "fx.issues.verifyConfirmed",
+    );
+  }
+  if (status === "still_present") {
+    return t(target === ISSUE_STATUS.notFound ? "fx.issues.overturned" : "fx.issues.verifyFailed");
+  }
+  return t("fx.issues.verifyUncertain");
+}
+
 // 卡片只依赖单条 issue 与勾选状态：活动指标刷新不重建行，memo 才能跳到下一次渲染。
 const IssueCard = memo(function IssueCard({ issue, selected, engine, api, t }) {
   const [expanded, setExpanded] = useState(false);
@@ -251,11 +291,22 @@ const IssueCard = memo(function IssueCard({ issue, selected, engine, api, t }) {
         issue.title,
       ),
       h("span", { className: `fx-status is-${issue.status}` }, statusLabel(t, issue.status)),
-      issue.verify?.status === "still_present"
-        ? h("span", { className: "fx-verify-badge is-failed" }, t("fx.issues.verifyFailed"))
-        : issue.verify?.status === "uncertain"
-          ? h("span", { className: "fx-verify-badge" }, t("fx.issues.verifyUncertain"))
-          : null,
+      issue.verify &&
+      (issue.verify.status !== "confirmed" || verifyTargetKind(issue) === ISSUE_STATUS.notFound)
+        ? h(
+            "span",
+            {
+              className: `fx-verify-badge${
+                issue.verify.status === "still_present"
+                  ? " is-failed"
+                  : issue.verify.status === "confirmed"
+                    ? " is-confirmed"
+                    : ""
+              }`,
+            },
+            verifyLabelText(issue, t),
+          )
+        : null,
     ),
     h(
       "div",
@@ -339,15 +390,7 @@ const IssueCard = memo(function IssueCard({ issue, selected, engine, api, t }) {
                 h(
                   "span",
                   null,
-                  [
-                    issue.verify.status === "confirmed"
-                      ? t("fx.issues.verifyConfirmed")
-                      : issue.verify.status === "still_present"
-                        ? t("fx.issues.verifyFailed")
-                        : t("fx.issues.verifyUncertain"),
-                    issue.verify.summary,
-                    issue.verify.evidence,
-                  ]
+                  [verifyLabelText(issue, t), issue.verify.summary, issue.verify.evidence]
                     .filter(Boolean)
                     .join(" · "),
                 ),
@@ -490,10 +533,15 @@ function buildIssueView(snapshot, visible) {
   const fixableSelectedCount = issues.filter(
     (issue) => selected.includes(issue.id) && isFixSelectable(issue),
   ).length;
-  // 复审入口只处理当前勾选或当前可见的条目：按钮计数与实际启动范围共用同一份 id 列表。
+  // 复核入口只处理当前勾选或当前可见的条目：按钮计数与实际启动范围共用同一份 id 列表。
+  // 目标仅含「不存在」时是定向审查，不再声称验证修复结果。
   const verifyScopeIssues = (
     selected.length ? issues.filter((issue) => selected.includes(issue.id)) : visible
   ).filter(isVerifySelectable);
+  const recheckScopeCount = verifyScopeIssues.filter(
+    (issue) => issue.status === ISSUE_STATUS.notFound,
+  ).length;
+  const verifyOnlyCount = verifyScopeIssues.length - recheckScopeCount;
   return {
     counts,
     statusScopeCount,
@@ -502,10 +550,13 @@ function buildIssueView(snapshot, visible) {
     verifyScopeIssues,
     verifyScopeIds: verifyScopeIssues.map((issue) => issue.id),
     reverifyCount: verifyScopeIssues.length,
-    // 已有历史复审结论时用「重新复审」，首次复审用「复审」。
-    verifyLabelKey: verifyScopeIssues.some((issue) => Boolean(issue.verify))
-      ? "fx.issues.reverifyCount"
-      : "fx.issues.verifyCount",
+    // 仅「不存在」条目用定向审查文案；其余沿用复审文案（混合选择在确认框列明两类条数）。
+    verifyLabelKey:
+      recheckScopeCount > 0 && verifyOnlyCount === 0
+        ? "fx.issues.recheckCount"
+        : verifyScopeIssues.some((issue) => Boolean(issue.verify))
+          ? "fx.issues.reverifyCount"
+          : "fx.issues.verifyCount",
     groups: groupIssuesByFile(visible),
   };
 }
