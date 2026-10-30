@@ -1,0 +1,21 @@
+{
+  "name": "snow-token-meter",
+  "version": "1.0.0",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "description": "Snow App Token 用量仪表：常驻显示今日 token 与 OpenRouter 价格估算花费的客户端脚本插件",
+  "scripts": {
+    "build": "node build.mjs",
+    "pretest": "node build.mjs",
+    "test": "node --test",
+    "check": "node --check dist/snow-token-meter.user.js"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0",
+    "jsdom": "^29.1.1"
+  },
+  "dependencies": {
+    "preact": "^10.29.8"
+  }
+}

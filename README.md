@@ -8,6 +8,7 @@ Snow App 插件集合仓库。子目录包含两类插件：面板插件（发�
 | ---- | -- | ---- | ---- |
 | 小说阅读器 | `com.snow.novel-reader` | 1.3.0 | 悬浮 TXT 小说阅读器（可调透明度与显示位置、滚轮与快捷键翻页、章节识别与自动滚动）+ legado 书源导入、多源并发搜索与在线追书 |
 | 修复工作台 | `com.snow.fix-bench` | 2.13.3 | 客户端脚本插件（`.user.js`）：聊天输入框工具栏扳手入口 + 居中浮层，完成代码审查 → issue 跟踪 → 批量修复 → 结果清理的闭环；项目切换、严重度筛选、结构化结果回写与清理确认 |
+| Token 用量仪表 | com.snow.token-meter | 1.0.0 | 客户端脚本插件（.user.js）：默认悬浮在窗口顶部中间、与顶栏同一行的胶囊，常驻今日 token 与目录挂牌价估算花费（价格源可选 OpenRouter / models.dev，默认人民币，K/M/B 紧凑计数），浮层含累计/按模型拆分/手动映射 |
 
 ### 修复工作台：功能范围
 
@@ -25,6 +26,15 @@ Snow App 插件集合仓库。子目录包含两类插件：面板插件（发�
 - 在线追书：导入 **legado 格式**书源（只支持 legado，不做其它阅读器格式适配；一次可导入多个源）、多源并发搜索、详情与目录分页抓取、章节正文缓存；响应走宿主原始字节通道并自动识别站点编码（GBK / GB18030 / UTF-16 等站点不再乱码）。
 - 隐私：不内置任何书源、不后台联网；只有你主动点「搜索」或打开在线章节时，才会通过宿主网络通道访问书源里指定的站点。
 - 「数据」页的「清空全部数据」会一并清掉书源与章节缓存（阅读设置与快捷键保留），二次确认时会列出清除范围。
+
+### Token 用量仪表：功能范围
+
+- **形态与入口**：客户端脚本插件（产物 `dist/snow-token-meter.user.js`），默认以悬浮胶囊停在窗口顶部中间、与顶栏同一行（可拖动，位置持久化），也可在设置里切成顶栏右侧徽标；元数据头声明 `@snow-target client`、`@snow-view *`、`@snow-scope global`，因此跨所有视图常驻，停用后徽标与浮层一并消失。不占用面板插件槽位。
+- **用量与成本**：今日与累计概览，以及今日 / 近 7 天 / 近 30 天 / 全部四个周期；token 一律按 K/M/B 紧凑展示，按模型拆分 token 与估算花费，并展示缓存命中率、请求数、价格覆盖率与未计价 / 忽略 token。成本按所选价格目录（OpenRouter / models.dev）估算（默认人民币展示，汇率默认自动获取、可切手动），不是实际账单。用量域只提供整机合计，不按项目拆分。
+- **价格同步**：只读宿主 `usage` 元数据域；价格目录可选 OpenRouter 模型接口或 models.dev 目录（只发 GET，地址可改；两个来源各存一份缓存），默认缓存 12 小时，同步失败时保留旧目录并在徽标与浮层标注；USD→CNY 汇率默认从 Frankfurter 获取（缓存 6 小时，失败回退手动值）。
+- **模型匹配**：手工映射优先；models.dev 目录再按 `vendor/model` 渠道前缀、模型 id / canonical 跨渠道中位价取代表价；其后是精确 id / slug → 去厂商前缀 token 全等 → 连续 token 子序列。歧义或未匹配时在映射视图里搜索目录条目手动固定或忽略，忽略的模型不计成本。
+- **隐私与联网**：元数据头只声明 `@snow-privacy usage`，只读聚合用量，不读会话、消息与密钥；除价格目录与汇率接口外不联网，无遥测；设置、目录、映射与汇率缓存存 `GM_*`。
+- **交互**：悬浮胶囊（默认窗口顶部中间，位置持久化）或顶栏徽标，浮层可钉住（钉住后点击外部不关闭，Esc 仍关闭）；默认每 30 秒自动刷新；颜色只用宿主主题 token，深浅色自动跟随。开发与安装细节见 `snow-token-meter/README.md`。
 
 ## 目录结构
 
@@ -54,6 +64,14 @@ snow-plugins/
     build.mjs                 esbuild 打包脚本：IIFE + UserScript 元数据头 + 内联样式
     test/                     纯函数与引擎运行时测试（npm test）
     dist/snow-fix-bench.user.js  构建产物（安装到脚本插件的就是它，不入库）
+    locales/ style.css README.md
+  snow-token-meter/           客户端脚本插件（无 plugin.json）
+    src/                      源码模块（constants / cost / match / pricing / settings / usage / util / store / engine / i18n）
+      script/                 脚本装载层（api.js 适配 snow/GM，main.js 悬浮胶囊 / 顶栏徽标与浮层）
+      ui/                     内置 Preact 组件（format / icons / meter-panel）
+    build.mjs                 esbuild 打包脚本：IIFE + UserScript 元数据头 + 内联样式
+    test/                     核心纯函数与 JSDOM 挂载冒烟测试（npm test）
+    dist/snow-token-meter.user.js  构建产物（安装到脚本插件的就是它，不入库）
     locales/ style.css README.md
   sources/                    本地 legado 书源合集（已加入 .gitignore，见 sources/README.md）
   scripts/
@@ -156,13 +174,15 @@ config-set scope=userscripts key="new" value={sourcePath: "D:/ai-workspace/snow-
    本地可用 `node app/scripts/validate-registry.mjs`（在 snow-plugin-store 仓库内）先自校验。
 5. CI 校验通过并合并后，客户端「插件市场」刷新即可安装或更新。
 
-### 客户端脚本插件（snow-fix-bench）
+### 客户端脚本插件（snow-fix-bench、snow-token-meter）
 
 - 以单文件 `.user.js` 分发，不使用 `scripts/pack.ps1`，也没有 `plugin.json` 与目录 zip。
 - 发布前在 `snow-fix-bench` 下执行 `npm run build`，把 `dist/snow-fix-bench.user.js` 作为 Release 资产上传；元数据头 `@version` 与 `package.json` 版本保持一致。
 - 市场索引条目使用 `kind: "script"`，下载地址指向该 `.user.js` 资产，`sha256` 取构建产物的 SHA-256。
+- `snow-token-meter`：发布前在其目录下执行 `npm run build`，把 `dist/snow-token-meter.user.js` 作为 Release 资产上传；`@version` 由构建脚本从 `package.json` 写入，两者始终一致。
+- `snow-token-meter` 的市场索引条目同样使用 `kind: "script"`，下载地址指向该 `.user.js` 资产，`sha256` 取产物的 SHA-256；`id` 与元数据头 `@namespace` 一致（`com.snow.token-meter`）。
 
 ## 许可
 
-以各插件目录内的 `plugin.json`（面板插件）或 `package.json`（`snow-fix-bench` 脚本插件）的 `license` 字段为准；本项目插件均为 MIT。`snow-fix-bench` 的许可全文与第三方声明见其目录下的 `LICENSE` 与 `THIRD-PARTY-NOTICES.md`。
+以各插件目录内的 `plugin.json`（面板插件）或 `package.json`（脚本插件）的 `license` 字段为准；本项目插件均为 MIT。`snow-fix-bench` 的许可全文与第三方声明见其目录下的 `LICENSE` 与 `THIRD-PARTY-NOTICES.md`。
 
