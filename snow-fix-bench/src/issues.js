@@ -624,39 +624,11 @@ function createIssueState(project) {
 
 const SESSION_STATUSES = new Set(["running", "done", "error", "detached", "dismissed"]);
 
-// 自动暂存的修复启动基线：只恢复已知结构；缺失或损坏时为 null，
-// 收尾暂存据此降级为仅提示、不执行 git add。
-// hashes 是每个改动路径的内容指纹，用于区分「启动前就有改动」与「本轮改了同一文件」；
-// 旧数据没有该字段时为 null，收尾暂存退回按路径判断。
-function normalizeStageBaseline(raw) {
-  if (!raw || typeof raw !== "object") return null;
-  const at = Number(raw.at) || 0;
-  if (!at) return null;
-  const paths = Array.isArray(raw.paths)
-    ? Array.from(
-        new Set(
-          raw.paths
-            .map((value) => String(value || "").trim())
-            .filter((value) => value && value.length <= 300),
-        ),
-      )
-    : [];
-  const hashes = {};
-  if (raw.hashes && typeof raw.hashes === "object" && !Array.isArray(raw.hashes)) {
-    for (const [file, hash] of Object.entries(raw.hashes)) {
-      const path = String(file || "").trim();
-      if (!path || path.length > 300) continue;
-      hashes[path] = String(hash || "").trim().slice(0, 64);
-    }
-  }
-  return {
-    at,
-    repoRoot: String(raw.repoRoot || ""),
-    prefix: String(raw.prefix || "").replace(/\\/g, "/"),
-    paths,
-    hashes: Object.keys(hashes).length ? hashes : null,
-    error: String(raw.error || ""),
-  };
+// 旧持久化数据里可能带有自动暂存的修复启动基线：当前实现不再采集、不再写入，
+// 也不会用它比对文件内容，只在旧数据缺少 stageEnabled 时用它判断那一轮是否开启过暂存。
+// 只认有效的时间戳，缺失或损坏一律视为没有基线。
+function hasLegacyStageBaseline(raw) {
+  return Boolean(raw && typeof raw === "object" && Number(raw.at));
 }
 
 function normalizeSession(raw) {
@@ -679,11 +651,12 @@ function normalizeSession(raw) {
   const lastUpdateAt = Number(raw.lastUpdateAt) || 0;
   // 最后更新时刻早于本批启动时间说明指标来自上一批：字符数不能沿用旧累计值。
   const staleMetrics = lastUpdateAt < startedAt;
-  // 自动暂存开关随本轮冻结：旧数据没有该字段时按是否采集到基线回退，
+  // 自动暂存开关随本轮冻结：旧数据没有该字段时按是否记录过启动基线回退，
   // 有基线说明启动时开关是开的（保持旧轮次的暂存行为），没有则视为关闭（收尾静默跳过）。
-  const stageBaseline = normalizeStageBaseline(raw.stageBaseline);
   const stageEnabled =
-    typeof raw.stageEnabled === "boolean" ? raw.stageEnabled : stageBaseline !== null;
+    typeof raw.stageEnabled === "boolean"
+      ? raw.stageEnabled
+      : hasLegacyStageBaseline(raw.stageBaseline);
   return {
     conversationId: String(raw.conversationId),
     title: String(raw.title || ""),
@@ -708,10 +681,10 @@ function normalizeSession(raw) {
     queue: Array.isArray(raw.queue) ? raw.queue.map(String) : [],
     allIssueIds: Array.isArray(raw.allIssueIds) ? raw.allIssueIds.map(String) : [],
     claimedIssueFiles,
-    // 自动暂存的启动基线与开关：重开后仍按同一轮判断是否暂存，避免误暂存或误报。
+    // 自动暂存开关：随本轮冻结，重开后仍按同一轮判断是否暂存，避免误暂存或误报。
+    // 旧的启动基线字段不再解析、不再写入，归一化时自然丢弃。
     stageEnabled,
-    stageBaseline,
-    // 暂存去重状态：重载后据此判定本轮是否已经处理过暂存，避免用旧基线重复 git add。
+    // 暂存去重状态：重载后据此判定本轮是否已经处理过暂存，避免重复 git add。
     stageRunIds: Array.isArray(raw.stageRunIds)
       ? Array.from(
           new Set(

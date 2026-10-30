@@ -114,12 +114,23 @@ function FixBenchView({ api, onClose, resizable }) {
   // toast 必须挂在 body 上：审查弹窗通过 Portal 位于浮层之上，留在面板内会被遮罩或弹窗挡住。
   // 展示最近几条提示：一次收尾会连续出现「修复完成 → 暂存失败 → 复审启动」，
   // 只留最新一条会让错误提示瞬间被绿色提示盖住。
-  const toastItems =
+  const rawToastItems =
     Array.isArray(snapshot.toasts) && snapshot.toasts.length
       ? snapshot.toasts
       : snapshot.toast
         ? [{ id: "current", kind: snapshot.toast.kind, text: snapshot.toast.text }]
         : [];
+  // 同一句提示只渲染最新一条：引擎侧已按文案去重，这里兜住旧状态与并发写入，
+  // 避免多条提示并存时最底部出现两条完全相同的文字。
+  const toastItems = [];
+  const seenToastTexts = new Set();
+  for (let index = rawToastItems.length - 1; index >= 0; index -= 1) {
+    const item = rawToastItems[index];
+    const text = String(item?.text ?? "");
+    if (!text || seenToastTexts.has(text)) continue;
+    seenToastTexts.add(text);
+    toastItems.unshift(item);
+  }
   const toast =
     toastItems.length && typeof document !== "undefined" && document.body
       ? createPortal(
