@@ -7,9 +7,9 @@ import { h, render } from "preact";
 import { STORAGE_KEYS } from "../constants.js";
 import { createEngine } from "../engine.js";
 import { createT } from "../i18n.js";
-import MeterPanel from "../ui/meter-panel.js";
+import MeterPanel, { requestLeave } from "../ui/meter-panel.js";
 import { iconMarkup } from "../ui/icons.js";
-import { formatAgo, formatCost, formatExactTokens, formatPercent, withFxRate } from "../ui/format.js";
+import { formatAgo, formatCost, formatCostPair, formatExactTokens, formatPercent, withFxRate } from "../ui/format.js";
 import { clamp, compactTokens } from "../util.js";
 import { createScriptApi, createScriptStorage, hasScriptHost } from "./api.js";
 import styles from "../../style.css";
@@ -32,6 +32,16 @@ const FALLBACK_BADGE_HEIGHT = 30;
 // 窗口尺寸变化后回写悬浮坐标的去抖窗口：避免拖动窗口边缘时连续写存储并重置自动刷新定时器。
 const FLOAT_PERSIST_DEBOUNCE_MS = 200;
 const COVERAGE_WARN = 0.95;
+// 胶囊动效时长：必须与 style.css 的过渡时间一致，脚本只用它安排收尾与清理。
+const MORPH_OPEN_MS = 240;
+const MORPH_CLOSE_MS = 170;
+const BADGE_PULSE_MS = 480;
+// 徽标悬停浮层：宽度、间距与出现延迟。浮层挂在 body 下，用 fixed 视口坐标。
+const BADGE_TIP_WIDTH = 300;
+const BADGE_TIP_GAP = 6;
+const BADGE_TIP_MARGIN = 8;
+const BADGE_TIP_MIN_SPACE = 220;
+const BADGE_TIP_DELAY = 110;
 // 首屏顶栏可能晚于脚本注入：在有界次数内重试挂载，避免错过 context 事件后徽标一直缺席。
 const MOUNT_RETRY_MS = 200;
 const MOUNT_RETRY_LIMIT = 20;
@@ -102,13 +112,25 @@ function createBadge() {
     `<span class="tm-badge-icon">${iconMarkup("Coins", 13)}</span>`,
     '<span class="tm-badge-tokens"></span>',
     '<span class="tm-badge-cost"></span>',
+    // 扫描光层：只做视觉，不参与布局与命中，状态由宿主类名驱动。
+    '<span class="tm-badge-sheen" aria-hidden="true"></span>',
     '<span class="tm-badge-dot" aria-hidden="true"></span>',
   ].join("");
 
   host.append(button);
+
+  // 徽标悬停浮层与徽标同级挂在 body 下：fixed 定位不受顶栏插槽的 transform /
+  // backdrop-filter 影响，也不占用插槽布局。文本一律转义后写入。
+  const tip = document.createElement("div");
+  tip.className = "tm-badge-tip";
+  tip.setAttribute("role", "tooltip");
+  tip.hidden = true;
+  document.body.append(tip);
+
   return {
     host,
     button,
+    tip,
     tokens: host.querySelector(".tm-badge-tokens"),
     cost: host.querySelector(".tm-badge-cost"),
   };
@@ -167,8 +189,61 @@ function mount() {
   let floatPersistTimer = 0;
   let suppressToggle = false;
   let drag = null;
+  // 徽标浮层的显示状态与延迟计时器：与徽标同生命周期。
+  let badgeTipTimer = 0;
+  let badgeTipVisible = false;
+  // 胶囊动效：开合 morph 的收尾计时器与数值脉冲计时器，全部在 cleanup 里清掉。
+  let morphTimer = 0;
+  let closeTimer = 0;
+  const pulseTimers = { tokens: 0, cost: 0 };
+  let lastTokensValue = null;
+  let lastCostText = "";
+  let streaming = false;
   let observedAnchor = null;
   let disposed = false;
+
+  // 系统级「减少动态效果」：morph 直接跳过，不与用户偏好对抗。
+  function prefersReducedMotion() {
+    try {
+      return (
+        typeof window.matchMedia === "function" &&
+        window.matchMedia("(prefers-reduced-motion: reduce)").matches
+      );
+    } catch {
+      return false;
+    }
+  }
+
+  // 宿主 context 是流式状态的唯一真相：stream-start / stream-end 只是即时通知，
+  // 脚本补挂或视图重建后仍要能从 context 取回当前状态。
+  function readStreaming() {
+    try {
+      return Boolean(snow.context && snow.context.isStreaming);
+    } catch {
+      return false;
+    }
+  }
+
+  function setStreaming(next) {
+    const value = Boolean(next);
+    if (streaming === value) return;
+    streaming = value;
+    badgeHost.classList.toggle("is-streaming", value);
+  }
+
+  // 数值脉冲：移除类 → 强制一次重排 → 再加回，同一动画可以连续重放。
+  // 只动已存在的节点，textContent 始终是单一新值，读文本的逻辑不受影响。
+  function pulseValue(element, key) {
+    if (!element) return;
+    element.classList.remove("is-bump");
+    void element.offsetWidth;
+    element.classList.add("is-bump");
+    if (pulseTimers[key]) clearTimeout(pulseTimers[key]);
+    pulseTimers[key] = setTimeout(() => {
+      pulseTimers[key] = 0;
+      element.classList.remove("is-bump");
+    }, BADGE_PULSE_MS);
+  }
 
   function readDisplayMode() {
     const settings = snapshot && snapshot.settings;
@@ -183,36 +258,31 @@ function mount() {
 
   /* ------------------------------ 徽标渲染 ------------------------------ */
 
-  function catalogStatusText() {
+  // 徽标浮层里的价格同步值：只给时间 / 失败状态，标签由排版层提供。
+  function catalogValue() {
     const catalog = snapshot.catalog || {};
-    if (catalog.error) return t("tm.catalog.error", { message: catalog.error });
+    if (catalog.error) return t("tm.badge.tip.failed");
     if (!catalog.fetchedAt) return t("tm.catalog.missing");
-    const base = t("tm.catalog.synced", { value: formatAgo(catalog.fetchedAt, t) });
+    const base = formatAgo(catalog.fetchedAt, t);
     return catalog.stale ? `${base} · ${t("tm.catalog.cached")}` : base;
   }
 
-  // 徽标 title 里的价格行自己带前缀，避免与 tm.catalog.synced 的「价格同步：」重复。
-  function catalogStatusLine() {
-    const catalog = snapshot.catalog || {};
-    if (catalog.error) return t("tm.catalog.error", { message: catalog.error });
-    if (!catalog.fetchedAt) return t("tm.badge.title.pricing", { value: t("tm.catalog.missing") });
-    const base = t("tm.catalog.synced", { value: formatAgo(catalog.fetchedAt, t) });
-    return catalog.stale ? `${base} · ${t("tm.catalog.cached")}` : base;
-  }
-
-  // 徽标 title 里的汇率行：自动模式显示同步时间，手动模式显示手动值。
-  function fxStatusLine() {
+  // 汇率值：自动模式给「汇率 · 同步于」，手动模式只给手填数值。
+  function fxValue() {
     const settings = snapshot.settings || {};
-    if (settings.fxMode !== "auto") {
-      return t("tm.fx.manual", { rate: Number(settings.fxRate).toFixed(4) });
-    }
+    if (settings.fxMode !== "auto") return Number(settings.fxRate).toFixed(4);
     const fx = snapshot.fx || {};
-    if (!fx.rate) return t("tm.fx.missing");
-    const base = t("tm.fx.synced", {
+    if (!fx.rate) return fx.error ? t("tm.fx.error", { message: fx.error }) : t("tm.fx.missing");
+    const base = t("tm.badge.tip.fxValue", {
       rate: fx.rate.toFixed(4),
       value: formatAgo(fx.fetchedAt, t),
     });
-    return fx.error ? `${base} · ${t("tm.fx.cached")}` : base;
+    return fx.error || fx.stale ? `${base} · ${t("tm.fx.cached")}` : base;
+  }
+
+  // 金额下限前缀：未计价 token 或档位 / 1h 区间都会让 totalUsd 只是下界。
+  function boundPrefix(cost) {
+    return cost && cost.isLowerBound ? t("tm.cost.boundPrefix") : "";
   }
 
   function badgeWarnings() {
@@ -227,51 +297,168 @@ function mount() {
     }
     if (snapshot.denied) list.push(t("tm.warn.denied"));
     const cost = snapshot.today && snapshot.today.cost;
-    if (cost && cost.totalTokens > 0 && cost.coverage < COVERAGE_WARN) {
-      list.push(t("tm.warn.coverage", { percent: formatPercent(cost.coverage) }));
+    if (cost && cost.totalTokens > 0) {
+      // 告警用 rowCoverage（分子分母同源）：coverage 的分母取 summary，两次查询不同快照时会假告警。
+      const ratio = Number.isFinite(cost.rowCoverage) ? cost.rowCoverage : cost.coverage;
+      if (ratio < COVERAGE_WARN) {
+        list.push(t("tm.warn.coverage", { percent: formatPercent(ratio) }));
+      }
+      if (cost.isLowerBound) list.push(t("tm.warn.lowerBound"));
     }
     return list;
   }
 
-  function badgeTitle() {
+  // 徽标悬停浮层：标签与值分开，排版交给 CSS 两列网格；数字统一等宽。
+  function escapeHtml(value) {
+    return String(value ?? "").replace(/[&<>"']/g, (char) => ({
+      "&": "&amp;",
+      "<": "&lt;",
+      ">": "&gt;",
+      '"': "&quot;",
+      "'": "&#39;",
+    })[char]);
+  }
+
+  function badgeTipData() {
     const settings = withFxRate(snapshot.settings || {}, snapshot.fx);
-    const today = snapshot.today || {};
-    const all = snapshot.allTime || {};
-    const summary = today.summary || null;
-    const allSummary = all.summary || null;
-    const lines = [
-      t("tm.badge.title.today", {
-        tokens: compactTokens(summary ? summary.totalTokens : 0),
-        cost: formatCost(today.cost ? today.cost.totalUsd : 0, settings),
-      }),
-    ];
+    const totalMode = settings.badgeStyle === "total";
+    const main = totalMode ? snapshot.allTime : snapshot.today;
+    const other = totalMode ? snapshot.today : snapshot.allTime;
+    const summary = main ? main.summary : null;
+    const cost = main ? main.cost : null;
+    const otherSummary = other ? other.summary : null;
+    const otherCost = other ? other.cost : null;
+    const pair = formatCostPair(cost ? cost.totalUsd : 0, settings);
+    const data = {
+      label: t(totalMode ? "tm.badge.total" : "tm.badge.today"),
+      tokens: summary ? compactTokens(summary.totalTokens) : t("tm.badge.empty"),
+      unit: summary ? t("tm.badge.tip.unit") : "",
+      cost: summary ? `${boundPrefix(cost)}${pair.primary}` : "",
+      alt: summary ? t("tm.value.approx", { value: pair.alt }) : "",
+      rows: [],
+      other: null,
+      meta: [],
+      warnings: badgeWarnings(),
+      hint: t("tm.badge.tip.hint"),
+    };
     if (summary) {
-      lines.push(
-        [
-          t("tm.badge.title.input", { value: compactTokens(summary.totalInputTokens) }),
-          t("tm.badge.title.output", { value: compactTokens(summary.totalOutputTokens) }),
-          t("tm.badge.title.cacheRead", {
-            value: compactTokens(summary.totalCacheReadInputTokens),
-          }),
-        ].join(" · "),
+      data.rows.push(
+        { label: t("tm.badge.tip.input"), value: compactTokens(summary.totalInputTokens) },
+        { label: t("tm.badge.tip.output"), value: compactTokens(summary.totalOutputTokens) },
+        { label: t("tm.badge.tip.cacheRead"), value: compactTokens(summary.totalCacheReadInputTokens) },
+        { label: t("tm.badge.tip.requests"), value: formatExactTokens(summary.totalRequests) },
       );
     }
-    lines.push(
-      t("tm.badge.title.requests", {
-        value: formatExactTokens(summary ? summary.totalRequests : 0),
-      }),
+    const otherLabel = t(totalMode ? "tm.badge.today" : "tm.badge.total");
+    if (otherSummary) {
+      const otherPair = formatCostPair(otherCost ? otherCost.totalUsd : 0, settings);
+      data.other = {
+        label: otherLabel,
+        value: `${compactTokens(otherSummary.totalTokens)} ${t("tm.badge.tip.unit")} · ${boundPrefix(otherCost)}${otherPair.primary}`,
+      };
+    } else {
+      data.other = { label: otherLabel, value: t("tm.badge.empty") };
+    }
+    data.meta.push(
+      { label: t("tm.badge.tip.mode"), value: cost ? modeLabelOf(cost) : t("tm.badge.empty") },
+      { label: t("tm.badge.tip.pricing"), value: catalogValue() },
+      { label: t("tm.badge.tip.fx"), value: fxValue() },
     );
-    lines.push(
-      t("tm.badge.title.total", {
-        tokens: compactTokens(allSummary ? allSummary.totalTokens : 0),
-        cost: formatCost(all.cost ? all.cost.totalUsd : 0, settings),
-      }),
+    return data;
+  }
+
+  function renderBadgeTip() {
+    const data = badgeTipData();
+    const parts = [
+      `<div class="tm-tip-head"><span class="tm-tip-label">${escapeHtml(data.label)}</span><span class="tm-tip-tokens">${escapeHtml(data.tokens)}${
+        data.unit ? `<span class="tm-tip-unit">${escapeHtml(data.unit)}</span>` : ""
+      }</span></div>`,
+    ];
+    if (data.cost) {
+      parts.push(
+        `<div class="tm-tip-cost"><span class="tm-tip-cost-main">${escapeHtml(data.cost)}</span><span class="tm-tip-cost-alt">${escapeHtml(data.alt)}</span></div>`,
+      );
+    }
+    if (data.rows.length) {
+      parts.push(
+        `<div class="tm-tip-grid">${data.rows
+          .map(
+            (row) =>
+              `<span class="tm-tip-key">${escapeHtml(row.label)}</span><span class="tm-tip-val">${escapeHtml(row.value)}</span>`,
+          )
+          .join("")}</div>`,
+      );
+    }
+    if (data.other) {
+      parts.push(
+        `<div class="tm-tip-sep"></div><div class="tm-tip-grid"><span class="tm-tip-key">${escapeHtml(data.other.label)}</span><span class="tm-tip-val">${escapeHtml(data.other.value)}</span></div>`,
+      );
+    }
+    parts.push(
+      `<div class="tm-tip-sep"></div><div class="tm-tip-grid">${data.meta
+        .map(
+          (row) =>
+            `<span class="tm-tip-key">${escapeHtml(row.label)}</span><span class="tm-tip-val">${escapeHtml(row.value)}</span>`,
+        )
+        .join("")}</div>`,
     );
-    lines.push(catalogStatusLine());
-    lines.push(fxStatusLine());
-    const warnings = badgeWarnings();
-    if (warnings.length) lines.push(...warnings);
-    return lines.join("\n");
+    if (data.warnings.length) {
+      parts.push(
+        `<div class="tm-tip-warn"><div class="tm-tip-warn-title">${escapeHtml(t("tm.badge.tip.warn"))}</div>${data.warnings
+          .map((warn) => `<div>${escapeHtml(warn)}</div>`)
+          .join("")}</div>`,
+      );
+    }
+    parts.push(`<div class="tm-tip-hint">${escapeHtml(data.hint)}</div>`);
+    badge.tip.innerHTML = parts.join("");
+  }
+
+  function positionBadgeTip() {
+    const rect = badgeHost.getBoundingClientRect();
+    const width = Math.min(BADGE_TIP_WIDTH, window.innerWidth - BADGE_TIP_MARGIN * 2);
+    const maxLeft = Math.max(BADGE_TIP_MARGIN, window.innerWidth - width - BADGE_TIP_MARGIN);
+    const left = Math.min(Math.max(rect.left, BADGE_TIP_MARGIN), maxLeft);
+    badge.tip.style.left = `${Math.round(left)}px`;
+    badge.tip.style.width = `${Math.round(width)}px`;
+    // 宽度落定后再量高度：换行行数取决于宽度，先量会低估。
+    const height = badge.tip.offsetHeight || BADGE_TIP_MIN_SPACE;
+    const needed = Math.max(height + BADGE_TIP_GAP + BADGE_TIP_MARGIN, BADGE_TIP_MIN_SPACE);
+    const below = window.innerHeight - rect.bottom;
+    const above = rect.top;
+    const flip = below < needed && above > below;
+    badge.tip.style.top = `${Math.round(flip ? rect.top - BADGE_TIP_GAP : rect.bottom + BADGE_TIP_GAP)}px`;
+    badge.tip.classList.toggle("is-above", flip);
+  }
+
+  function showBadgeTip() {
+    if (disposed || open || drag) return;
+    if (badgeTipTimer) clearTimeout(badgeTipTimer);
+    badgeTipTimer = setTimeout(() => {
+      badgeTipTimer = 0;
+      if (disposed || open || drag) return;
+      renderBadgeTip();
+      // 先占位显示再量高度：hidden 时 display:none 量不到尺寸；visibility 隐藏
+      // 保留布局，定位完成后再显示，避免在旧坐标闪一帧。
+      badge.tip.hidden = false;
+      badge.tip.style.visibility = "hidden";
+      positionBadgeTip();
+      badge.tip.style.visibility = "";
+      badgeTipVisible = true;
+    }, BADGE_TIP_DELAY);
+  }
+
+  function hideBadgeTip() {
+    if (badgeTipTimer) {
+      clearTimeout(badgeTipTimer);
+      badgeTipTimer = 0;
+    }
+    if (!badgeTipVisible) return;
+    badgeTipVisible = false;
+    badge.tip.hidden = true;
+  }
+
+  function modeLabelOf(cost) {
+    return t(cost && cost.mode === "precise" ? "tm.cost.mode.precise" : "tm.cost.mode.aggregate");
   }
 
   function renderBadge() {
@@ -281,13 +468,28 @@ function mount() {
     const cost = range ? range.cost : null;
     const ready = Boolean(summary);
     const tokensText = ready ? compactTokens(summary.totalTokens) : t("tm.badge.empty");
-    const costText = ready ? formatCost(cost ? cost.totalUsd : 0, settings) : t("tm.badge.empty");
+    const costText = ready
+      ? `${boundPrefix(cost)}${formatCost(cost ? cost.totalUsd : 0, settings)}`
+      : t("tm.badge.empty");
 
     badge.tokens.textContent = tokensText;
     badge.cost.textContent = costText;
 
+    // 首屏与口径切换不算「新数据」：只有已知旧值确实变化时才播放脉冲，避免启动即闪。
+    const tokenValue = ready && Number.isFinite(summary.totalTokens) ? summary.totalTokens : null;
+    const tokensChanged =
+      tokenValue !== null && lastTokensValue !== null && tokenValue !== lastTokensValue;
+    const costChanged = ready && lastCostText !== "" && costText !== lastCostText;
+    if (tokensChanged) pulseValue(badge.tokens, "tokens");
+    if (costChanged) pulseValue(badge.cost, "cost");
+    lastTokensValue = tokenValue;
+    lastCostText = costText;
+
     const warnings = badgeWarnings();
-    badgeButton.title = badgeTitle();
+    if (badgeTipVisible) {
+      renderBadgeTip();
+      positionBadgeTip();
+    }
     badgeButton.setAttribute("aria-label", `${t("tm.badge.toggle")} · ${tokensText} token · ${costText}`);
     badgeHost.classList.toggle("is-loading", !snapshot.initialized || Boolean(snapshot.loading));
     badgeHost.classList.toggle("is-warn", warnings.length > 0);
@@ -467,6 +669,7 @@ function mount() {
       onClose: closePanel,
       onTogglePin: togglePinned,
       onClearCatalog: clearCatalog,
+      onClearPrices: clearCustomPrices,
       onResetMappings: resetMappings,
       onResetSettings: resetDefaultSettings,
       onResetFloatPosition: resetFloatPosition,
@@ -486,30 +689,114 @@ function mount() {
     positionPanel();
   }
 
+  /* ------------------------------ 胶囊 morph ------------------------------ */
+
+  // 起始几何：水平原点落在胶囊中心（相对面板宽度的百分比），纵向把面板顶部
+  // 拉到胶囊顶部。必须在自然态下测量，transform 会污染 getBoundingClientRect。
+  function morphGeometry() {
+    const anchor = badgeHost.getBoundingClientRect();
+    const panel = panelHost.getBoundingClientRect();
+    if (!(panel.width > 0) || !(panel.height > 0)) return null;
+    const centerX = anchor.left + anchor.width / 2;
+    return {
+      originX: `${(clamp((centerX - panel.left) / panel.width, 0, 1) * 100).toFixed(2)}%`,
+      offsetY: Math.round(anchor.top - panel.top),
+    };
+  }
+
+  function applyMorphVars(geometry) {
+    panelHost.style.setProperty("--tm-morph-origin", geometry.originX);
+    panelHost.style.setProperty("--tm-morph-y", `${geometry.offsetY}px`);
+  }
+
+  function clearMorphVars() {
+    panelHost.style.removeProperty("--tm-morph-origin");
+    panelHost.style.removeProperty("--tm-morph-y");
+  }
+
+  // 展开：起始帧写完先读一次布局，再切回自然态，浏览器才有一帧可以过渡。
+  function playOpenMorph() {
+    if (prefersReducedMotion()) return;
+    const geometry = morphGeometry();
+    if (!geometry) return;
+    applyMorphVars(geometry);
+    panelHost.classList.add("is-morph-in");
+    void panelHost.offsetHeight;
+    requestAnimationFrame(() => {
+      if (disposed || !open) return;
+      panelHost.classList.remove("is-morph-in");
+    });
+    if (morphTimer) clearTimeout(morphTimer);
+    morphTimer = setTimeout(() => {
+      morphTimer = 0;
+      panelHost.classList.remove("is-morph-in");
+    }, MORPH_OPEN_MS);
+  }
+
+  // 收起：量不到几何（未布局 / 减少动态）时零延迟隐藏，避免卡在收起中途。
+  function playCloseMorph() {
+    const finish = () => {
+      if (closeTimer) {
+        clearTimeout(closeTimer);
+        closeTimer = 0;
+      }
+      panelHost.classList.remove("is-morph-in", "is-morph-out");
+      panelHost.classList.add("is-hidden");
+      panelHost.removeAttribute("data-tm-open");
+      clearMorphVars();
+    };
+    const geometry = prefersReducedMotion() ? null : morphGeometry();
+    if (!geometry) {
+      finish();
+      return;
+    }
+    if (morphTimer) {
+      clearTimeout(morphTimer);
+      morphTimer = 0;
+    }
+    applyMorphVars(geometry);
+    panelHost.classList.remove("is-morph-in");
+    panelHost.classList.add("is-morph-out");
+    closeTimer = setTimeout(() => {
+      closeTimer = 0;
+      if (open || disposed) return;
+      finish();
+    }, MORPH_CLOSE_MS);
+  }
+
   function openPanel() {
     if (open || disposed) return;
+    hideBadgeTip();
     open = true;
-    panelHost.classList.remove("is-hidden");
+    if (closeTimer) {
+      clearTimeout(closeTimer);
+      closeTimer = 0;
+    }
+    // 关闭动画中途重开：先复位到自然态，后面的定位与测量才是真实尺寸。
+    panelHost.classList.remove("is-hidden", "is-morph-in", "is-morph-out");
     panelHost.setAttribute("data-tm-open", "1");
     badgeHost.classList.add("is-open");
     syncBadgeAria();
     renderPanel();
     positionPanel();
+    playOpenMorph();
     // 打开浮层属于自动触发：走 10 秒节流，避免反复开关就发起多轮 metadata 请求。
     engine.refresh().catch(() => {
       // 引擎已把错误写入 state。
     });
   }
 
-  function closePanel() {
+  function closePanel(options = {}) {
     if (!open) return;
+    // 关闭前统一询问草稿守卫：X、Esc、外部点击与徽标 toggle 都收口在这里。
+    // 确认后的回调带 skipLeaveGuard 再次进来，避免同一次关闭重复弹确认。
+    if (!options.skipLeaveGuard && !requestLeave(() => closePanel({ skipLeaveGuard: true }))) return;
     open = false;
-    panelHost.classList.add("is-hidden");
-    panelHost.removeAttribute("data-tm-open");
     badgeHost.classList.remove("is-open");
     view = { name: "main" };
     panelHost.setAttribute("data-tm-view", "main");
     syncBadgeAria();
+    playCloseMorph();
   }
 
   function togglePanel() {
@@ -525,9 +812,11 @@ function mount() {
   async function clearCatalog() {
     try {
       if (typeof GM_deleteValue === "function") {
-        // 两个价格源各有一份缓存，一并清掉，避免切换来源后仍复用旧目录。
+        // 三个价格源各有一份缓存，一并清掉，避免切换来源后仍复用旧目录。
+        // 只删目录键：自定义价与映射属于用户声明，不能被「清缓存」顺手清掉。
         GM_deleteValue(STORAGE_KEYS.catalog);
         GM_deleteValue(STORAGE_KEYS.catalogModelsDev);
+        GM_deleteValue(STORAGE_KEYS.catalogLiteLLM);
       }
     } catch {
       // 删除失败时仍尝试拉取一次，让引擎自行覆盖。
@@ -538,6 +827,11 @@ function mount() {
   // 一次写空映射表、一次重算成本：逐条重算会让界面长时间无响应。
   async function resetMappings() {
     return (await engine.clearMappings()).saved;
+  }
+
+  // 清空全部自定义价：只动价格键，映射、目录缓存与用量数据都保留（界面上是独立的两步确认）。
+  async function clearCustomPrices() {
+    return (await engine.clearCustomPrices()).saved;
   }
 
   // 重置设置只回到默认值，映射、价格目录与用量数据都保留。
@@ -574,6 +868,7 @@ function mount() {
   }
 
   function onWindowResize() {
+    hideBadgeTip();
     ensureBadgeMounted();
     if (open) positionPanel();
     scheduleFloatPositionPersist();
@@ -675,6 +970,7 @@ function mount() {
   }
 
   function onBadgePointerDown(event) {
+    hideBadgeTip();
     if (readDisplayMode() !== "float") return;
     if (typeof event.button === "number" && event.button !== 0) return;
     const rect = badgeHost.getBoundingClientRect();
@@ -772,6 +1068,8 @@ function mount() {
   const unsubscribe = engine.subscribe(onState);
 
   function scheduleStreamRefresh() {
+    // 流式结束先熄掉活性光，数据刷新再等去抖窗口。
+    setStreaming(false);
     if (streamTimer) clearTimeout(streamTimer);
     streamTimer = setTimeout(() => {
       streamTimer = 0;
@@ -781,7 +1079,12 @@ function mount() {
     }, STREAM_REFRESH_DELAY_MS);
   }
 
+  function onStreamStart() {
+    setStreaming(true);
+  }
+
   function onContext() {
+    setStreaming(readStreaming());
     const locale = currentLocale();
     if (locale !== lastLocale) {
       lastLocale = locale;
@@ -799,11 +1102,17 @@ function mount() {
 
   badgeButton.addEventListener("click", onBadgeClick);
   badgeButton.addEventListener("pointerdown", onBadgePointerDown);
+  badgeButton.addEventListener("mouseenter", showBadgeTip);
+  badgeButton.addEventListener("mouseleave", hideBadgeTip);
+  badgeButton.addEventListener("focus", showBadgeTip);
+  badgeButton.addEventListener("blur", hideBadgeTip);
+  window.addEventListener("scroll", hideBadgeTip, true);
   document.addEventListener("pointerdown", onDocumentPointerDown, true);
   document.addEventListener("keydown", onDocumentKeyDown, true);
   window.addEventListener("resize", onWindowResize);
 
   try {
+    snow.on("stream-start", onStreamStart);
     snow.on("stream-end", scheduleStreamRefresh);
     snow.on("context", onContext);
   } catch {
@@ -814,6 +1123,8 @@ function mount() {
   ensureBadgeMounted();
   retargetObserver();
   scheduleMountRetry();
+  // 补挂时可能正处在流式中：context 是唯一可信来源，不依赖是否见过 stream-start。
+  setStreaming(readStreaming());
   renderBadge();
   applyDisplayMode();
 
@@ -842,11 +1153,21 @@ function mount() {
           clearTimeout(suppressTimer);
           clearTimeout(mountRetry);
           clearTimeout(floatPersistTimer);
+          clearTimeout(badgeTipTimer);
+          clearTimeout(morphTimer);
+          clearTimeout(closeTimer);
+          clearTimeout(pulseTimers.tokens);
+          clearTimeout(pulseTimers.cost);
           observeTimer = 0;
           streamTimer = 0;
           suppressTimer = 0;
           mountRetry = 0;
           floatPersistTimer = 0;
+          badgeTipTimer = 0;
+          morphTimer = 0;
+          closeTimer = 0;
+          pulseTimers.tokens = 0;
+          pulseTimers.cost = 0;
         });
         // observer 必须最先断开：否则节点被移除后会被 bodyObserver 重新挂回 body。
         runCleanupStep("observers", () => {
@@ -858,18 +1179,24 @@ function mount() {
         drag = null;
         runCleanupStep("window-listeners", () => {
           window.removeEventListener("resize", onWindowResize);
+          window.removeEventListener("scroll", hideBadgeTip, true);
           document.removeEventListener("pointerdown", onDocumentPointerDown, true);
           document.removeEventListener("keydown", onDocumentKeyDown, true);
         });
         runCleanupStep("badge-listeners", () => {
           badgeButton.removeEventListener("click", onBadgeClick);
           badgeButton.removeEventListener("pointerdown", onBadgePointerDown);
+          badgeButton.removeEventListener("mouseenter", showBadgeTip);
+          badgeButton.removeEventListener("mouseleave", hideBadgeTip);
+          badgeButton.removeEventListener("focus", showBadgeTip);
+          badgeButton.removeEventListener("blur", hideBadgeTip);
         });
         runCleanupStep("unsubscribe", unsubscribe);
       } finally {
         // 先摘节点再卸载 Preact：即使卸载抛错，界面上也不会残留不可用节点。
         runCleanupStep("panel-host", () => panelHost.remove());
         runCleanupStep("badge-host", () => badgeHost.remove());
+        runCleanupStep("badge-tip", () => badge.tip.remove());
         runCleanupStep("render-null", () => render(null, panelHost));
         runCleanupStep("engine", () => engine.dispose());
         runCleanupStep("style", () => {

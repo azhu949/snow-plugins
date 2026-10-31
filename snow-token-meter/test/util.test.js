@@ -107,6 +107,17 @@ test("formatCny 固定两位小数并带千分位", () => {
   assert.equal(formatCny(12345.678), "¥12,345.68");
 });
 
+test("formatCny 小额自适应：不再把有花费显示成 ¥0.00", () => {
+  assert.equal(formatCny(0.00001), "<¥0.0001");
+  assert.equal(formatCny(0.002), "¥0.0020");
+  assert.equal(formatCny(0.0086688), "¥0.01", "0.005 以上仍显示到分位");
+  assert.equal(formatCny(0.05), "¥0.050");
+  assert.equal(formatCny(0.5), "¥0.500");
+  assert.equal(formatCny(2000.5), "¥2,000.50");
+  assert.equal(formatCny(-1), "¥0.00");
+  assert.equal(formatCny("bad"), "¥0.00");
+});
+
 test("timeAgo 相对时间", () => {
   const now = new Date(2026, 9, 30, 12, 0, 0).getTime();
   assert.equal(timeAgo(now - 30_000, now), "刚刚");

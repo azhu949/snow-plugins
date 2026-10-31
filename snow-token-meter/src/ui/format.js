@@ -54,6 +54,41 @@ function formatCost(usd, settings) {
   return formatMoney(usd, settings);
 }
 
+// 金额区间：只有上界严格大于下界时才有意义；两端都用同一套小额精度，避免出现 ¥0.00 – ¥0.00。
+function formatCostRange(lowerUsd, upperUsd, settings) {
+  const low = toUsd(lowerUsd);
+  const high = toUsd(upperUsd);
+  if (!(high > low)) return "";
+  return `${formatMoney(low, settings)} – ${formatMoney(high, settings)}`;
+}
+
+// 计算过程固定用 USD 展示：单价就是 USD / 1M token，分项与合计同单位才能逐行对账。
+function formatUsdValue(usd) {
+  return formatUsd(toUsd(usd));
+}
+
+// USD 区间：同样只在上界严格大于下界时给值（精确值不降级成区间）。
+function formatUsdRange(lowerUsd, upperUsd) {
+  const low = toUsd(lowerUsd);
+  const high = toUsd(upperUsd);
+  if (!(high > low)) return "";
+  return `${formatUsd(low)} – ${formatUsd(high)}`;
+}
+
+// usage_records.created_at 是本地时间串：直接切片，不经过 Date 解析（避免时区/格式差异）。
+function formatRecordTime(value) {
+  const text = String(value ?? "");
+  return /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(text) ? text.slice(11) : "";
+}
+
+// 时间戳 → HH:mm（目录版本只到分钟）。
+function formatClockTime(timestamp) {
+  const target = Number(timestamp);
+  if (!Number.isFinite(target) || target <= 0) return "";
+  const date = new Date(target);
+  return `${pad2(date.getHours())}:${pad2(date.getMinutes())}`;
+}
+
 // token 一律按 K/M/B 紧凑展示；formatExactTokens 只留给请求数、目录条数等非 token 计数。
 function formatExactTokens(value) {
   return formatNumber(value);
@@ -116,6 +151,11 @@ export {
   formatAltMoney,
   formatCost,
   formatCostPair,
+  formatCostRange,
+  formatUsdValue,
+  formatUsdRange,
+  formatRecordTime,
+  formatClockTime,
   formatExactTokens,
   formatTokens,
   formatPercent,

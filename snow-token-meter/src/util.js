@@ -84,10 +84,19 @@ export function formatUsd(value) {
   return `$${formatNumber(amount)}`;
 }
 
-// CNY 金额：固定两位小数，整数部分带千分位。
+// CNY 金额：小额自适应，避免「明明有花费却显示 ¥0.00」。
+// 分段与 formatUsd 对齐，保证同一行主 / 副币种不会一个显示 0、一个显示非 0；
+// 0.005 ~ 0.01 保持两位小数（==¥0.01），不为了精度把已经能看见的金额改写成四位。
 export function formatCny(value) {
   const amount = Number(value);
   if (!Number.isFinite(amount) || amount <= 0) return "¥0.00";
+  if (amount < 0.0001) return "<¥0.0001";
+  if (amount < 0.005) return `¥${amount.toFixed(4)}`;
+  if (amount < 1) {
+    const fixed = amount < 0.01 ? amount.toFixed(2) : amount.toFixed(3);
+    const [integer, fraction] = fixed.split(".");
+    return `¥${formatNumber(Number(integer))}.${fraction}`;
+  }
   const fixed = amount.toFixed(2);
   const [integer, fraction] = fixed.split(".");
   return `¥${formatNumber(Number(integer))}.${fraction}`;

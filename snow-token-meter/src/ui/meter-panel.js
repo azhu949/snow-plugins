@@ -2,43 +2,310 @@
 // 全部是纯展示组件：只接收 engine + state + t，不直接读取 snow 或 GM_*。
 import { h } from "preact";
 import { useEffect, useMemo, useRef, useState } from "preact/hooks";
-import { defaultPricingUrl } from "../constants.js";
-import { mappingValueOf } from "../match.js";
+import { PRICE_MULTIPLIER, defaultPricingUrl } from "../constants.js";
+import { mappingKey, mappingValueOf, matchModel } from "../match.js";
+import { priceRecordOf } from "../prices.js";
 import { Icon } from "./icons.js";
 import {
   formatAgo,
+  formatClockTime,
   formatCost,
   formatCostPair,
+  formatCostRange,
   formatExactTokens,
+  formatMoney,
   formatPercent,
   formatPerMillion,
   formatRatio,
+  formatRecordTime,
   formatTokens,
+  formatUsdRange,
+  formatUsdValue,
+  resolveCurrency,
   withFxRate,
 } from "./format.js";
 
 const MODEL_LIMIT = 50;
 const CATALOG_LIMIT = 50;
 const NOTICE_MS = 1800;
+const CALC_HOVER_DELAY = 110;
 const PERIOD_KEYS = ["today", "7d", "30d", "all"];
 const REFRESH_OPTIONS = [30, 60, 120, 300];
 const TTL_OPTIONS = [1, 6, 12, 24, 72, 168];
+const PRECISE_OPTIONS = ["auto", "always", "off"];
+const CACHE_TTL_OPTIONS = ["5m", "1h"];
+
+// 自定义价草稿的离开守卫：MappingView 挂载时注册，Panel 的返回 / 设置与脚本层的关闭 /
+// Esc / 外部点击统一经过这里询问。返回 false 表示已拦截（草稿未保存或正在保存），
+// 未注册时视为可直接离开。
+let leaveGuard = null;
+
+export function setLeaveGuard(guard) {
+  leaveGuard = typeof guard === "function" ? guard : null;
+}
+
+export function requestLeave(proceed) {
+  if (!leaveGuard) return true;
+  return leaveGuard(typeof proceed === "function" ? proceed : () => {}) !== false;
+}
 
 const STATUS_TONE = {
   exact: "ok",
   normalized: "ok",
   fuzzy: "warn",
+  guess: "warn",
   manual: "info",
   provider: "ok",
   canonical: "ok",
+  // 自定义价是用户声明的确定值：与手工映射同色调，且不共用猜测的 ≈ 后缀。
+  custom: "info",
   unmatched: "warn",
   ignored: "muted",
+};
+
+// 计价模式的徽标色调：精算是实测结果，聚合是下限估计。
+const MODE_TONE = { precise: "ok", aggregate: "muted" };
+
+const ASSUMPTION_KEYS = {
+  cacheWrite5m: "tm.cost.assume5m",
+  cacheWrite1hAssumed: "tm.cost.assume1h",
+  cacheWrite5mOnly: "tm.cost.assume5mOnly",
+};
+
+const UNESTIMATED_KEYS = {
+  serviceTier: "tm.cost.unestimatedTier",
+  imageTokens: "tm.cost.unestimatedImage",
+  reasoningSplit: "tm.cost.unestimatedReasoning",
 };
 
 function statusLabel(t, status) {
   const key = `tm.status.${status}`;
   const label = t(key);
   return label === key ? String(status || "") : label;
+}
+
+function modeLabel(t, mode) {
+  return t(mode === "precise" ? "tm.cost.mode.precise" : "tm.cost.mode.aggregate");
+}
+
+// 金额的语义（模式 / 区间 / 下限 / 假设 / 未估算维度 / 目录版本）统一进 title，界面不堆文字。
+function costTitle(cost, settings, t) {
+  if (!cost) return "";
+  const lines = [t("tm.cost.modeTitle", { mode: modeLabel(t, cost.mode) })];
+  const range = formatCostRange(cost.lowerUsd, cost.upperUsd, settings);
+  if (range) lines.push(t("tm.cost.range", { range }));
+  if (cost.isLowerBound) lines.push(t("tm.cost.lowerBoundHint"));
+  const snapshot = formatRecordTime(cost.recordsSnapshotAt);
+  if (cost.recordsStatus === "complete" && cost.recordsRows > 0) {
+    lines.push(
+      t("tm.cost.preciseRows", {
+        count: formatExactTokens(cost.recordsRows),
+        time: snapshot || "—",
+      }),
+    );
+  }
+  for (const key of cost.assumptions || []) {
+    if (ASSUMPTION_KEYS[key]) lines.push(t(ASSUMPTION_KEYS[key]));
+  }
+  for (const key of cost.unestimated || []) {
+    if (UNESTIMATED_KEYS[key]) lines.push(t(UNESTIMATED_KEYS[key]));
+  }
+  const pricedAt = formatClockTime(cost.pricedAt);
+  if (pricedAt) lines.push(t("tm.cost.pricedAt", { time: pricedAt }));
+  return lines.join("\n");
+}
+
+// 计算过程的数据形态：标签 / 算式 / 金额分开，自绘浮层才能按列对齐。
+// 聚合行的 parts 就是「tokens × 下限向量单价」一次算出；精算行逐条计价，
+// 只有全部请求同价时才给单价，否则只给 token 数与分项（分项是逐条小计之和）。
+export function modelCalcData(row, settings, t) {
+  if (!row) return null;
+  const precise = row.mode === "precise";
+  const data = {
+    mode: precise ? "precise" : "aggregate",
+    modeLabel: t(precise ? "tm.cost.mode.precise" : "tm.cost.mode.aggregate"),
+    entry:
+      row.entryName && row.entryName !== row.model
+        ? t("tm.models.calcEntry", { entry: row.entryName })
+        : "",
+    lines: [],
+    total: "",
+    notes: [],
+    empty: "",
+    tokensText: "",
+  };
+  const tokenParts = row.tokenParts || null;
+  if (!tokenParts) return data;
+  if (row.status === "ignored") {
+    data.empty = t("tm.models.calcIgnored");
+    return data;
+  }
+  const price = row.price || null;
+  const mixed = Boolean(row.priceMixed);
+  if (!price && !mixed) {
+    data.empty = t("tm.models.calcUnpriced");
+    data.tokensText = t("tm.models.calcTokens", {
+      input: formatExactTokens(tokenParts.input),
+      cacheRead: formatExactTokens(tokenParts.cacheRead),
+      cacheWrite: formatExactTokens(tokenParts.cacheWrite),
+      output: formatExactTokens(tokenParts.output),
+    });
+    return data;
+  }
+  const parts = row.parts || {};
+  const has1h = price ? price.cacheWrite1h !== null && price.cacheWrite1h !== undefined : false;
+  const writePrice = price && row.writeTtl === "1h" && has1h ? price.cacheWrite1h : price?.cacheWrite;
+  const push = (label, count, unitPrice, partUsd) => {
+    data.lines.push({
+      label,
+      formula: mixed
+        ? formatExactTokens(count)
+        : t("tm.models.calcFormula", {
+            tokens: formatExactTokens(count),
+            price: formatPerMillion(unitPrice),
+          }),
+      value: formatUsdValue(partUsd),
+      approx: precise && !mixed,
+    });
+  };
+  if (tokenParts.input > 0) {
+    push(t("tm.models.calcNonCached"), tokenParts.input, price?.prompt, parts.input);
+  }
+  if (tokenParts.cacheRead > 0) {
+    push(t("tm.price.cacheRead"), tokenParts.cacheRead, price?.cacheRead, parts.cacheRead);
+  }
+  if (tokenParts.cacheWrite > 0) {
+    push(t("tm.price.cacheWrite"), tokenParts.cacheWrite, writePrice, parts.cacheWrite);
+  }
+  if (tokenParts.output > 0) {
+    push(t("tm.price.output"), tokenParts.output, price?.completion, parts.output);
+  }
+  if ((parts.request || 0) > 0) {
+    data.lines.push({
+      label: t("tm.models.calcRequestLabel"),
+      formula: t("tm.models.calcRequestFormula", {
+        count: formatExactTokens(Math.max(0, (row.requests || 0) - (row.errorRequests || 0))),
+      }),
+      value: formatUsdValue(parts.request),
+      approx: false,
+    });
+  }
+  data.total = formatUsdValue(row.costUsd);
+  if (resolveCurrency(settings) !== "USD") {
+    data.notes.push(t("tm.models.calcDisplay", { value: formatMoney(row.costUsd, settings) }));
+  }
+  const range = formatUsdRange(row.costUsd, row.upperUsd);
+  if (range) data.notes.push(t("tm.models.calcRange", { range }));
+  if (row.tierAbove !== null && row.tierAbove !== undefined) {
+    data.notes.push(t("tm.cost.tierTitle", { above: formatExactTokens(row.tierAbove) }));
+  }
+  if (row.writeTtl === "1h") data.notes.push(t("tm.models.calc1h"));
+  if (mixed) data.notes.push(t("tm.models.calcMixedNote"));
+  return data;
+}
+
+const TIP_WIDTH = 340;
+const TIP_GAP = 6;
+const TIP_MARGIN = 8;
+const TIP_MIN_SPACE = 220;
+
+// 悬停位置：优先放行下方，下方空间不足时翻到上方（CSS 用 translateY(-100%) 贴住行顶），
+// 水平与行左对齐并按视口夹取。坐标是视口坐标（fixed），不会被浮层的滚动容器裁掉。
+export function calcTipAnchor(rect) {
+  const width = Math.min(TIP_WIDTH, window.innerWidth - TIP_MARGIN * 2);
+  const maxLeft = Math.max(TIP_MARGIN, window.innerWidth - width - TIP_MARGIN);
+  const left = Math.min(Math.max(rect.left, TIP_MARGIN), maxLeft);
+  const below = window.innerHeight - rect.bottom;
+  const above = rect.top;
+  const flip = below < TIP_MIN_SPACE && above > below;
+  return {
+    left: Math.round(left),
+    top: Math.round(flip ? rect.top - TIP_GAP : rect.bottom + TIP_GAP),
+    width: Math.round(width),
+    flip,
+  };
+}
+
+// 自绘计算过程浮层：固定定位、不接收指针事件，悬停行时出现，移出即消失。
+function CalcTip({ data, anchor, t }) {
+  return h(
+    "div",
+    {
+      class: `tm-calc-tip${anchor.flip ? " is-above" : ""}`,
+      role: "tooltip",
+      style: {
+        left: `${anchor.left}px`,
+        top: `${anchor.top}px`,
+        width: `${anchor.width}px`,
+      },
+    },
+    h(
+      "div",
+      { class: "tm-calc-head" },
+      h("span", { class: "tm-calc-heading" }, t("tm.models.calcHead")),
+      h("span", { class: `tm-pill is-${MODE_TONE[data.mode] || "muted"}` }, data.modeLabel),
+    ),
+    data.entry ? h("div", { class: "tm-calc-entry" }, data.entry) : null,
+    data.empty ? h("div", { class: "tm-calc-empty" }, data.empty) : null,
+    data.tokensText ? h("div", { class: "tm-calc-mono" }, data.tokensText) : null,
+    data.lines.length
+      ? h(
+          "div",
+          { class: "tm-calc-grid" },
+          data.lines.flatMap((line) => [
+            h("span", { class: "tm-calc-label", key: `${line.label}-l` }, line.label),
+            h("span", { class: "tm-calc-formula", key: `${line.label}-f` }, line.formula),
+            h(
+              "span",
+              { class: "tm-calc-value", key: `${line.label}-v` },
+              line.approx ? t("tm.value.approx", { value: line.value }) : line.value,
+            ),
+          ]),
+        )
+      : null,
+    data.total
+      ? h(
+          "div",
+          { class: "tm-calc-total" },
+          h("span", { class: "tm-calc-label" }, t("tm.models.calcTotalLabel")),
+          h("span", { class: "tm-calc-total-value" }, data.total),
+        )
+      : null,
+    data.notes.length
+      ? h(
+          "div",
+          { class: "tm-calc-notes" },
+          data.notes.map((note, index) => h("div", { class: "tm-calc-note", key: index }, note)),
+        )
+      : null,
+  );
+}
+
+// records 状态说明：只在「与聚合有关」的状态上出现，避免把正常精算也写成告警。
+// recordsRows 是「采集到的行数」：mismatch 时行已取到但与汇总 Token 不符，因此不再参与计价。
+function recordsNote(cost, t) {
+  if (!cost) return null;
+  const status = cost.recordsStatus;
+  let note = "";
+  if (status === "truncated") {
+    // 截断可能来自页数 / 行数上限、预算用尽或翻页失败：只说「取到多少行」，不假称具体原因。
+    note = t("tm.cost.truncated", { rows: formatExactTokens(cost.recordsRows || 0) });
+  } else if (status === "mismatch") {
+    note = t("tm.cost.mismatch", { rows: formatExactTokens(cost.recordsRows || 0) });
+  } else if (status === "partial-no-tier") {
+    note = t("tm.cost.partialNoTier");
+  } else if (status === "no-records") {
+    note = t("tm.cost.noRecords");
+  } else if (status === "off") {
+    note = t("tm.cost.recordsOff");
+  }
+  // 逐条数据里出现的模型多于 models 汇总（并发新增模型行）：提示但不降级计价。
+  const extra = Number(cost.recordsExtraModels) || 0;
+  if (extra > 0) {
+    const extraText = t("tm.cost.extraModels", { count: formatExactTokens(extra) });
+    note = note ? `${note} · ${extraText}` : extraText;
+  }
+  return note;
 }
 
 function periodLabel(t, key) {
@@ -88,12 +355,66 @@ function catalogEntries(state) {
   return Array.isArray(models) ? models : [];
 }
 
-function Money({ usd, settings, t }) {
+// 自定义价编辑区的四个 token 单价字段（USD / 1M token）：按次费、档位与 1 小时价只走导入。
+// entryField 是目录条目上的同义字段名（input / output → prompt / completion）。
+const PRICE_INPUTS = Object.freeze([
+  { field: "input", entryField: "prompt", labelKey: "tm.price.input" },
+  { field: "output", entryField: "completion", labelKey: "tm.price.output" },
+  { field: "cacheRead", entryField: "cacheRead", labelKey: "tm.price.cacheRead" },
+  { field: "cacheWrite", entryField: "cacheWrite", labelKey: "tm.price.cacheWrite" },
+]);
+
+// USD/token → USD/1M 的展示值（界面与存储同单位，这里只做换算并去掉浮点尾差）。
+function perMillionText(usdPerToken) {
+  const number = Number(usdPerToken);
+  if (usdPerToken === null || usdPerToken === undefined || !Number.isFinite(number)) return "";
+  return String(Math.round(number * 1e12) / 1e6);
+}
+
+// 输入草稿一律用字符串保存："" 表示继承（null），"0" 表示显式免费，两者在界面上必须可区分。
+function priceDraftOf(record) {
+  const text = (value) => (value === null || value === undefined ? "" : String(value));
+  return {
+    input: text(record?.input),
+    output: text(record?.output),
+    cacheRead: text(record?.cacheRead),
+    cacheWrite: text(record?.cacheWrite),
+    multiplier: record?.multiplier === undefined ? "1" : String(record.multiplier),
+    note: record?.note || "",
+  };
+}
+
+// 空串 = null（继承）；非数字或负数返回 NaN，由调用方提示「价格必须是大于等于 0 的数字」。
+function readPriceNumber(value) {
+  const text = String(value ?? "").trim();
+  if (!text) return null;
+  const number = Number(text);
+  return Number.isFinite(number) && number >= 0 ? number : Number.NaN;
+}
+
+// 倍率与四个价字段的语义不同：0 不是免费，越界必须在保存前拦截，而不是交给引擎静默夹取。
+// 空值按记录默认值 1 处理（与 priceMultiplierOf 一致）。
+function readMultiplierDraft(value) {
+  const text = String(value ?? "").trim();
+  if (!text) return { value: 1 };
+  const number = Number(text);
+  if (!Number.isFinite(number)) return { invalid: true };
+  if (number < PRICE_MULTIPLIER.min || number > PRICE_MULTIPLIER.max) {
+    return { outOfRange: true };
+  }
+  return { value: number };
+}
+
+function Money({ usd, settings, t, bound = false, title }) {
   const pair = formatCostPair(usd, settings);
   return h(
     "span",
-    { class: "tm-money" },
-    h("span", { class: "tm-money-main" }, pair.primary),
+    { class: "tm-money", title: title || undefined },
+    h(
+      "span",
+      { class: "tm-money-main" },
+      bound ? `${t("tm.cost.boundPrefix")}${pair.primary}` : pair.primary,
+    ),
     h("span", { class: "tm-money-alt" }, t("tm.value.approx", { value: pair.alt })),
   );
 }
@@ -229,7 +550,13 @@ function OverviewCard({ label, range, settings, t, kind }) {
       "div",
       { class: "tm-card-meta" },
       ready
-        ? h(Money, { usd: cost?.totalUsd || 0, settings, t })
+        ? h(Money, {
+            usd: cost?.totalUsd || 0,
+            settings,
+            t,
+            bound: Boolean(cost?.isLowerBound),
+            title: costTitle(cost, settings, t),
+          })
         : h("span", { class: "tm-money" }, t("tm.value.empty")),
       h(
         "span",
@@ -240,6 +567,14 @@ function OverviewCard({ label, range, settings, t, kind }) {
       ),
     ),
   );
+}
+
+// 计价口径说明：价格源与「金额是下限还是实测」分开写，避免把两件事混成一句。
+function costNoteKey(state) {
+  const source = state.settings?.pricingSource;
+  if (source === "modelsdev") return "tm.cost.noteModelsDev";
+  if (source === "litellm") return "tm.cost.noteLiteLLM";
+  return "tm.cost.note";
 }
 
 function Overview({ t, state }) {
@@ -261,11 +596,7 @@ function Overview({ t, state }) {
       t,
       kind: "total",
     }),
-    h(
-      "div",
-      { class: "tm-note" },
-      t(state.settings?.pricingSource === "modelsdev" ? "tm.cost.noteModelsDev" : "tm.cost.note"),
-    ),
+    h("div", { class: "tm-note" }, t(costNoteKey(state))),
   );
 }
 
@@ -295,6 +626,8 @@ function PeriodTabs({ t, state, engine }) {
 }
 
 function PeriodSection({ t, state, onOpenMapping }) {
+  const [calcTip, setCalcTip] = useState(null);
+  const calcTimer = useRef(0);
   const { key: periodKey, range, ready } = rangeOf(state);
   const summary = ready ? range.summary : null;
   const cost = ready ? range.cost : null;
@@ -313,6 +646,46 @@ function PeriodSection({ t, state, onOpenMapping }) {
   const rows = (cost?.byModel || []).slice().sort((left, right) => right.tokens - left.tokens);
   const shown = rows.slice(0, MODEL_LIMIT);
   const hidden = rows.length - shown.length;
+  const modeNote = ready ? recordsNote(cost, t) : "";
+
+  // 悬停计算过程：延迟一小段出现，避免快速划过时闪烁；滚动 / 缩放 / 切周期时收起。
+  function showCalc(row, element) {
+    if (calcTimer.current) clearTimeout(calcTimer.current);
+    calcTimer.current = setTimeout(() => {
+      calcTimer.current = 0;
+      setCalcTip({ row, anchor: calcTipAnchor(element.getBoundingClientRect()) });
+    }, CALC_HOVER_DELAY);
+  }
+
+  function hideCalc() {
+    if (calcTimer.current) clearTimeout(calcTimer.current);
+    calcTimer.current = 0;
+    setCalcTip(null);
+  }
+
+  useEffect(
+    () => () => {
+      if (calcTimer.current) clearTimeout(calcTimer.current);
+    },
+    [],
+  );
+
+  useEffect(() => {
+    if (!calcTip) return undefined;
+    const hide = () => setCalcTip(null);
+    window.addEventListener("scroll", hide, true);
+    window.addEventListener("resize", hide);
+    return () => {
+      window.removeEventListener("scroll", hide, true);
+      window.removeEventListener("resize", hide);
+    };
+  }, [calcTip]);
+
+  useEffect(() => {
+    setCalcTip(null);
+  }, [periodKey, cost]);
+
+  const tipData = calcTip ? modelCalcData(calcTip.row, settings, t) : null;
 
   return h(
     "section",
@@ -337,7 +710,15 @@ function PeriodSection({ t, state, onOpenMapping }) {
         h(
           "span",
           { class: "tm-stat-value" },
-          ready ? h(Money, { usd: cost?.totalUsd || 0, settings, t }) : t("tm.value.empty"),
+          ready
+            ? h(Money, {
+                usd: cost?.totalUsd || 0,
+                settings,
+                t,
+                bound: Boolean(cost?.isLowerBound),
+                title: costTitle(cost, settings, t),
+              })
+            : t("tm.value.empty"),
         ),
       ),
       h(
@@ -351,6 +732,23 @@ function PeriodSection({ t, state, onOpenMapping }) {
         ),
       ),
     ),
+    // 计价模式 + records 诊断：模式徽标给「这条金额是怎么来的」，说明只在回退时出现。
+    ready
+      ? h(
+          "div",
+          { class: "tm-mode" },
+          h(
+            "span",
+            {
+              class: `tm-pill is-${MODE_TONE[cost?.mode] || "muted"}`,
+              "data-tm-mode": cost?.mode || "",
+              title: costTitle(cost, settings, t),
+            },
+            modeLabel(t, cost?.mode),
+          ),
+          modeNote ? h("span", { class: "tm-mode-note" }, modeNote) : null,
+        )
+      : null,
     hitRate ? h("div", { class: "tm-cache" }, t("tm.period.cacheHit", { percent: hitRate })) : null,
     h(
       "div",
@@ -361,30 +759,51 @@ function PeriodSection({ t, state, onOpenMapping }) {
         : h(
             "div",
             { class: "tm-model-list" },
-            shown.map((row) =>
-              h(
+            shown.map((row) => {
+              return h(
                 "div",
-                { class: "tm-model", "data-tm-model": row.model, key: row.model },
-                h("span", { class: "tm-model-name", title: row.entryName || row.model }, row.model),
+                {
+                  class: "tm-model",
+                  "data-tm-model": row.model,
+                  key: row.model,
+                  // 悬停整行显示计算过程；子元素自己的 title 会盖住行事件，所以 pill/按钮单独收起。
+                  onMouseEnter: (event) => showCalc(row, event.currentTarget),
+                  onMouseLeave: hideCalc,
+                },
+                h("span", { class: "tm-model-name" }, row.model),
                 h("span", { class: "tm-model-tokens" }, formatTokens(row.tokens)),
-                h("span", { class: "tm-model-cost" }, formatCost(row.costUsd, settings)),
+                h(
+                  "span",
+                  { class: "tm-model-cost" },
+                  // 猜测匹配（-latest / 日期后缀 / 渠道前缀）按价计价但不计入覆盖率，金额后缀 ≈ 提示。
+                  row.guessed
+                    ? `${formatCost(row.costUsd, settings)}${t("tm.cost.guessMark")}`
+                    : formatCost(row.costUsd, settings),
+                ),
+                row.tierAbove === null || row.tierAbove === undefined
+                  ? null
+                  : h(
+                      "span",
+                      { class: "tm-pill is-info tm-tier" },
+                      t("tm.cost.tier"),
+                    ),
                 h(
                   "button",
                   {
                     type: "button",
                     class: `tm-pill is-${STATUS_TONE[row.status] || "muted"}`,
-                    title: t("tm.status.edit"),
                     "aria-label": t("tm.status.edit"),
                     onClick: () => onOpenMapping(row.model),
                     "data-tm-action": "map",
                   },
                   statusLabel(t, row.status),
                 ),
-              ),
-            ),
+              );
+            }),
           ),
       hidden > 0 ? h("div", { class: "tm-more" }, t("tm.models.more", { count: hidden })) : null,
     ),
+    tipData ? h(CalcTip, { data: tipData, anchor: calcTip.anchor, t }) : null,
   );
 }
 
@@ -395,6 +814,10 @@ function Footer({ t, state, refreshing, onRefresh }) {
   const coverageText = ready ? formatPercent(cost?.coverage || 0) : t("tm.value.empty");
   const unpricedText = ready ? formatTokens(cost?.unpricedTokens || 0) : t("tm.value.empty");
   const ignoredText = ready ? formatTokens(cost?.ignoredTokens || 0) : t("tm.value.empty");
+  const guessedText = ready ? formatTokens(cost?.guessedTokens || 0) : t("tm.value.empty");
+  const preciseCount = cost?.mode === "precise" ? cost?.recordsRows || 0 : 0;
+  // 自定义价只影响成本，不影响用量：单独统计一次，用户才知道金额是按自己填的价算的。
+  const customCount = cost?.customModels || 0;
   const catalogCount = catalogEntries(state).length;
   const busy = refreshing || Boolean(state.loading);
   return h(
@@ -404,9 +827,16 @@ function Footer({ t, state, refreshing, onRefresh }) {
       "div",
       { class: "tm-foot-stats" },
       h("span", { class: "tm-foot-stat" }, t("tm.footer.coverage", { percent: coverageText })),
+      // 未计价是告警型条目：只有确实存在未计价 token 时才染告警色，
+      // 为 0 或未就绪都降级成中性色，避免页脚常亮橙色与覆盖率告警互相矛盾。
+      // 用数值判断而不是比较格式化文本：formatTokens(0) 给出「0」，未就绪是「—」。
       h(
         "span",
-        { class: "tm-foot-stat is-warn" },
+        {
+          class: `tm-foot-stat ${
+            ready && Number(cost?.unpricedTokens) > 0 ? "is-warn" : "is-muted"
+          }`,
+        },
         t("tm.footer.unpriced", { tokens: unpricedText }),
       ),
       h(
@@ -414,6 +844,30 @@ function Footer({ t, state, refreshing, onRefresh }) {
         { class: "tm-foot-stat is-muted" },
         t("tm.footer.ignored", { tokens: ignoredText }),
       ),
+      // 猜测匹配单独统计：金额已计入，但不作为「已计价覆盖率」的分子。
+      // 用数值判断而不是比较格式化文本：guessedTokens 为 0 时 formatTokens 会给出「0」，
+      // 与空占位「—」不相等，会导致页脚恒显示橙色「猜测 0」。
+      ready && Number(cost?.guessedTokens) > 0
+        ? h(
+            "span",
+            { class: "tm-foot-stat is-warn" },
+            t("tm.footer.guessed", { tokens: guessedText }),
+          )
+        : null,
+      ready && preciseCount > 0
+        ? h(
+            "span",
+            { class: "tm-foot-stat is-muted" },
+            t("tm.footer.precise", { count: formatExactTokens(preciseCount) }),
+          )
+        : null,
+      ready && customCount > 0
+        ? h(
+            "span",
+            { class: "tm-foot-stat is-muted" },
+            t("tm.footer.custom", { count: formatExactTokens(customCount) }),
+          )
+        : null,
       h(
         "span",
         { class: "tm-foot-stat is-muted" },
@@ -454,14 +908,327 @@ function MappingView({ t, state, view, engine, onBack }) {
     return filtered.slice(0, CATALOG_LIMIT);
   }, [query, state.catalog?.models]);
 
+  // 映射按钮的入口只决定「草稿怎么办」：映射写入本身不读草稿，也不把草稿当副作用写进存储。
   function apply(target) {
-    engine.setMapping(model, target).catch(() => {});
-    onBack();
+    if (applying || savingRef.current || clearingRef.current) return;
+    // 确认条已经显示时不再接受新的映射点击：待执行动作只保留一个。
+    if (leaveRequest) return;
+    if (!priceDirty()) {
+      void runApply(target);
+      return;
+    }
+    // 草稿脏时登记待执行动作，复用离开确认条让用户显式选择；
+    // 不先调 savePrice，否则非法 / 全空草稿会让映射点击静默失效。
+    setLeaveRequest({ proceed: () => void runApply(target) });
+  }
+
+  // 真正写映射：不读价格草稿，也不以映射点击作为价格保存的副作用。
+  async function runApply(target) {
+    if (applying) return;
+    setApplying(true);
+    try {
+      let result = null;
+      try {
+        result = await engine.setMapping(model, target);
+      } catch {
+        result = null;
+      }
+      // saved=false 表示仅内存生效、重启后会回退，不能当作已保存直接离开。
+      if (!result || !result.saved) {
+        flashPrice(t("tm.settings.writeFailed"));
+        return;
+      }
+      onBack();
+    } finally {
+      setApplying(false);
+    }
+  }
+
+  // 自定义价草稿：字符串态与存储态分离，"" = 继承、0 = 显式免费，输入过程不会把 0 归一成空。
+  const priceKey = mappingKey(model);
+  const priceRecord = priceRecordOf(state.prices, model);
+  // 继承来源取「目录匹配结果」而不是当前生效条目：自定义价生效时 row.entryId 已是 custom:，
+  // 只有 matchModel 能回答「留空会继承哪一条目录价」。
+  const catalogMatch = useMemo(
+    () => matchModel(model, catalogEntries(state), state.mappings),
+    [model, state.catalog?.models, state.mappings],
+  );
+  const [draft, setDraft] = useState(() => priceDraftOf(priceRecord));
+  const [priceNotice, setPriceNotice] = useState("");
+  // 映射写入进行中：避免 await 期间重复点击造成并发写入。
+  const [applying, setApplying] = useState(false);
+  // 保存进行中：价格输入与按钮禁用，避免 await 期间的新输入被 priceVersion 触发的 effect 覆盖。
+  const [savingPrice, setSavingPrice] = useState(false);
+  const savingRef = useRef(false);
+  // 移除自定义价：第一次点击只进入待确认态，第二次才写存储；clearing 用于禁用按钮与离开守卫。
+  const [pendingClear, setPendingClear] = useState(false);
+  const [clearing, setClearing] = useState(false);
+  const clearingRef = useRef(false);
+  // 离开确认：守卫被拦截时记住调用方要执行的动作（返回 / 切设置 / 关闭浮层）。
+  const [leaveRequest, setLeaveRequest] = useState(null);
+  const leaveNoticeRef = useRef(null);
+  const noticeTimer = useRef(0);
+
+  // 挂载 effect 可能在用户首次点击之后才执行：首次执行只同步草稿，
+  // 之后价格身份变化（换模型 / 保存 / 外部改动）才重置待确认态。
+  const priceIdentityRef = useRef(null);
+  useEffect(() => {
+    const identity = `${priceKey}|${priceRecord?.updatedAt || 0}|${state.priceVersion}`;
+    if (priceIdentityRef.current !== null && priceIdentityRef.current !== identity) {
+      setPendingClear(false);
+    }
+    priceIdentityRef.current = identity;
+    // 模型切换、价表被外部改动（导入 / 清空 / 保存）时重置草稿。
+    setDraft(priceDraftOf(priceRecord));
+    // priceRecord 的身份随 state.prices 变化：用规范化键 + 更新时间 + 价格版本三个稳定值做依赖。
+  }, [priceKey, priceRecord?.updatedAt, state.priceVersion]);
+
+  useEffect(
+    () => () => {
+      if (noticeTimer.current) clearTimeout(noticeTimer.current);
+    },
+    [],
+  );
+
+  function flashPrice(message) {
+    setPriceNotice(message);
+    if (noticeTimer.current) clearTimeout(noticeTimer.current);
+    noticeTimer.current = setTimeout(() => {
+      noticeTimer.current = 0;
+      setPriceNotice("");
+    }, NOTICE_MS);
+  }
+
+  // 草稿是否与已保存记录不同：按保存时的归一化口径比较，避免 "1.00" 与 "1" 误判。
+  // 非法草稿一律视为 dirty，不能被 onBack 静默丢弃。
+  function priceDirty() {
+    const base = priceDraftOf(priceRecord);
+    for (const item of PRICE_INPUTS) {
+      const next = readPriceNumber(draft[item.field]);
+      if (Number.isNaN(next)) return true;
+      const prev = base[item.field] === "" ? null : Number(base[item.field]);
+      if (next !== prev) return true;
+    }
+    const nextMultiplier = readPriceNumber(draft.multiplier);
+    if (Number.isNaN(nextMultiplier)) return true;
+    const prevMultiplier = Number(base.multiplier);
+    const nextValue = nextMultiplier === null ? 1 : nextMultiplier;
+    const prevValue = Number.isFinite(prevMultiplier) ? prevMultiplier : 1;
+    if (nextValue !== prevValue) return true;
+    return draft.note.trim() !== base.note.trim();
+  }
+
+  // 守卫每次渲染都读最新草稿与保存状态：它由 Panel 与脚本层在导航 / 关闭前调用。
+  const leaveStateRef = useRef({ dirty: false, saving: false });
+  leaveStateRef.current = {
+    dirty: priceDirty(),
+    saving: savingRef.current || clearingRef.current,
+  };
+  const tRef = useRef(t);
+  tRef.current = t;
+
+  useEffect(() => {
+    setLeaveGuard((proceed) => {
+      if (savingRef.current || clearingRef.current || leaveStateRef.current.saving) {
+        flashPrice(tRef.current(clearingRef.current ? "tm.price.clearing" : "tm.price.saving"));
+        return false;
+      }
+      if (!leaveStateRef.current.dirty) return true;
+      // 已有待执行动作时不再覆盖：确认条已在，Esc / 返回不能换掉用户刚点的映射目标。
+      setLeaveRequest((pending) => pending || { proceed });
+      return false;
+    });
+    return () => setLeaveGuard(null);
+  }, []);
+
+  useEffect(() => {
+    if (!leaveRequest) return;
+    // 用户可能停在价格区底部：把确认条滚进视野，避免以为点击没生效。
+    leaveNoticeRef.current?.scrollIntoView?.({ block: "nearest" });
+  }, [leaveRequest]);
+
+  function inheritedValue(field) {
+    const entry = catalogMatch?.entry;
+    return entry ? perMillionText(entry[field]) : "";
+  }
+
+  // 一键把当前目录条目价填进草稿：给「在目录价基础上打折」的用户一个起点。
+  function fillFromCatalog() {
+    const entry = catalogMatch?.entry;
+    if (!entry) {
+      flashPrice(t("tm.price.fillNone"));
+      return;
+    }
+    setDraft((current) => ({
+      ...current,
+      input: perMillionText(entry.prompt),
+      output: perMillionText(entry.completion),
+      cacheRead: perMillionText(entry.cacheRead),
+      cacheWrite: perMillionText(entry.cacheWrite),
+    }));
+  }
+
+  // 返回 true 表示草稿已写入（含清空记录），调用方可继续后续动作。
+  async function savePrice() {
+    // 保存期间禁止重入：连点保存、移除进行中或保存中按 Esc 不能重复写存储。
+    if (savingRef.current || clearingRef.current) return false;
+    savingRef.current = true;
+    setSavingPrice(true);
+    try {
+      const patch = { note: draft.note.trim() };
+      for (const item of PRICE_INPUTS) {
+        const parsed = readPriceNumber(draft[item.field]);
+        if (Number.isNaN(parsed)) {
+          flashPrice(t("tm.price.invalid"));
+          return false;
+        }
+        patch[item.field] = parsed;
+      }
+      // 四项全空在引擎侧等价于删除整条记录（备注与倍率一并丢失）：保存按钮不承担删除语义，
+      // 恢复目录价必须走「移除自定义价」的显式入口。
+      if (PRICE_INPUTS.every((item) => patch[item.field] === null)) {
+        flashPrice(t(priceRecord ? "tm.price.emptyRemove" : "tm.price.emptyNew"));
+        return false;
+      }
+      // 倍率留空按 1 处理（与记录默认值一致）；越界在保存前拦截，不能交给引擎静默夹取。
+      const multiplier = readMultiplierDraft(draft.multiplier);
+      if (multiplier.invalid) {
+        flashPrice(t("tm.price.invalid"));
+        return false;
+      }
+      if (multiplier.outOfRange) {
+        flashPrice(
+          t("tm.price.multiplierRange", {
+            min: PRICE_MULTIPLIER.min,
+            max: PRICE_MULTIPLIER.max,
+          }),
+        );
+        return false;
+      }
+      patch.multiplier = multiplier.value;
+      let result = null;
+      try {
+        result = await engine.setCustomPrice(model, patch);
+      } catch {
+        result = null;
+      }
+      if (!result || result.invalid) {
+        flashPrice(t("tm.price.invalid"));
+        return false;
+      }
+      // 全空保存等价于删除该条：提示要说「已恢复目录价」，而不是「已保存」。
+      if (!result.saved) {
+        flashPrice(t("tm.settings.writeFailed"));
+        return false;
+      }
+      flashPrice(result.cleared ? t("tm.price.cleared") : t("tm.price.saved"));
+      return true;
+    } finally {
+      savingRef.current = false;
+      setSavingPrice(false);
+    }
+  }
+
+  // 移除自定义价：两击确认 + 进行中禁用 + 草稿保护。
+  // 第一击只进入待确认态（不写存储），第二击才真正删除；
+  // 草稿与已保存记录不同时拒绝，避免 priceVersion 重置把未保存输入一并丢掉。
+  async function clearPrice() {
+    if (savingRef.current || clearingRef.current) return;
+    if (priceDirty()) {
+      flashPrice(t("tm.price.clearDirty"));
+      return;
+    }
+    if (!pendingClear) {
+      setPendingClear(true);
+      return;
+    }
+    setPendingClear(false);
+    clearingRef.current = true;
+    setClearing(true);
+    try {
+      let result = null;
+      try {
+        result = await engine.clearCustomPrice(model);
+      } catch {
+        result = null;
+      }
+      flashPrice(result && result.saved ? t("tm.price.cleared") : t("tm.settings.writeFailed"));
+    } finally {
+      clearingRef.current = false;
+      setClearing(false);
+    }
+  }
+
+  // 离开确认的两个分支：保存失败或草稿非法时停在当前视图，提示由 savePrice 给出。
+  async function leaveWithSave() {
+    const request = leaveRequest;
+    if (!request || savingRef.current) return;
+    // 草稿已被改回与存储一致时不必重复写一次存储，直接执行待执行动作。
+    if (priceDirty() && !(await savePrice())) return;
+    setLeaveRequest(null);
+    request.proceed();
+  }
+
+  function leaveWithDiscard() {
+    const request = leaveRequest;
+    if (!request || savingRef.current) return;
+    setLeaveRequest(null);
+    setDraft(priceDraftOf(priceRecord));
+    request.proceed();
   }
 
   return h(
     "section",
     { class: "tm-mapping" },
+    leaveRequest
+      ? h(
+          "div",
+          {
+            class: "tm-price-hint is-warn",
+            role: "alert",
+            ref: leaveNoticeRef,
+            "data-tm-leave": "confirm",
+          },
+          h("div", null, t("tm.price.leavePrompt")),
+          h(
+            "div",
+            { class: "tm-price-actions" },
+            h(
+              "button",
+              {
+                type: "button",
+                class: "tm-btn tm-btn-primary",
+                "data-tm-action": "leave-save",
+                disabled: savingPrice,
+                onClick: leaveWithSave,
+              },
+              t("tm.price.leaveSave"),
+            ),
+            h(
+              "button",
+              {
+                type: "button",
+                class: "tm-btn is-danger",
+                "data-tm-action": "leave-discard",
+                disabled: savingPrice,
+                onClick: leaveWithDiscard,
+              },
+              t("tm.price.leaveDiscard"),
+            ),
+            h(
+              "button",
+              {
+                type: "button",
+                class: "tm-btn",
+                "data-tm-action": "leave-cancel",
+                disabled: savingPrice,
+                onClick: () => setLeaveRequest(null),
+              },
+              t("tm.price.leaveStay"),
+            ),
+          ),
+        )
+      : null,
     h(
       "div",
       { class: "tm-map-head" },
@@ -491,6 +1258,7 @@ function MappingView({ t, state, view, engine, onBack }) {
               {
                 key: value,
                 type: "button",
+                disabled: applying || savingPrice || Boolean(leaveRequest),
                 class: "tm-quick-btn",
                 "data-tm-action": "candidate",
                 "data-tm-entry": value,
@@ -514,6 +1282,7 @@ function MappingView({ t, state, view, engine, onBack }) {
           "button",
           {
             type: "button",
+            disabled: applying || savingPrice || Boolean(leaveRequest),
             class: "tm-btn",
             "data-tm-action": "ignore",
             onClick: () => apply("__ignore__"),
@@ -525,6 +1294,7 @@ function MappingView({ t, state, view, engine, onBack }) {
           "button",
           {
             type: "button",
+            disabled: applying || savingPrice || Boolean(leaveRequest),
             class: "tm-btn",
             "data-tm-action": "auto",
             onClick: () => apply(null),
@@ -533,6 +1303,184 @@ function MappingView({ t, state, view, engine, onBack }) {
           h("span", null, t("tm.mapping.auto")),
         ),
       ),
+    ),
+    h(
+      "div",
+      { class: "tm-price", "data-tm-price-block": "1" },
+      h(
+        "div",
+        { class: "tm-price-head" },
+        h("div", { class: "tm-section-title" }, t("tm.price.title")),
+        h(
+          "span",
+          { class: `tm-pill is-${STATUS_TONE[row?.status] || "muted"}` },
+          statusLabel(t, row?.status || "unmatched"),
+        ),
+      ),
+      h(
+        "div",
+        { class: "tm-price-source" },
+        t("tm.price.source", { source: statusLabel(t, row?.status || "unmatched") }),
+      ),
+      h(
+        "div",
+        { class: "tm-price-grid" },
+        PRICE_INPUTS.map((item) =>
+          h(
+            "label",
+            { class: "tm-price-field", key: item.field },
+            h("span", { class: "tm-field-label" }, t(item.labelKey)),
+            h("input", {
+              // type=number 遇到 1.2.3 这类坏输入时 value 会变空，草稿被当成「继承」；
+              // 改用 text 保留原文，交给 readPriceNumber 判定并提示 tm.price.invalid。
+              type: "text",
+              inputMode: "decimal",
+              autoComplete: "off",
+              class: "tm-input",
+              "data-tm-price": item.field,
+              disabled: savingPrice,
+              // placeholder 就是「留空会继承到的目录价」，空值与 0 因此在界面上可区分。
+              placeholder: inheritedValue(item.entryField) || t("tm.value.empty"),
+              value: draft[item.field],
+              // 事件对象只在派发期间有效：先取值再更新，函数式更新里不能读 event.currentTarget。
+              onInput: (event) => {
+                const value = event.currentTarget.value;
+                setDraft((current) => ({ ...current, [item.field]: value }));
+              },
+            }),
+          ),
+        ),
+      ),
+      h(
+        "div",
+        { class: "tm-price-grid" },
+        h(
+          "label",
+          { class: "tm-price-field" },
+          h("span", { class: "tm-field-label" }, t("tm.price.multiplier")),
+          h("input", {
+            // 与四个价字段一致：text 保留原文，坏输入走 tm.price.invalid，而不是静默按 1 处理。
+            type: "text",
+            inputMode: "decimal",
+            autoComplete: "off",
+            class: "tm-input",
+            "data-tm-price": "multiplier",
+            disabled: savingPrice,
+            value: draft.multiplier,
+            onInput: (event) => {
+              const value = event.currentTarget.value;
+              setDraft((current) => ({ ...current, multiplier: value }));
+            },
+          }),
+          h(
+            "span",
+            { class: "tm-field-hint" },
+            t("tm.price.multiplierHint", {
+              min: PRICE_MULTIPLIER.min,
+              max: PRICE_MULTIPLIER.max,
+            }),
+          ),
+        ),
+        h(
+          "label",
+          { class: "tm-price-field is-wide" },
+          h("span", { class: "tm-field-label" }, t("tm.price.note")),
+          h("input", {
+            type: "text",
+            class: "tm-input",
+            "data-tm-price": "note",
+            disabled: savingPrice,
+            maxLength: 200,
+            value: draft.note,
+            onInput: (event) => {
+              const value = event.currentTarget.value;
+              setDraft((current) => ({ ...current, note: value }));
+            },
+          }),
+        ),
+      ),
+      h(
+        "div",
+        { class: "tm-price-actions" },
+        h(
+          "button",
+          {
+            type: "button",
+            class: "tm-btn tm-btn-primary",
+            "data-tm-action": "save-price",
+            disabled: savingPrice || clearing,
+            onClick: savePrice,
+          },
+          h(Icon, { name: "Check", size: 12 }),
+          h("span", null, t("tm.price.save")),
+        ),
+        h(
+          "button",
+          {
+            type: "button",
+            class: "tm-btn",
+            "data-tm-action": "fill-price",
+            disabled: savingPrice || clearing,
+            onClick: fillFromCatalog,
+          },
+          h(Icon, { name: "ArrowDownToLine", size: 12 }),
+          h("span", null, t("tm.price.fillCatalog")),
+        ),
+        priceRecord
+          ? h(
+              "button",
+              {
+                type: "button",
+                class: `tm-btn is-danger${pendingClear ? " is-armed" : ""}`,
+                "data-tm-action": "clear-price",
+                "aria-pressed": pendingClear ? "true" : "false",
+                disabled: savingPrice || clearing,
+                onClick: clearPrice,
+              },
+              h(Icon, { name: "X", size: 12 }),
+              h("span", null, t(pendingClear ? "tm.price.clearArmed" : "tm.price.clear")),
+            )
+          : null,
+        pendingClear
+          ? h(
+              "button",
+              {
+                type: "button",
+                class: "tm-btn",
+                "data-tm-action": "clear-price-cancel",
+                disabled: clearing,
+                onClick: () => setPendingClear(false),
+              },
+              t("tm.settings.cancelConfirm"),
+            )
+          : null,
+      ),
+      pendingClear
+        ? h(
+            "div",
+            {
+              class: "tm-price-hint is-warn",
+              role: "alert",
+              "data-tm-clear": "confirm",
+            },
+            t("tm.price.clearConfirm"),
+          )
+        : null,
+      h("div", { class: "tm-price-hint" }, t("tm.price.hint")),
+      h("div", { class: "tm-price-hint" }, t("tm.price.tiersHint")),
+      catalogMatch?.entry
+        ? h(
+            "div",
+            { class: "tm-price-hint" },
+            t("tm.price.inheritFrom", {
+              entry: catalogMatch.entry.name || catalogMatch.entry.id || "",
+            }),
+          )
+        : h("div", { class: "tm-price-hint" }, t("tm.price.inheritNone")),
+      row?.status === "ignored"
+        ? h("div", { class: "tm-price-hint is-warn" }, t("tm.price.ignoredHint"))
+        : null,
+      priceNotice ? h("div", { class: "tm-price-notice", role: "status" }, priceNotice) : null,
     ),
     h(
       "div",
@@ -566,6 +1514,7 @@ function MappingView({ t, state, view, engine, onBack }) {
               {
                 key: value,
                 type: "button",
+                disabled: applying || savingPrice || Boolean(leaveRequest),
                 class: `tm-entry${active ? " is-active" : ""}`,
                 "data-tm-entry": value,
                 onClick: () => apply(value),
@@ -619,6 +1568,7 @@ function SettingsView({
   state,
   engine,
   onClearCatalog,
+  onClearPrices,
   onResetMappings,
   onResetSettings,
   onResetFloatPosition,
@@ -705,12 +1655,17 @@ function SettingsView({
   function dangerLabel(name) {
     if (name === "clear-catalog") return t("tm.settings.clearCatalog");
     if (name === "reset-settings") return t("tm.settings.resetSettings");
+    if (name === "clear-prices") return t("tm.settings.clearPrices");
     return t("tm.settings.resetMappings");
   }
 
   async function clearCatalog() {
     await onClearCatalog();
     return true;
+  }
+
+  async function clearPrices() {
+    return onClearPrices();
   }
 
   async function resetMappings() {
@@ -853,6 +1808,36 @@ function SettingsView({
             : t("tm.settings.fxRateHint"),
         ),
       ),
+      // 计价方式会改变金额语义：精算是逐条请求，聚合是下限估计，hint 必须说清而不是只说「更准」。
+      h(SelectField, {
+        name: "precise",
+        label: t("tm.settings.precise"),
+        value: settings.preciseRequests,
+        t,
+        hint: t("tm.settings.preciseHint"),
+        options: PRECISE_OPTIONS.map((value) => ({
+          value,
+          label:
+            value === "always"
+              ? t("tm.settings.preciseAlways")
+              : value === "off"
+                ? t("tm.settings.preciseOff")
+                : t("tm.settings.preciseAuto"),
+        })),
+        onChange: (value) => apply({ preciseRequests: value }),
+      }),
+      h(SelectField, {
+        name: "cache-ttl",
+        label: t("tm.settings.cacheTtl"),
+        value: settings.cacheWriteTtl,
+        t,
+        hint: t("tm.settings.cacheTtlHint"),
+        options: CACHE_TTL_OPTIONS.map((value) => ({
+          value,
+          label: value === "1h" ? t("tm.settings.cacheTtl1h") : t("tm.settings.cacheTtl5m"),
+        })),
+        onChange: (value) => apply({ cacheWriteTtl: value }),
+      }),
     ),
     h(
       "label",
@@ -953,7 +1938,7 @@ function SettingsView({
             "aria-pressed": pendingDanger === "clear-catalog" ? "true" : "false",
             onClick: () => runDanger("clear-catalog", clearCatalog, t("tm.settings.clearCatalogDone")),
           },
-          h(Icon, { name: "ArrowDownToLine", size: 13 }),
+          h(Icon, { name: "Eraser", size: 13 }),
           h("span", null, t("tm.settings.clearCatalog")),
         ),
         h(
@@ -981,6 +1966,19 @@ function SettingsView({
           h(Icon, { name: "X", size: 13 }),
           h("span", null, t("tm.settings.resetMappings")),
         ),
+        // 自定义价单独一个危险操作：与「重置全部映射」分开确认，避免误清手抄的价格。
+        h(
+          "button",
+          {
+            type: "button",
+            class: `tm-btn is-danger${pendingDanger === "clear-prices" ? " is-armed" : ""}`,
+            "data-tm-action": "clear-prices",
+            "aria-pressed": pendingDanger === "clear-prices" ? "true" : "false",
+            onClick: () => runDanger("clear-prices", clearPrices, t("tm.settings.clearPricesDone")),
+          },
+          h(Icon, { name: "Trash2", size: 13 }),
+          h("span", null, t("tm.settings.clearPrices")),
+        ),
       ),
       pendingDanger
         ? h(
@@ -989,7 +1987,12 @@ function SettingsView({
             h("span", null, t("tm.settings.confirmDanger", { action: dangerLabel(pendingDanger) })),
             h(
               "button",
-              { type: "button", class: "tm-btn", onClick: () => setPendingDanger("") },
+              {
+                type: "button",
+                class: "tm-btn",
+                "data-tm-action": "cancel-confirm",
+                onClick: () => setPendingDanger(""),
+              },
               t("tm.settings.cancelConfirm"),
             ),
           )
@@ -1026,6 +2029,7 @@ function SettingsView({
             options: [
               { value: "openrouter", label: t("tm.settings.pricingOpenrouter") },
               { value: "modelsdev", label: t("tm.settings.pricingModelsDev") },
+              { value: "litellm", label: t("tm.settings.pricingLiteLLM") },
             ],
             onChange: (value) => {
               // 换源同时换回该源的默认接口；自定义地址可在下方输入框覆盖。
@@ -1092,6 +2096,7 @@ export default function MeterPanel({
   onClose,
   onTogglePin,
   onClearCatalog,
+  onClearPrices,
   onResetMappings,
   onResetSettings,
   onResetFloatPosition,
@@ -1108,6 +2113,12 @@ export default function MeterPanel({
 
   function openMapping(model) {
     onView({ name: "mapping", model, from: "main" });
+  }
+
+  // 视图切换统一走草稿守卫：Header 的返回 / 设置与脚本层的关闭共用同一套拦截。
+  function leaveTo(next) {
+    if (!requestLeave(() => onView(next))) return;
+    onView(next);
   }
 
   async function refreshAll() {
@@ -1165,6 +2176,7 @@ export default function MeterPanel({
       state,
       engine,
       onClearCatalog,
+      onClearPrices,
       onResetMappings,
       onResetSettings,
       onResetFloatPosition,
@@ -1194,9 +2206,9 @@ export default function MeterPanel({
       t,
       state,
       view,
-      onBack: () => onView({ name: "main" }),
+      onBack: () => leaveTo({ name: "main" }),
       onTogglePin,
-      onOpenSettings: () => onView({ name: "settings" }),
+      onOpenSettings: () => leaveTo({ name: "settings" }),
       onClose,
     }),
     h(

@@ -127,13 +127,14 @@ test("createUsageSource 透传本地时间参数并按需省略 profileName", as
     profileName: "",
   });
   assert.deepEqual(calls[0].domains, ["usage"]);
+  // 第 1 页（免费）显式声明 100/0：页宽不随宿主默认值漂移。
   assert.deepEqual(calls[0].options, {
-    params: { since: "2026-10-30 00:00:00", until: "2026-10-30 23:59:59" },
+    params: { since: "2026-10-30 00:00:00", until: "2026-10-30 23:59:59", limit: 100, offset: 0 },
   });
   assert.equal(result.summary.totalTokens, 10);
 
   await source.fetchUsage({ profileName: "main" });
-  assert.deepEqual(calls[1].options, { params: { profileName: "main" } });
+  assert.deepEqual(calls[1].options, { params: { profileName: "main", limit: 100, offset: 0 } });
 });
 
 test("createUsageSource 在 denied 时抛出 UsageError", async () => {

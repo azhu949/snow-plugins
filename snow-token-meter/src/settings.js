@@ -1,5 +1,6 @@
 // 设置：默认值、归一化（非法值回退）与映射表清理。
 import {
+  CACHE_WRITE_TTLS,
   CATALOG_TTL_HOURS,
   DEFAULT_SETTINGS,
   defaultPricingUrl,
@@ -7,9 +8,11 @@ import {
   IGNORE_MAPPING,
   OPENROUTER_MODELS_URL,
   PERIODS,
+  PRECISE_MODES,
   PRICING_SOURCES,
   REFRESH_SECONDS,
 } from "./constants.js";
+import { normalizePrices } from "./prices.js";
 import { clamp } from "./util.js";
 
 const CURRENCIES = Object.freeze(["USD", "CNY"]);
@@ -32,7 +35,8 @@ function booleanOr(value, fallback) {
   return fallback;
 }
 
-// snow.fetch 会沿用应用会话 Cookie：只接受 https 公网地址，避免把凭据请求发往本机或内网。
+// snow.fetch 会沿用应用会话 Cookie：只接受 https 域名地址，IP 字面量与内网主机名一律拒绝，
+// 避免把凭据请求发往本机、内网或任意裸地址。域名解析到内网不在静态校验范围内。
 const BLOCKED_HOST_SUFFIXES = Object.freeze([
   ".localhost",
   ".local",
@@ -42,18 +46,9 @@ const BLOCKED_HOST_SUFFIXES = Object.freeze([
   ".home.arpa",
 ]);
 
-function isPrivateIpv4(host) {
-  const match = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
-  if (!match) return false;
-  const first = Number(match[1]);
-  const second = Number(match[2]);
-  if (first === 0 || first === 10 || first === 127) return true;
-  if (first === 100 && second >= 64 && second <= 127) return true;
-  if (first === 169 && second === 254) return true;
-  if (first === 172 && second >= 16 && second <= 31) return true;
-  if (first === 192 && second === 168) return true;
-  return first >= 224;
-}
+// IPv4 字面量：WHATWG URL 已把十六进制 / 十进制整数 / 缺段简写 / 尾点等等价写法归一成点分四段，
+// 因此一条正则即可完备覆盖，不需要逐一枚举私网段。
+const IPV4_LITERAL = /^\d{1,3}(?:\.\d{1,3}){3}$/;
 
 function isBlockedHost(hostname) {
   const host = String(hostname || "")
@@ -63,11 +58,11 @@ function isBlockedHost(hostname) {
   if (host === "localhost" || BLOCKED_HOST_SUFFIXES.some((suffix) => host.endsWith(suffix))) {
     return true;
   }
-  // IPv6 字面量在 URL 里带方括号：官方目录源不使用 IP 字面量，这里直接拒绝，避免逐一判定私网前缀。
+  // IPv6 字面量在 URL 里带方括号；与 IPv4 一样直接拒绝，官方三个目录源都只用域名。
   if (host.includes(":")) return true;
   // 单标签主机（如 intranet）按内网搜索域处理。
   if (!host.includes(".")) return true;
-  return isPrivateIpv4(host);
+  return IPV4_LITERAL.test(host);
 }
 
 function normalizeUrl(value, fallback) {
@@ -136,6 +131,15 @@ export function normalizeSettings(raw) {
         ? source.profileName.trim().slice(0, MAX_MODEL_NAME)
         : DEFAULT_SETTINGS.profileName,
     autoRefresh: booleanOr(source.autoRefresh, DEFAULT_SETTINGS.autoRefresh),
+    // 旧设置没有这三个键时一律落到默认值：auto 不放大小目录的翻页成本，5m 与现状金额一致。
+    preciseRequests: PRECISE_MODES.includes(source.preciseRequests)
+      ? source.preciseRequests
+      : DEFAULT_SETTINGS.preciseRequests,
+    cacheWriteTtl: CACHE_WRITE_TTLS.includes(source.cacheWriteTtl)
+      ? source.cacheWriteTtl
+      : DEFAULT_SETTINGS.cacheWriteTtl,
+    // 补全源只接受已知价格源或空串：非法值按关闭处理，绝不悄悄启用混价。
+    fillSource: PRICING_SOURCES.includes(source.fillSource) ? source.fillSource : "",
   };
 }
 
@@ -155,6 +159,12 @@ export function normalizeMappings(raw) {
     result[name] = target;
   }
   return result;
+}
+
+// 自定义价归一化：唯一实现在 prices.js（键小写、去非法项、限长），
+// 这里只提供设置侧的入口，避免两处校验规则漂移。
+export function normalizeCustomPrices(raw) {
+  return normalizePrices(raw);
 }
 
 export function resolveCatalogTtlMs(settings) {

@@ -8,6 +8,7 @@
    ========================================================================== */
 
 .tm-badge-host,
+.tm-badge-tip,
 .tm-panel-host {
   --tm-text: var(--text-primary, #1f2328);
   --tm-text-2: var(--text-secondary, rgba(104, 112, 124, 0.96));
@@ -37,6 +38,9 @@
 .tm-badge-host *,
 .tm-badge-host *::before,
 .tm-badge-host *::after,
+.tm-badge-tip *,
+.tm-badge-tip *::before,
+.tm-badge-tip *::after,
 .tm-panel-host *,
 .tm-panel-host *::before,
 .tm-panel-host *::after {
@@ -53,6 +57,7 @@
 }
 
 .tm-badge {
+  position: relative;
   display: inline-flex;
   align-items: center;
   gap: 5px;
@@ -66,15 +71,24 @@
   font-size: 11.5px;
   line-height: 1;
   cursor: pointer;
+  transform: translateY(0);
   transition:
     background-color 0.15s ease,
     border-color 0.15s ease,
-    color 0.15s ease;
+    color 0.15s ease,
+    box-shadow 0.2s ease,
+    transform 0.2s cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 .tm-badge:hover {
   background: var(--tm-hover);
   color: var(--tm-text);
+  transform: translateY(-1px);
+}
+
+/* 按下时回收一点：胶囊的「软」来自位移差，而不是放大。 */
+.tm-badge:active {
+  transform: translateY(0) scale(0.985);
 }
 
 .tm-badge:focus-visible {
@@ -93,17 +107,76 @@
   display: inline-flex;
   align-items: center;
   color: var(--tm-accent);
+  transition: transform 0.32s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/* 展开时图标转一下：胶囊「醒过来」，收起后自然回正。 */
+.tm-badge-host.is-open .tm-badge-icon {
+  transform: rotate(-14deg) scale(0.92);
 }
 
 .tm-badge-tokens {
   font-weight: 650;
   font-variant-numeric: tabular-nums;
   color: var(--tm-text);
+  transition: color 0.32s ease;
 }
 
 .tm-badge-cost {
   font-variant-numeric: tabular-nums;
   color: var(--tm-text-3);
+  transition: color 0.32s ease;
+}
+
+/* 数值变化：新值从下方弹入，主数字短暂染上强调色。只动 transform 与颜色，
+   不改 DOM 结构，读 textContent 的地方始终只看到单一新值。 */
+.tm-badge-tokens.is-bump,
+.tm-badge-cost.is-bump {
+  animation: tm-value-bump 0.48s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.tm-badge-tokens.is-bump {
+  color: var(--tm-accent);
+}
+
+/* 扫描光：加载与流式期间的活性提示，从胶囊内部扫过，不改变尺寸与命中区域。 */
+.tm-badge-sheen {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  overflow: hidden;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.2s ease;
+}
+
+.tm-badge-sheen::after {
+  content: "";
+  position: absolute;
+  top: -20%;
+  bottom: -20%;
+  left: 0;
+  width: 42%;
+  background: linear-gradient(
+    100deg,
+    transparent,
+    color-mix(in srgb, var(--tm-accent) 34%, transparent),
+    transparent
+  );
+  transform: translateX(-140%) skewX(-14deg);
+}
+
+.tm-badge-host.is-loading .tm-badge-sheen,
+.tm-badge-host.is-streaming .tm-badge-sheen {
+  opacity: 1;
+}
+
+.tm-badge-host.is-loading .tm-badge-sheen::after {
+  animation: tm-sheen 1.5s linear infinite;
+}
+
+.tm-badge-host.is-streaming .tm-badge-sheen::after {
+  animation: tm-sheen 1.9s cubic-bezier(0.35, 0, 0.3, 1) infinite;
 }
 
 .tm-badge-dot {
@@ -121,6 +194,7 @@
 
 .tm-badge-host.is-warn .tm-badge-dot {
   opacity: 1;
+  animation: tm-dot-breathe 2.2s ease-in-out infinite;
 }
 
 .tm-badge-host.is-loading .tm-badge {
@@ -131,8 +205,25 @@
   animation: tm-pulse 1.4s ease-in-out infinite;
 }
 
+/* 流式进行中：外圈光环向外呼吸，胶囊有了「在工作」的存在感。 */
+.tm-badge-host.is-streaming::after {
+  content: "";
+  position: absolute;
+  inset: -3px;
+  border-radius: var(--tm-r-pill);
+  border: 1px solid color-mix(in srgb, var(--tm-accent) 46%, transparent);
+  opacity: 0;
+  pointer-events: none;
+  animation: tm-halo 1.9s ease-out infinite;
+}
+
 .tm-badge-host.is-dragging {
   cursor: grabbing;
+}
+
+/* 拖动时不要再上浮：位置跟手比悬停反馈重要。 */
+.tm-badge-host.is-dragging .tm-badge {
+  transform: none;
 }
 
 /* 悬浮形态：脱离顶栏插槽的文档流，默认停在窗口顶部中间（与顶栏同一行）。 */
@@ -144,13 +235,24 @@
   z-index: 9998;
 }
 
+/* 悬浮形态是常驻元素：玻璃底 + 双层投影，放在任何壁纸上都不像一块贴纸。 */
 .tm-badge-host.is-float .tm-badge {
   height: 30px;
   padding: 0 12px;
-  background: var(--tm-surface);
+  background: color-mix(in srgb, var(--tm-surface) 92%, transparent);
   border-color: var(--tm-line);
-  box-shadow: 0 6px 18px color-mix(in srgb, var(--tm-text) 16%, transparent);
+  box-shadow:
+    0 1px 2px color-mix(in srgb, var(--tm-text) 8%, transparent),
+    0 8px 22px color-mix(in srgb, var(--tm-text) 14%, transparent);
+  backdrop-filter: blur(10px) saturate(1.12);
   cursor: grab;
+}
+
+.tm-badge-host.is-float .tm-badge:hover {
+  background: color-mix(in srgb, var(--tm-surface) 76%, var(--tm-hover));
+  box-shadow:
+    0 1px 2px color-mix(in srgb, var(--tm-text) 10%, transparent),
+    0 12px 30px color-mix(in srgb, var(--tm-text) 18%, transparent);
 }
 
 .tm-badge-host.is-float.is-dragging .tm-badge {
@@ -174,6 +276,28 @@
   line-height: 1.55;
   -webkit-app-region: no-drag;
   overscroll-behavior: contain;
+  transform-origin: var(--tm-morph-origin, 50%) top;
+  transition:
+    transform 0.24s cubic-bezier(0.3, 1.25, 0.45, 1),
+    opacity 0.18s ease;
+}
+
+/* 从胶囊长出来：水平原点由脚本写到胶囊中心，纵向顶部与胶囊顶部对齐，
+   再缩到 0.88 —— 展开的第一帧正好是胶囊「张开」的那一小块。
+   入场期间不禁用指针事件：否则点击会穿透到宿主，反而触发「点击外部关闭」。 */
+.tm-panel-host.is-morph-in {
+  transform: translate3d(0, var(--tm-morph-y, -8px), 0) scale(0.88);
+  opacity: 0;
+}
+
+/* 收起：原路缩回胶囊，比展开更快且不回弹，避免「收不干净」的拖尾。 */
+.tm-panel-host.is-morph-out {
+  transform: translate3d(0, var(--tm-morph-y, -8px), 0) scale(0.92);
+  opacity: 0;
+  pointer-events: none;
+  transition:
+    transform 0.17s cubic-bezier(0.4, 0, 1, 1),
+    opacity 0.15s ease;
 }
 
 .tm-panel-host.is-hidden {
@@ -528,8 +652,8 @@
 
 .tm-model {
   display: grid;
-  /* 名称、token、金额、状态药丸各占一列，四者保持同一行。 */
-  grid-template-columns: minmax(0, 1fr) auto auto auto;
+  /* 名称、token、金额、档位徽标、状态药丸各占一列，五者保持同一行。 */
+  grid-template-columns: minmax(0, 1fr) auto auto auto auto;
   align-items: center;
   gap: 8px;
   padding: 4px 4px 4px 6px;
@@ -568,10 +692,10 @@
   justify-self: end;
 }
 
-/* 窄窗口下名称独占一行，避免四列把模型名压成只剩省略号。 */
+/* 窄窗口下名称独占一行，避免多列把模型名压成只剩省略号。 */
 @media (max-width: 340px) {
   .tm-model {
-    grid-template-columns: minmax(0, 1fr) auto auto;
+    grid-template-columns: minmax(0, 1fr) auto auto auto;
   }
 
   .tm-model-name {
@@ -617,6 +741,167 @@
   color: var(--tm-text-3);
 }
 
+/* 档位徽标只是状态说明，不参与交互：去掉药丸的 hover 边框。 */
+.tm-tier {
+  cursor: default;
+  font-size: 9.5px;
+}
+
+.tm-tier:hover {
+  border-color: transparent;
+}
+
+/* --------------------------- 计算过程浮层 --------------------------- */
+
+/* 悬停模型行时出现：固定定位（视口坐标），不接收指针事件，避免触发行 mouseleave。 */
+.tm-calc-tip {
+  position: fixed;
+  z-index: 10000;
+  padding: 10px 12px 11px;
+  border: 1px solid var(--tm-line);
+  border-radius: var(--tm-r-md);
+  background: var(--tm-surface);
+  /* 比主浮层略轻的阴影：计算过程是次级信息，不该抢过主浮层。 */
+  box-shadow: 0 10px 28px color-mix(in srgb, var(--tm-text) 18%, transparent);
+  color: var(--tm-text);
+  font-size: 11.5px;
+  line-height: 1.5;
+  pointer-events: none;
+}
+
+/* 下方空间不足时翻到行上方：底边贴住行顶（top 已减间距）。 */
+.tm-calc-tip.is-above {
+  transform: translateY(-100%);
+}
+
+.tm-calc-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.tm-calc-heading {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--tm-text-3);
+}
+
+.tm-calc-entry {
+  margin-bottom: 8px;
+  overflow: hidden;
+  font-family: var(--tm-mono);
+  font-size: 10.5px;
+  color: var(--tm-text-2);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 三列：项目 / 算式 / 金额。算式与金额右对齐，等宽数字保证各行小数点对齐。 */
+.tm-calc-grid {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: baseline;
+  column-gap: 10px;
+  row-gap: 4px;
+}
+
+.tm-calc-label {
+  color: var(--tm-text-2);
+  white-space: nowrap;
+}
+
+.tm-calc-formula {
+  overflow: hidden;
+  font-family: var(--tm-mono);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  color: var(--tm-text-3);
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tm-calc-value {
+  font-family: var(--tm-mono);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--tm-text);
+  text-align: right;
+  white-space: nowrap;
+}
+
+.tm-calc-total {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 8px;
+  padding-top: 7px;
+  border-top: 1px dashed var(--tm-line-soft);
+}
+
+.tm-calc-total-value {
+  font-family: var(--tm-mono);
+  font-size: 13px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.tm-calc-empty {
+  margin-bottom: 6px;
+  color: var(--tm-text-2);
+}
+
+.tm-calc-mono {
+  margin-top: 6px;
+  font-family: var(--tm-mono);
+  font-size: 10px;
+  line-height: 1.55;
+  color: var(--tm-text-3);
+  word-break: break-word;
+}
+
+.tm-calc-notes {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 7px;
+}
+
+.tm-calc-note {
+  font-size: 10px;
+  color: var(--tm-text-3);
+}
+
+/* 计价模式行：模式徽标在前，回退说明在后，窄窗口自动换行。 */
+.tm-mode {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  margin-top: 6px;
+}
+
+.tm-mode > .tm-pill {
+  cursor: default;
+}
+
+.tm-mode > .tm-pill:hover {
+  border-color: transparent;
+}
+
+.tm-mode-note {
+  flex: 1;
+  min-width: 0;
+  font-size: 10px;
+  line-height: 1.5;
+  color: var(--tm-text-3);
+}
+
 .tm-more {
   margin-top: 6px;
   font-size: 10.5px;
@@ -630,6 +915,142 @@
   color: var(--tm-text-3);
   font-size: 11px;
   text-align: center;
+}
+
+/* --------------------------- 徽标浮层 --------------------------- */
+
+/* 悬停徽标时出现：固定定位（视口坐标），挂在 body 下，不接收指针事件。 */
+.tm-badge-tip {
+  position: fixed;
+  z-index: 10000;
+  box-sizing: border-box;
+  padding: 10px 12px 11px;
+  border: 1px solid var(--tm-line);
+  border-radius: var(--tm-r-md);
+  background: var(--tm-surface);
+  /* 与计算过程浮层同档阴影：两者都是悬停次级信息。 */
+  box-shadow: 0 10px 28px color-mix(in srgb, var(--tm-text) 18%, transparent);
+  color: var(--tm-text);
+  font-size: 11.5px;
+  line-height: 1.5;
+  pointer-events: none;
+}
+
+.tm-badge-tip[hidden] {
+  display: none;
+}
+
+/* 下方空间不足时翻到徽标上方：底边贴住徽标顶（top 已减间距）。 */
+.tm-badge-tip.is-above {
+  transform: translateY(-100%);
+}
+
+/* 首行：区间名在左，token 总数与单位在右，整体基线对齐。 */
+.tm-tip-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 2px;
+}
+
+.tm-tip-label {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--tm-text-3);
+}
+
+.tm-tip-tokens {
+  font-family: var(--tm-mono);
+  font-size: 13px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.tm-tip-unit {
+  margin-left: 4px;
+  font-family: inherit;
+  font-size: 10px;
+  font-weight: 400;
+  color: var(--tm-text-3);
+}
+
+/* 金额行：主币种在前、另一种币种近似值在后，同一基线。 */
+.tm-tip-cost {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 7px;
+}
+
+.tm-tip-cost-main {
+  font-family: var(--tm-mono);
+  font-size: 15px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.tm-tip-cost-alt {
+  font-size: 10.5px;
+  color: var(--tm-text-3);
+}
+
+/* 两列键值：标签列按内容宽，值列占满剩余并右对齐，数字等宽保证刻度一致。 */
+.tm-tip-grid {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: baseline;
+  column-gap: 12px;
+  row-gap: 3px;
+}
+
+.tm-tip-key {
+  color: var(--tm-text-2);
+  white-space: nowrap;
+}
+
+.tm-tip-val {
+  overflow: hidden;
+  font-family: var(--tm-mono);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--tm-text);
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 分区线：token 拆分 / 另一区间 / 元信息之间用虚线分隔，比实线轻。 */
+.tm-tip-sep {
+  margin: 7px 0;
+  border-top: 1px dashed var(--tm-line-soft);
+}
+
+/* 告警块：橙色 soft 底提示优先级，文字仍用正文色保证可读。 */
+.tm-tip-warn {
+  margin-top: 7px;
+  padding: 6px 8px;
+  border-radius: var(--tm-r-sm);
+  background: var(--tm-orange-soft);
+  font-size: 10.5px;
+  line-height: 1.5;
+  color: var(--tm-text);
+  word-break: break-word;
+}
+
+.tm-tip-warn-title {
+  margin-bottom: 2px;
+  font-weight: 600;
+  color: var(--tm-orange);
+}
+
+.tm-tip-hint {
+  margin-top: 7px;
+  font-size: 10px;
+  color: var(--tm-text-3);
 }
 
 /* ------------------------------- 底部 ------------------------------- */
@@ -839,6 +1260,68 @@
   border: 1px solid var(--tm-line-soft);
   border-radius: var(--tm-r-sm);
   background: var(--tm-surface-2);
+}
+
+/* 映射视图的自定义价编辑区：与上方候选区同一列，单价用两列网格。 */
+.tm-price {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  border: 1px solid var(--tm-line-soft);
+  border-radius: var(--tm-r-sm);
+  background: var(--tm-surface-2);
+}
+
+.tm-price-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.tm-price-source {
+  font-size: 10px;
+  color: var(--tm-text-2);
+}
+
+.tm-price-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+
+.tm-price-field {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.tm-price-field.is-wide {
+  grid-column: 1 / -1;
+}
+
+.tm-price-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.tm-price-hint {
+  font-size: 10px;
+  line-height: 1.5;
+  color: var(--tm-text-3);
+}
+
+.tm-price-hint.is-warn {
+  color: var(--tm-orange);
+}
+
+.tm-price-notice {
+  font-size: 10px;
+  line-height: 1.5;
+  color: var(--tm-accent);
 }
 
 .tm-toggle {
@@ -1125,9 +1608,90 @@
   }
 }
 
+/* 胶囊扫描光：从左侧扫到右侧，两端留白避免硬边。 */
+@keyframes tm-sheen {
+  0% {
+    transform: translateX(-140%) skewX(-14deg);
+  }
+  100% {
+    transform: translateX(360%) skewX(-14deg);
+  }
+}
+
+/* 流式光环：向外扩散一次并淡出，形成「正在工作」的呼吸。 */
+@keyframes tm-halo {
+  0% {
+    opacity: 0.7;
+    transform: scale(0.96);
+  }
+  70% {
+    opacity: 0;
+    transform: scale(1.06);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(1.06);
+  }
+}
+
+/* 告警点：慢呼吸，避免常驻闪烁干扰阅读。 */
+@keyframes tm-dot-breathe {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}
+
+/* 数值翻新：新值从下往上落定，末尾轻微过冲回弹。 */
+@keyframes tm-value-bump {
+  0% {
+    transform: translateY(5px) scale(0.94);
+    opacity: 0.35;
+  }
+  55% {
+    transform: translateY(-1px) scale(1.03);
+    opacity: 1;
+  }
+  100% {
+    transform: translateY(0) scale(1);
+    opacity: 1;
+  }
+}
+
+/* 系统要求减少动态效果时，全部动效归零：只保留颜色与显隐变化。 */
 @media (prefers-reduced-motion: reduce) {
   .tm-spin,
-  .tm-badge-host.is-loading .tm-badge-icon {
+  .tm-badge-host.is-loading .tm-badge-icon,
+  .tm-badge-host.is-loading .tm-badge-sheen::after,
+  .tm-badge-host.is-streaming .tm-badge-sheen::after,
+  .tm-badge-host.is-streaming::after,
+  .tm-badge-host.is-warn .tm-badge-dot,
+  .tm-badge-tokens.is-bump,
+  .tm-badge-cost.is-bump {
     animation: none;
+  }
+
+  .tm-badge,
+  .tm-badge-icon,
+  .tm-badge-tokens,
+  .tm-badge-cost,
+  .tm-badge-sheen,
+  .tm-panel-host {
+    transition: none;
+  }
+
+  .tm-badge:hover,
+  .tm-badge:active,
+  .tm-badge-host.is-open .tm-badge-icon {
+    transform: none;
+  }
+
+  .tm-panel-host.is-morph-in,
+  .tm-panel-host.is-morph-out {
+    transform: none;
+    opacity: 1;
   }
 }
