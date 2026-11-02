@@ -2792,6 +2792,24 @@ body.fx-resizing {
   background: color-mix(in srgb, var(--fx-accent) 20%, transparent);
 }
 
+/* -------------------------------- 批量收尾 -------------------------------- */
+
+/* 列表上方的批量入口：多个项目同时完成时一次处理，不需要逐条点击。 */
+.fx-monitor-bulk {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 10px 0;
+}
+
+.fx-monitor-bulk-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+}
+
 /* -------------------------------- 列表 -------------------------------- */
 
 .fx-monitor-list {

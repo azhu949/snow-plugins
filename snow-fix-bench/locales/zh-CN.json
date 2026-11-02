@@ -470,5 +470,21 @@
   "fx.monitor.carryoverCleanup": "自动清理未完成：可在「处理结果」中确认后手动清理。",
   "fx.monitor.carryoverSession": "打开上一轮会话",
   "fx.monitor.carryoverDismiss": "知道了",
-  "fx.monitor.hint": "面板跨项目跟踪修复会话，不会中止 AI；已完成且本轮开启自动暂存的条目可直接点「暂存改动」，开启自动清理的条目点「清理」后会在确认态显示动作、issue 条数与会话数，删除不可恢复。点击面板外部自动收起，钉住后保持展开。"
+  "fx.monitor.hint": "面板跨项目跟踪修复会话，不会中止 AI；开启「全部修复完成后自动暂存改动」或「全部修复完成后自动清理」的轮次，即使项目已切走，收尾也会由该项目的后台引擎照常执行，不需要切回该项目。列表上方的「全部暂存 / 全部清理」可一次处理所有已完成待处理的项目；批量清理会先汇总动作、issue 条数与会话数并要求二次确认，删除不可恢复。也可以用条目的「暂存改动 / 清理」单独补做。点击面板外部会收起，钉住后保持展开。",
+  "fx.monitor.bulkStage": "全部暂存（{{count}}）",
+  "fx.monitor.bulkStageRunning": "正在暂存…",
+  "fx.monitor.bulkStageDone": "已暂存 {{done}} 个项目。",
+  "fx.monitor.bulkStageSkipped": "已暂存 {{done}} 个项目，{{skipped}} 个未执行（可能在处理中或本轮暂存已结束）。",
+  "fx.monitor.bulkStageFailed": "已暂存 {{done}} 个项目，{{failed}} 个失败；可在对应条目上重试。",
+  "fx.monitor.bulkStageEmpty": "没有可暂存的项目。",
+  "fx.monitor.bulkCleanup": "全部清理（{{count}}）",
+  "fx.monitor.bulkCleanupRunning": "正在清理…",
+  "fx.monitor.bulkCleanupConfirm": "确认清理全部",
+  "fx.monitor.bulkCleanupPlanArchive": "将归档 {{projects}} 个项目的 {{issues}} 条 issue，最多 {{sessions}} 个会话。",
+  "fx.monitor.bulkCleanupPlanDelete": "将删除 {{projects}} 个项目的 {{issues}} 条 issue，最多 {{sessions}} 个会话。",
+  "fx.monitor.bulkCleanupPlanMixed": "将处理 {{projects}} 个项目：{{archive}} 个归档、{{delete}} 个删除；共 {{issues}} 条 issue、最多 {{sessions}} 个会话。",
+  "fx.monitor.bulkCleanupDone": "已清理 {{done}} 个项目：{{issues}} 条 issue，{{sessions}} 个会话。",
+  "fx.monitor.bulkCleanupSkipped": "已清理 {{done}} 个项目：{{issues}} 条 issue，{{sessions}} 个会话；{{skipped}} 个未执行（可能正在处理或没有可清理内容）。",
+  "fx.monitor.bulkCleanupFailed": "已清理 {{done}} 个项目：{{issues}} 条 issue，{{sessions}} 个会话；{{failed}} 个失败，请在对应条目查看原因。",
+  "fx.monitor.bulkCleanupEmpty": "没有可清理的项目。"
 }

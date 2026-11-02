@@ -2660,7 +2660,7 @@ function createEngine(api, options = {}) {
     // 因此以最新状态复核后仍为 open 才启动。
     // 后台引擎没有渲染器，也不能替用户确认自动修复：未 opt-in 时确认框只落在内存、
     // 用户回到项目后已丢失；已 opt-in 时则会在无人值守的后台新建修复会话并消耗模型调用。
-    // 与自动暂存 / 自动清理一致，自动修复只在工作台主引擎跟踪当前项目时执行。
+    // 自动暂存与自动清理已放开后台执行（授权在启动时冻结），自动修复保持只在前台执行。
     if (
       !headless &&
       autoFixIds.length &&
@@ -3555,11 +3555,9 @@ function createEngine(api, options = {}) {
 
   // 自动暂存统一入口：一轮修复只暂存一次。复审开启时由复审收尾调用，
   // 关闭复审（或本轮没有可复核目标）时由修复收尾调用，保证暂存永远是自动化链的最后一步。
+  // 开关在本轮启动时冻结（stageEnabled），主引擎与后台引擎按同一份授权执行：
+  // 项目切走后由后台引擎接管，收尾不会因为宿主当前项目不是它而跳过。
   async function stageFixRun(session, project, guard, options = {}) {
-    // 后台引擎不自动写 Git 索引：git add 属于用户可见的自动化收尾，
-    // 只在工作台主引擎处理当前项目时自动执行；用户在监控面板上显式点击
-    // 「暂存改动」时（userInitiated）才允许后台引擎补做，保证跨项目同样有入口。
-    if (headless && options.userInitiated !== true) return "deferred";
     if (guard && !isProjectCurrent(guard)) return "deferred";
     if (!session || session.stageEnabled !== true) return "empty";
     const ids = stageRunIdsOf(session);
@@ -3592,8 +3590,7 @@ function createEngine(api, options = {}) {
   }
 
   // 监控面板上的显式补做暂存：本轮冻结的开关就是用户的授权，因此后台引擎也可以执行。
-  // 只处理已完成的修复轮次；自动清理不在这里执行——归档 / 删除会话仍走
-  // 「处理结果」对话框，由用户在目标项目的确认框里勾选。
+  // 只处理已完成的修复轮次；自动清理由 cleanupRunManually 单独处理。
   async function stageRunManually() {
     const snapshot = store.get();
     if (snapshot.status !== "ready") return "deferred";
@@ -3623,7 +3620,6 @@ function createEngine(api, options = {}) {
     }
     if (!target) return "empty";
     const outcome = await stageFixRun(target, project, guard, {
-      userInitiated: true,
       // 面板上的「重试暂存」只在收尾失败后出现：用户点击即授权重跑一次 git add。
       allowRetryFailed: true,
     });
@@ -4433,10 +4429,13 @@ function createEngine(api, options = {}) {
 
   // 自动清理本轮已修复 issue 与本轮会话，动作为归档或删除。
   // 会话范围由设置里的「自动清理会话范围」决定：未勾选的类型保留，可在「处理结果」中手动清理。
-  async function autoCleanupFixRun(session, options = {}) {
-    // 后台引擎不自动归档 / 删除会话：不可逆清理必须由用户显式触发。
-    // 监控面板的「清理」按钮以 userInitiated 调用，点击（含面板内二次确认）即用户授权。
-    if (headless && options.userInitiated !== true) return { status: "deferred" };
+  async function autoCleanupFixRun(session) {
+    // 自动清理按本轮启动时冻结的开关与动作执行（autoCleanup / cleanupAction /
+    // cleanupSessionKinds），用户关闭开关时不会走到这里。主引擎与后台引擎一致：
+    // 项目切走后由后台引擎接管，收尾不会因为宿主当前项目不是它而跳过。
+    // 不可逆动作的既有安全门保持不变：会话运行状态由 runtime 核对，无法确认时
+    // 跳过会话、删除降级为归档；旧轮次缺少启动基准时跳过审查会话。
+    if (!session) return { status: "empty" };
     const snapshot = store.get();
     const projectId = snapshot.project?.directoryId;
     if (!projectId) return { status: "deferred" };
@@ -4690,8 +4689,8 @@ function createEngine(api, options = {}) {
     };
   }
 
-  // 监控面板上的显式清理：本轮冻结的 autoCleanup / cleanupAction / cleanupSessionKinds
-  // 就是用户授权，面板内二次确认后立即执行，后台引擎同样可以执行。
+  // 监控面板上的显式清理（单条与批量入口共用）：本轮冻结的 autoCleanup / cleanupAction /
+  // cleanupSessionKinds 就是用户授权，面板内二次确认后立即执行，后台引擎同样可以执行。
   async function cleanupRunManually() {
     const snapshot = store.get();
     if (snapshot.status !== "ready") return { status: "deferred" };
@@ -4707,7 +4706,7 @@ function createEngine(api, options = {}) {
     }
     const guard = captureProject();
     if (!guard || !isProjectCurrent(guard)) return { status: "deferred" };
-    return await autoCleanupFixRun(fixSession, { userInitiated: true });
+    return await autoCleanupFixRun(fixSession);
   }
 
   async function track(job) {

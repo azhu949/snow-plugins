@@ -10,6 +10,7 @@ import {
 } from "./constants.js";
 import { createHeadlessEngine, planCleanupRun } from "./engine.js";
 import { createT } from "./i18n.js";
+import { resolveStageRunState } from "./issues.js";
 import { createStore } from "./store.js";
 import { nowMs } from "./util.js";
 
@@ -135,6 +136,53 @@ function carryoverKeyOf(carryover) {
 function sameEntryFields(left, right) {
   if (!ENTRY_COMPARE_FIELDS.every((field) => left[field] === right[field])) return false;
   return carryoverKeyOf(left.carryover) === carryoverKeyOf(right.carryover);
+}
+
+// 批量收尾的候选判定：与条目按钮使用同一套条件，避免「按钮能点、批量不包含」这类口径分裂。
+// 暂存只取尚未处理过的轮次：done / empty 已结束，staging 正在执行，重复触发没有意义。
+const BULK_STAGE_STATES = new Set(["", "error"]);
+
+function bulkStageTargets(entries, now = nowMs()) {
+  return entries.filter((entry) => {
+    if (entry.status !== "done" || !entry.stageEnabled || entry.stageSupported === false) return false;
+    const state = resolveStageRunState(
+      { stageRunState: entry.stageState, stageRunAt: entry.stageRunAt },
+      now,
+    );
+    return BULK_STAGE_STATES.has(state);
+  });
+}
+
+// 清理只取本轮冻结了自动清理、仍有清理计划且修复会话仍在台账的条目。
+// 动作未知的旧登记不在批量范围：无法说明将要归档还是删除，不能做不可逆操作。
+function bulkCleanupTargets(entries) {
+  return entries.filter(
+    (entry) =>
+      entry.status === "done" &&
+      entry.autoCleanup === true &&
+      entry.cleanupState !== "done" &&
+      entry.cleanupReady !== false &&
+      (entry.cleanupAction === "archive" || entry.cleanupAction === "delete"),
+  );
+}
+
+function cleanupPlanSummaryOf(entries) {
+  const summary = {
+    projects: entries.length,
+    archiveProjects: 0,
+    deleteProjects: 0,
+    issues: 0,
+    sessions: 0,
+    baseline: 0,
+  };
+  for (const entry of entries) {
+    if (entry.cleanupAction === "delete") summary.deleteProjects += 1;
+    else summary.archiveProjects += 1;
+    summary.issues += Math.max(0, Math.floor(numberOr(entry.cleanupIssueCount)));
+    summary.sessions += Math.max(0, Math.floor(numberOr(entry.cleanupSessionCount)));
+    summary.baseline += Math.max(0, Math.floor(numberOr(entry.cleanupBaselineCount)));
+  }
+  return summary;
 }
 
 export function monitorStatusOfPhase(phase) {
@@ -565,6 +613,9 @@ export function createMonitor(api, options = {}) {
     actions: {},
     // 每个项目最近一次操作结果：直接显示在条目上，不依赖工作台 toast（工作台可能没打开）。
     notices: {},
+    // 批量收尾的内存状态：stage / cleanup 表示正在执行的动作，notice 是面板级结果提示。
+    // 不写入持久化条目：页面重载后不会残留一个未经确认的批量操作。
+    bulk: { stage: "", cleanup: "", notice: null },
     // 登记读取失败：内存里只有本次会话的条目，写回会整表覆盖其它项目的记录。
     registryUnavailable: false,
   });
@@ -575,6 +626,10 @@ export function createMonitor(api, options = {}) {
   const headlessFailures = new Map();
   const headlessRetryTimers = new Map();
   const noticeTimers = new Map();
+  // 后台引擎最近一次提示的对象引用：收尾（自动暂存 / 自动清理）在后台执行时没有渲染器，
+  // 面板据此把新的 toast 镜像成条目提示，失败原因不会只留在后台 store 里。
+  const headlessToasts = new Map();
+  let bulkNoticeTimer = 0;
   let mainSubscription = null;
   let mainProjectId = "";
   let started = false;
@@ -726,6 +781,29 @@ export function createMonitor(api, options = {}) {
     );
   }
 
+  // 批量操作状态与结果：只存在内存，面板关闭后自然消失。
+  function setBulk(patch) {
+    store.set({ bulk: { ...(store.get().bulk || {}), ...patch } });
+  }
+
+  function setBulkNotice(kind, text) {
+    if (!text) return;
+    setBulk({ notice: { kind, text } });
+    if (bulkNoticeTimer) clearTimeout(bulkNoticeTimer);
+    bulkNoticeTimer = setTimeout(() => {
+      bulkNoticeTimer = 0;
+      if (disposed) return;
+      setBulk({ notice: null });
+    }, 12000);
+  }
+
+  // 批量结果同时写主引擎 toast：全部条目清理完后面板会整块消失，
+  // 只留在面板上的提示用户就看不到了。
+  function showBulkResult(kind, text) {
+    setBulkNotice(kind, text);
+    if (mainEngine && typeof mainEngine.showToast === "function") mainEngine.showToast(kind, text);
+  }
+
   function removeEntry(projectId) {
     const next = currentEntries().filter((entry) => entry.projectId !== projectId);
     if (next.length === currentEntries().length) return;
@@ -874,6 +952,15 @@ export function createMonitor(api, options = {}) {
 
   function handleEngineSnapshot(projectId, snapshot, isMain) {
     if (disposed) return;
+    // 后台引擎的自动暂存 / 自动清理没有渲染器：把新的提示镜像到条目上，
+    // 收尾失败或需要人工处理时用户能在面板直接看到原因。
+    if (!isMain && snapshot?.status === "ready") {
+      const toast = snapshot.toast || null;
+      if (toast?.text && headlessToasts.get(projectId) !== toast) {
+        headlessToasts.set(projectId, toast);
+        setNotice(projectId, String(toast.kind || "info"), String(toast.text));
+      }
+    }
     if (isMain) {
       const nextProjectId = snapshot?.project?.directoryId || "";
       if (nextProjectId !== mainProjectId) {
@@ -1144,21 +1231,22 @@ export function createMonitor(api, options = {}) {
   // 用户在面板上显式补做自动暂存：主引擎与后台引擎共用同一实现，
   // 用户不需要知道当前由哪个引擎跟踪。执行期间按钮显示「暂存中」，
   // 结果直接留在条目上（工作台浮层关闭时 toast 不可见）。
-  async function stageRun(projectId) {
+  // 单条按钮与批量入口共用本函数：options.claimed 表示批量入口已预先占位。
+  async function executeStage(projectId, options = {}) {
     const pending = (store.get().actions || {})[projectId] || {};
-    if (pending.stage === "running") return;
+    if (!options.claimed && pending.stage === "running") return "running";
     const entry = findEntry(projectId);
     // SSH 项目无法暂存：直接说明原因，不要落到通用的「暂存失败」提示。
     if (entry?.stageSupported === false) {
       setNotice(projectId, "info", t("fx.monitor.stageUnsupported"));
-      return;
+      return "empty";
     }
     setAction(projectId, { stage: "running" });
     try {
       const engine = engineFor(projectId) || (await ensureHeadless(projectId, { force: true }));
       if (!engine) {
         setNotice(projectId, "error", t("fx.toast.stageManualUnavailable"));
-        return;
+        return "error";
       }
       // 暂存明细（实际暂存 / 未暂存的文件名）由引擎写在它自己的 toast 里：
       // 后台引擎的 toast 没有渲染器，这里取本次调用新写入的那条作为条目提示。
@@ -1188,11 +1276,47 @@ export function createMonitor(api, options = {}) {
       if (detail && engine !== mainEngine && typeof mainEngine?.showToast === "function") {
         mainEngine.showToast(kind, text);
       }
+      return String(outcome || "error");
     } catch {
       setNotice(projectId, "error", t("fx.toast.stageManualFailed"));
+      return "error";
     } finally {
       setAction(projectId, { stage: undefined });
     }
+  }
+
+  async function stageRun(projectId) {
+    return await executeStage(projectId);
+  }
+
+  // 批量补做暂存：一次处理所有「已完成且仍有待暂存改动」的项目。
+  // 不切换项目、不打开会话，逐个项目交给它自己的引擎执行；单个失败不影响后续项目。
+  async function stageAll() {
+    const bulk = store.get().bulk || {};
+    if (bulk.stage === "running" || bulk.cleanup === "running" || bulk.cleanup === "confirm") return;
+    const targets = bulkStageTargets(currentEntries()).map((entry) => entry.projectId);
+    if (!targets.length) {
+      setBulkNotice("info", t("fx.monitor.bulkStageEmpty"));
+      return;
+    }
+    // 先逐个占位：批量执行期间条目上的单条按钮同步显示「暂存中」，不会重复触发。
+    for (const projectId of targets) setAction(projectId, { stage: "running" });
+    setBulk({ stage: "running", notice: null });
+    let done = 0;
+    let failed = 0;
+    let skipped = 0;
+    for (const projectId of targets) {
+      if (disposed) break;
+      const outcome = await executeStage(projectId, { claimed: true });
+      if (outcome === "done") done += 1;
+      else if (outcome === "error") failed += 1;
+      else skipped += 1;
+    }
+    setBulk({ stage: "", notice: null });
+    const values = { done, failed, skipped, total: targets.length };
+    if (failed) showBulkResult("error", t("fx.monitor.bulkStageFailed", values));
+    else if (skipped) showBulkResult("info", t("fx.monitor.bulkStageSkipped", values));
+    else showBulkResult("success", t("fx.monitor.bulkStageDone", values));
   }
 
   // 面板内清理：先点「清理」进入确认态，再点「确认清理」才执行，不跳转工作台。
@@ -1210,6 +1334,96 @@ export function createMonitor(api, options = {}) {
     setAction(projectId, { cleanup: undefined, cleanupConversationId: undefined });
   }
 
+  // 单个项目的清理执行：清理范围与动作沿用本轮冻结的自动清理设置。
+  // 单条确认与批量入口共用本函数；options.claimed 表示调用方已预先占位。
+  async function executeCleanup(projectId, options = {}) {
+    const pending = (store.get().actions || {})[projectId] || {};
+    if (!options.claimed && pending.cleanup === "running") return { status: "running" };
+    const entry = findEntry(projectId);
+    if (!entry) {
+      // 批量占位后条目可能已被清理 / 关闭：清掉占位，避免 actions 永久停在 running。
+      setAction(projectId, { cleanup: undefined, cleanupConversationId: undefined });
+      return { status: "empty" };
+    }
+    setAction(projectId, { cleanup: "running", cleanupConversationId: entry.conversationId });
+    try {
+      const engine = engineFor(projectId) || (await ensureHeadless(projectId, { force: true }));
+      if (!engine) {
+        setNotice(projectId, "error", t("fx.toast.cleanupManualUnavailable"));
+        return { status: "error" };
+      }
+      const result =
+        typeof engine.cleanupRunManually === "function"
+          ? await engine.cleanupRunManually()
+          : { status: "empty" };
+      const status = String(result?.status || "empty");
+      if (status === "done") {
+        const values = {
+          count: Math.max(0, Number(result?.issues) || 0),
+          sessions: Math.max(0, Number(result?.sessions) || 0),
+          skipped: Math.max(0, Number(result?.skipped) || 0),
+          baseline: Math.max(0, Number(result?.baseline) || 0),
+        };
+        const outcome = {
+          status: "done",
+          action: result?.action,
+          issues: values.count,
+          sessions: values.sessions,
+          // 部分会话 / issue 清理失败时仍是 done（副作用可能已发生），但批量统计要单列失败。
+          failed: Boolean(result?.error),
+          kind: "success",
+          text: "",
+        };
+        if (result?.error) {
+          outcome.kind = "error";
+          outcome.text = t("fx.toast.cleanupManualFailed", { error: result.error });
+          setNotice(projectId, outcome.kind, outcome.text);
+          return outcome;
+        }
+        // 文案优先级与引擎收尾一致：删除降级 > 基准缺失 > 常规归档 / 删除。
+        // 降级与跳过必须显式说明，否则「已清理 N 条 issue，M 个会话」会被误读成删除已执行。
+        const deleting = result?.action === "delete";
+        let kind = "success";
+        let key = deleting ? "fx.toast.autoCleanupDeleted" : "fx.toast.autoCleanupDone";
+        if (result?.downgraded === true) {
+          key = "fx.toast.autoCleanupDowngraded";
+          kind = "error";
+        } else if (values.baseline > 0) {
+          key = deleting
+            ? values.skipped > 0
+              ? "fx.toast.autoCleanupBaselineDeletedSkipped"
+              : "fx.toast.autoCleanupBaselineDeleted"
+            : values.skipped > 0
+              ? "fx.toast.autoCleanupBaselineArchivedSkipped"
+              : "fx.toast.autoCleanupBaselineArchived";
+          kind = "error";
+        } else if (values.skipped > 0) {
+          key = deleting ? "fx.toast.autoCleanupDeletedSkipped" : "fx.toast.autoCleanupDoneSkipped";
+          kind = "info";
+        }
+        outcome.kind = kind;
+        outcome.text = t(key, values);
+        setNotice(projectId, kind, outcome.text);
+        // 后台引擎的 toast 没有渲染器订阅：补写主引擎 toast，条目随清理退休后仍能看到原因。
+        if (engine !== mainEngine && typeof mainEngine?.showToast === "function") {
+          mainEngine.showToast(kind, outcome.text);
+        }
+        return outcome;
+      }
+      if (status === "deferred") {
+        setNotice(projectId, "info", t("fx.toast.cleanupManualDeferred"));
+        return { status: "deferred" };
+      }
+      setNotice(projectId, "info", t("fx.toast.cleanupManualEmpty"));
+      return { status: "empty" };
+    } catch {
+      setNotice(projectId, "error", t("fx.toast.cleanupManualFailed", { error: "unexpected error" }));
+      return { status: "error" };
+    } finally {
+      setAction(projectId, { cleanup: undefined, cleanupConversationId: undefined });
+    }
+  }
+
   async function confirmCleanup(projectId) {
     const pending = (store.get().actions || {})[projectId] || {};
     if (pending.cleanup === "running") return;
@@ -1219,66 +1433,64 @@ export function createMonitor(api, options = {}) {
       setAction(projectId, { cleanup: undefined, cleanupConversationId: undefined });
       return;
     }
-    setAction(projectId, { cleanup: "running" });
-    try {
-      const engine = engineFor(projectId) || (await ensureHeadless(projectId, { force: true }));
-      if (!engine) {
-        setNotice(projectId, "error", t("fx.toast.cleanupManualUnavailable"));
-        return;
-      }
-      const result =
-        typeof engine.cleanupRunManually === "function"
-          ? await engine.cleanupRunManually()
-          : { status: "empty" };
-      const status = String(result?.status || "empty");
-      if (status === "done") {
-        if (result?.error) {
-          setNotice(projectId, "error", t("fx.toast.cleanupManualFailed", { error: result.error }));
-        } else {
-          // 文案优先级与引擎收尾一致：删除降级 > 基准缺失 > 常规归档 / 删除。
-          // 降级与跳过必须显式说明，否则「已清理 N 条 issue，M 个会话」会被误读成删除已执行。
-          const values = {
-            count: Math.max(0, Number(result?.issues) || 0),
-            sessions: Math.max(0, Number(result?.sessions) || 0),
-            skipped: Math.max(0, Number(result?.skipped) || 0),
-            baseline: Math.max(0, Number(result?.baseline) || 0),
-          };
-          const deleting = result?.action === "delete";
-          let kind = "success";
-          let key = deleting ? "fx.toast.autoCleanupDeleted" : "fx.toast.autoCleanupDone";
-          if (result?.downgraded === true) {
-            key = "fx.toast.autoCleanupDowngraded";
-            kind = "error";
-          } else if (values.baseline > 0) {
-            key = deleting
-              ? values.skipped > 0
-                ? "fx.toast.autoCleanupBaselineDeletedSkipped"
-                : "fx.toast.autoCleanupBaselineDeleted"
-              : values.skipped > 0
-                ? "fx.toast.autoCleanupBaselineArchivedSkipped"
-                : "fx.toast.autoCleanupBaselineArchived";
-            kind = "error";
-          } else if (values.skipped > 0) {
-            key = deleting ? "fx.toast.autoCleanupDeletedSkipped" : "fx.toast.autoCleanupDoneSkipped";
-            kind = "info";
-          }
-          const text = t(key, values);
-          setNotice(projectId, kind, text);
-          // 后台引擎的 toast 没有渲染器订阅：补写主引擎 toast，条目随清理退休后仍能看到原因。
-          if (engine !== mainEngine && typeof mainEngine?.showToast === "function") {
-            mainEngine.showToast(kind, text);
-          }
-        }
-      } else if (status === "deferred") {
-        setNotice(projectId, "info", t("fx.toast.cleanupManualDeferred"));
-      } else {
-        setNotice(projectId, "info", t("fx.toast.cleanupManualEmpty"));
-      }
-    } catch {
-      setNotice(projectId, "error", t("fx.toast.cleanupManualFailed", { error: "unexpected error" }));
-    } finally {
-      setAction(projectId, { cleanup: undefined, cleanupConversationId: undefined });
+    return await executeCleanup(projectId);
+  }
+
+  // 批量清理：先进入一次汇总确认态，确认后逐个项目执行。
+  // 汇总在渲染时按当前条目实时计算，执行时重新取候选：期间被新一轮顶掉的项目会自动排除。
+  function beginCleanupAll() {
+    const bulk = store.get().bulk || {};
+    if (bulk.stage === "running" || bulk.cleanup === "running") return;
+    if (!bulkCleanupTargets(currentEntries()).length) {
+      setBulkNotice("info", t("fx.monitor.bulkCleanupEmpty"));
+      return;
     }
+    setBulk({ cleanup: "confirm", notice: null });
+  }
+
+  function cancelCleanupAll() {
+    if ((store.get().bulk || {}).cleanup === "running") return;
+    setBulk({ cleanup: "" });
+  }
+
+  async function confirmCleanupAll() {
+    if ((store.get().bulk || {}).cleanup !== "confirm") return;
+    const targets = bulkCleanupTargets(currentEntries()).map((entry) => entry.projectId);
+    if (!targets.length) {
+      setBulk({ cleanup: "" });
+      setBulkNotice("info", t("fx.monitor.bulkCleanupEmpty"));
+      return;
+    }
+    // 先占位再执行：确认后立即锁住每个条目的单条入口，避免同一轮被并发处理两次。
+    for (const projectId of targets) {
+      const entry = findEntry(projectId);
+      setAction(projectId, { cleanup: "running", cleanupConversationId: entry?.conversationId });
+    }
+    setBulk({ cleanup: "running", notice: null });
+    let done = 0;
+    let failed = 0;
+    let skipped = 0;
+    let issues = 0;
+    let sessions = 0;
+    for (const projectId of targets) {
+      if (disposed) break;
+      const result = await executeCleanup(projectId, { claimed: true });
+      if (result.status === "done") {
+        if (result.failed) failed += 1;
+        else done += 1;
+        issues += Math.max(0, Number(result.issues) || 0);
+        sessions += Math.max(0, Number(result.sessions) || 0);
+      } else if (result.status === "error") {
+        failed += 1;
+      } else {
+        skipped += 1;
+      }
+    }
+    setBulk({ cleanup: "", notice: null });
+    const values = { done, failed, skipped, issues, sessions, total: targets.length };
+    if (failed) showBulkResult("error", t("fx.monitor.bulkCleanupFailed", values));
+    else if (skipped) showBulkResult("info", t("fx.monitor.bulkCleanupSkipped", values));
+    else showBulkResult("success", t("fx.monitor.bulkCleanupDone", values));
   }
 
   // 用户确认上一轮遗留的自动收尾已经处理：只清掉提示，不改动任何会话或 Git 状态。
@@ -1308,6 +1520,14 @@ export function createMonitor(api, options = {}) {
     removeEntry(projectId);
   }
 
+  // 面板渲染用的批量计划：候选与条目按钮共用同一套判定，汇总与时序无关。
+  function bulkPlan() {
+    const entries = currentEntries();
+    const stage = bulkStageTargets(entries);
+    const cleanup = bulkCleanupTargets(entries);
+    return { stage, cleanup, summary: cleanupPlanSummaryOf(cleanup) };
+  }
+
   function dispose() {
     disposed = true;
     for (const timer of headlessRetryTimers.values()) clearTimeout(timer);
@@ -1315,6 +1535,9 @@ export function createMonitor(api, options = {}) {
     headlessFailures.clear();
     for (const timer of noticeTimers.values()) clearTimeout(timer);
     noticeTimers.clear();
+    if (bulkNoticeTimer) clearTimeout(bulkNoticeTimer);
+    bulkNoticeTimer = 0;
+    headlessToasts.clear();
     if (saveTimer) clearTimeout(saveTimer);
     saveTimer = 0;
     if (saveMaxTimer) clearTimeout(saveMaxTimer);
@@ -1352,9 +1575,14 @@ export function createMonitor(api, options = {}) {
     resume,
     retry,
     stageRun,
+    stageAll,
     beginCleanup,
     cancelCleanup,
     confirmCleanup,
+    beginCleanupAll,
+    cancelCleanupAll,
+    confirmCleanupAll,
+    bulkPlan,
     dismiss,
     dismissCarryover,
     hasEngine,

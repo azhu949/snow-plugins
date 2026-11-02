@@ -26,6 +26,27 @@ function formatUpdateAge(t, elapsedMs) {
   return t("fx.activity.agoHours", { count: Math.floor(minutes / 60) });
 }
 
+// 批量清理的汇总说明：动作混合时必须同时列出归档与删除的项目数，
+// 让用户在看到不可逆警告前就知道哪些项目会被删除。
+function bulkCleanupPlanText(t, summary) {
+  const values = {
+    projects: summary.projects,
+    archive: summary.archiveProjects,
+    delete: summary.deleteProjects,
+    issues: summary.issues,
+    sessions: summary.sessions,
+  };
+  if (summary.deleteProjects > 0 && summary.archiveProjects > 0) {
+    return t("fx.monitor.bulkCleanupPlanMixed", values);
+  }
+  return t(
+    summary.deleteProjects > 0
+      ? "fx.monitor.bulkCleanupPlanDelete"
+      : "fx.monitor.bulkCleanupPlanArchive",
+    values,
+  );
+}
+
 // 条目操作一律用文字按钮：图标无法说明「打开会话」「重新解析」这类动作的具体含义。
 function textAction(key, label, onClick, disabled = false) {
   return h(
@@ -95,6 +116,10 @@ function MonitorEntry({ entry, monitor, api, t, now, current, pending, notice })
   // 上一轮被新一轮顶掉后遗留的自动收尾：只给只读提示与安全入口（打开旧会话 / 处理结果）。
   // 不能复用「暂存改动 / 清理」按钮：引擎的补做接口只作用于当前会话，旧条目点击会落到新一轮。
   const carryover = entry.carryover || null;
+  // 清理动作与确认态只在已完成条目上有意义，但渲染确认说明发生在分支之外：
+  // 声明必须留在组件作用域，否则展开面板会因块级变量不可见而直接抛错。
+  const cleanupPlanKnown = entry.cleanupAction === "delete" || entry.cleanupAction === "archive";
+  const cleanupConfirming = pending.cleanup === "confirm" && cleanupPlanKnown;
   if (running) {
     actions.push(
       textAction("session", t("fx.monitor.openSession"), () =>
@@ -141,10 +166,7 @@ function MonitorEntry({ entry, monitor, api, t, now, current, pending, notice })
     // 面板侧同时要求本轮修复会话仍存在（cleanupReady）：引擎的清理只作用于 sessions.fix，
     // 修复会话被「处理结果」归档后这个按钮点了只会提示没有可清理的内容。
     const cleanupPending = entry.autoCleanup && entry.cleanupState !== "done";
-    // 确认态必须让用户看到动作与范围：删除不可恢复。
-    // 旧登记没有清理计划时无法说明范围，此时不在面板内执行，改走工作台的清理对话框。
-    const cleanupPlanKnown = entry.cleanupAction === "delete" || entry.cleanupAction === "archive";
-    const cleanupConfirming = pending.cleanup === "confirm" && cleanupPlanKnown;
+    // 确认态必须让用户看到动作与范围：删除不可恢复（动作与确认态在组件作用域计算）。
     if (cleanupPending && entry.cleanupReady !== false) {
       if (pending.cleanup === "running") {
         actions.push(textAction("cleanup", t("fx.monitor.cleanupRunning"), null, true));
@@ -370,6 +392,15 @@ export default function FixBenchMonitor({ api, monitor }) {
   const running = entries.filter((entry) => entry.status === "running").length;
   const finished = entries.length - running;
   const currentProjectId = snapshot.currentProjectId || "";
+  const bulk = snapshot.bulk || {};
+  const bulkNotice = bulk.notice || null;
+  // 批量候选由控制器统一判定，面板只负责展示与触发，避免两处口径分裂。
+  const bulkPlan = monitor.bulkPlan();
+  const bulkStageCount = bulkPlan.stage.length;
+  const bulkCleanupCount = bulkPlan.cleanup.length;
+  const bulkCleanupSummary = bulkPlan.summary;
+  const bulkBusy =
+    bulk.stage === "running" || bulk.cleanup === "running" || bulk.cleanup === "confirm";
   if (collapsed) {
     // 折叠态没有标题栏：整颗胶囊都是拖动热区，位移不足阈值时仍按点击展开。
     return h(
@@ -454,6 +485,77 @@ export default function FixBenchMonitor({ api, monitor }) {
         iconEl(api, "ChevronDown", 14, undefined, "fx-monitor-collapse-icon"),
       ),
     ),
+    bulkStageCount ||
+    bulkCleanupCount ||
+    bulk.stage === "running" ||
+    bulk.cleanup === "running" ||
+    bulk.cleanup === "confirm" ||
+    bulkNotice
+      ? h(
+          "div",
+          { className: "fx-monitor-bulk" },
+          h(
+            "div",
+            { className: "fx-monitor-bulk-actions" },
+            bulk.stage === "running"
+              ? textAction("bulk-stage", t("fx.monitor.bulkStageRunning"), null, true)
+              : bulkStageCount
+                ? textAction(
+                    "bulk-stage",
+                    t("fx.monitor.bulkStage", { count: bulkStageCount }),
+                    () => void monitor.stageAll(),
+                    bulkBusy,
+                  )
+                : null,
+            bulk.cleanup === "running"
+              ? textAction("bulk-cleanup", t("fx.monitor.bulkCleanupRunning"), null, true)
+              : bulk.cleanup === "confirm"
+                ? null
+                : bulkCleanupCount
+                  ? primaryAction(
+                      "bulk-cleanup",
+                      t("fx.monitor.bulkCleanup", { count: bulkCleanupCount }),
+                      () => monitor.beginCleanupAll(),
+                    )
+                  : null,
+          ),
+          // 批量清理的确认态：动作、项目数、issue 数与会话数都必须在第二次点击前可见。
+          bulk.cleanup === "confirm"
+            ? h(
+                "div",
+                { className: "fx-monitor-cleanup" },
+                h(
+                  "div",
+                  { className: "fx-monitor-cleanup-plan" },
+                  bulkCleanupPlanText(t, bulkCleanupSummary),
+                ),
+                bulkCleanupSummary.deleteProjects > 0
+                  ? h("div", { className: "fx-monitor-warn" }, t("fx.monitor.cleanupIrreversible"))
+                  : null,
+                bulkCleanupSummary.baseline > 0
+                  ? h(
+                      "div",
+                      { className: "fx-monitor-warn" },
+                      t("fx.monitor.cleanupBaseline", { count: bulkCleanupSummary.baseline }),
+                    )
+                  : null,
+                h(
+                  "div",
+                  { className: "fx-monitor-actions" },
+                  primaryAction("bulk-cleanup-confirm", t("fx.monitor.bulkCleanupConfirm"), () =>
+                    void monitor.confirmCleanupAll(),
+                  ),
+                  textAction("bulk-cleanup-cancel", t("fx.monitor.cleanupCancel"), () =>
+                    monitor.cancelCleanupAll(),
+                  ),
+                ),
+              )
+            : null,
+          bulkNotice
+            ? h("div", { className: `fx-monitor-notice is-${bulkNotice.kind}` }, bulkNotice.text)
+            : null,
+        )
+      : null,
     h(
       "div",
       { className: "fx-monitor-list" },
