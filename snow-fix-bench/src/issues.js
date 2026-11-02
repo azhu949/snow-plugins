@@ -1,5 +1,5 @@
 // issue 数据模型：合并、去重、状态流转与筛选排序。
-import { ISSUE_STATUS, SEVERITY, STORE_VERSION, SESSION_MISSING_POLLS, FALLBACK, VERIFY_STATUSES } from "./constants.js";
+import { ISSUE_STATUS, SEVERITY, STORE_VERSION, SESSION_MISSING_POLLS, FALLBACK, VERIFY_STATUSES, STAGE_RUN_STALE_MS } from "./constants.js";
 import { nowMs, uid, normalizeText } from "./util.js";
 import { normalizeSeverity, normalizeSeverityScope, severityRank, statusRank } from "./parse.js";
 import { normalizeCleanupSessionKinds } from "./settings.js";
@@ -618,6 +618,8 @@ function createIssueState(project) {
     // 分批修复的中间批次与历史审查会话只有台账能覆盖，清理时按类型统一处理。
     conversationLog: [],
     lastReviewAt: 0,
+    // 本轮自动 / 手动清理结果：面板据此隐藏「清理」入口，重载后也不会重复执行。
+    cleanupRun: null,
     updatedAt: nowMs(),
   };
 }
@@ -657,6 +659,13 @@ function normalizeSession(raw) {
     typeof raw.stageEnabled === "boolean"
       ? raw.stageEnabled
       : hasLegacyStageBaseline(raw.stageBaseline);
+  const stageRunAt = Number(raw.stageRunAt) || 0;
+  const stageRunState = ["staging", "done", "error", "empty"].includes(raw.stageRunState)
+    ? raw.stageRunState
+    : "";
+  // 归一化只做类型收敛：暂存是否超时由读取方按当前时间判断（resolveStageRunState）。
+  // 若在这里收敛，同一份存储会在不同时刻读出不同结果，且后续任意一次保存都会把
+  // 「读取时的判断」固化成持久的 error，无法与真实失败区分。
   return {
     conversationId: String(raw.conversationId),
     title: String(raw.title || ""),
@@ -664,6 +673,10 @@ function normalizeSession(raw) {
     // 本轮修复的启动时间：续批会把 startedAt 刷成最新一批，自动清理判断审查会话来源时
     // 必须使用该冻结值；0 表示旧数据未记录，依赖该基准的清理需保守跳过。
     runStartedAt: Number(raw.runStartedAt) || 0,
+    // 两级计时：流程起点（审查开始 / 修复启动）与当前节点起点（审查 / 修复 / 复审）。
+    // 都跨批次稳定，续批只刷新 startedAt；0 表示旧数据未记录，界面按本批起点展示。
+    flowStartedAt: Number(raw.flowStartedAt) || 0,
+    stageStartedAt: Number(raw.stageStartedAt) || 0,
     // 活动指标：重开工作台时恢复真实的最后更新时刻与已接收字符数，旧数据回退到会话启动时间。
     // 最后更新时刻不早于启动时间，避免续批残留值让卡片显示「已运行 1 分钟 / 最后更新 3 小时前」。
     receivedChars: staleMetrics ? 0 : Math.max(0, Math.floor(Number(raw.receivedChars) || 0)),
@@ -694,10 +707,8 @@ function normalizeSession(raw) {
           ),
         ).slice(0, 64)
       : [],
-    stageRunState: ["staging", "done", "error", "empty"].includes(raw.stageRunState)
-      ? raw.stageRunState
-      : "",
-    stageRunAt: Number(raw.stageRunAt) || 0,
+    stageRunState,
+    stageRunAt,
     sessionIds: Array.isArray(raw.sessionIds)
       ? raw.sessionIds.map(String).filter(Boolean)
       : [String(raw.conversationId)],
@@ -723,6 +734,16 @@ function normalizeSession(raw) {
     activityDismissed: Boolean(raw.activityDismissed),
     lastError: String(raw.lastError || ""),
   };
+}
+
+// 暂存状态的唯一超时口径：记录为 staging 且超过阈值（或缺少记录时间）说明执行
+// 已被切换项目 / 卸载 / 关闭页面中断，读取方按 error 处理。
+// 只影响视图与重试判定，不写回存储：归一化与持久化都必须保留原始 staging。
+function resolveStageRunState(session, now = nowMs()) {
+  const outcome = session?.stageRunState;
+  if (outcome !== "staging") return outcome || "";
+  const at = Number(session?.stageRunAt) || 0;
+  return at > 0 && now - at <= STAGE_RUN_STALE_MS ? "staging" : "error";
 }
 
 // 运行中的会话：持久化 status 为主，内存 activity 只对同一会话提供实时补充。
@@ -946,6 +967,19 @@ function normalizeIssue(raw) {
   };
 }
 
+// 本轮清理结果：只保留同一轮修复的幂等标记，字段非法时丢弃。
+function normalizeCleanupRun(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  const fixConversationId = String(raw.fixConversationId || "").trim();
+  if (!fixConversationId) return null;
+  return {
+    fixConversationId,
+    // keep 表示用户在本轮「处理结果」中显式保留了修复会话，同样用于面板入口的幂等判断。
+    action: raw.action === "delete" ? "delete" : raw.action === "keep" ? "keep" : "archive",
+    at: Number(raw.at) || 0,
+  };
+}
+
 function normalizeIssueState(raw, project) {
   const base = createIssueState(project);
   if (!raw || typeof raw !== "object") return base;
@@ -975,6 +1009,7 @@ function normalizeIssueState(raw, project) {
     issues: Array.isArray(raw.issues) ? raw.issues.map(normalizeIssue).filter(Boolean) : [],
     sessions,
     conversationLog,
+    cleanupRun: normalizeCleanupRun(raw.cleanupRun),
     lastReviewAt: Number(raw.lastReviewAt) || 0,
     updatedAt: Number(raw.updatedAt) || nowMs(),
   };
@@ -1081,4 +1116,5 @@ export {
   listVisibleIssues,
   normalizeStatusFilter,
   normalizeSeverityFilter,
+  resolveStageRunState,
 };

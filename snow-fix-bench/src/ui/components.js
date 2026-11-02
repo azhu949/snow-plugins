@@ -896,7 +896,19 @@ function ActivityCard({ activity, engine, api, t }) {
     return () => clearInterval(timer);
   }, [running]);
   const elapsedEnd = running ? now : settledAt ?? now;
-  const elapsed = activity.startedAt ? formatElapsed(elapsedEnd - activity.startedAt) : "";
+  // 与监控面板同口径：总耗时从整条流程的审查开始，节点耗时从当前节点
+  // （审查 / 修复 / 复审）的起点算起，二者都跨批次稳定。
+  const flowStart =
+    Number(activity.flowStartedAt) > 0
+      ? Number(activity.flowStartedAt)
+      : Number(activity.startedAt) || 0;
+  const stageStart =
+    Number(activity.stageStartedAt) > 0
+      ? Number(activity.stageStartedAt)
+      : Number(activity.startedAt) || 0;
+  const totalElapsed = flowStart ? formatElapsed(elapsedEnd - flowStart) : "";
+  const nodeElapsed = stageStart ? formatElapsed(elapsedEnd - stageStart) : "";
+  const totalLabelKey = running ? "fx.activity.totalElapsed" : "fx.activity.totalFinished";
   // 已接收字符数来自正文 + 思考内容；最后更新时间只在检测到新输出 / 工具进展时刷新。
   const receivedChars = Number.isFinite(activity.receivedChars) ? activity.receivedChars : 0;
   const lastUpdateAt = Number.isFinite(activity.lastUpdateAt)
@@ -926,8 +938,19 @@ function ActivityCard({ activity, engine, api, t }) {
         h("span", null, statusText),
       ),
       h("b", { className: "fx-activity-title" }, kindText),
-      elapsed
-        ? h("span", { className: "fx-activity-meta" }, t("fx.activity.elapsed", { time: elapsed }))
+      totalElapsed
+        ? h(
+            "span",
+            { className: "fx-activity-meta" },
+            t(totalLabelKey, { time: totalElapsed }),
+          )
+        : null,
+      nodeElapsed
+        ? h(
+            "span",
+            { className: "fx-activity-meta" },
+            t("fx.activity.nodeElapsed", { time: nodeElapsed }),
+          )
         : null,
       activity.batchTotal > 1
         ? h(

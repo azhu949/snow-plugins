@@ -10,7 +10,8 @@
    ========================================================================== */
 
 .fx-overlay,
-.fx-panel {
+.fx-panel,
+.fx-monitor {
   --fx-text: var(--text-primary, #1f2328);
   --fx-text-2: var(--text-secondary, rgba(104, 112, 124, 0.96));
   --fx-text-3: var(--text-tertiary, rgba(128, 134, 146, 0.92));
@@ -2568,4 +2569,598 @@ body.fx-resizing {
 .review-status-limit svg {
   flex: none;
   margin-top: 1px;
+}
+
+/* ==========================================================================
+   跨项目执行监控浮层
+   - 展开态：紧凑头部 + 单行指标 + 文字操作，信息密度对齐 Token 用量仪表。
+   - 折叠态：一颗可拖动的胶囊，首次出现停在用量仪表右侧（位置由脚本测量写入）。
+   - 状态语义：状态点 + 状态药丸；运行中带脉冲点，异常单独用警示块。
+   ========================================================================== */
+
+/* 层级必须低于工作台浮层（.fx-overlay 为 2147483000）：展开态与浮层右上角几何重叠，
+   层级更高会吞掉浮层头部按钮的首次点击。层级低的前提是几何让位：工作台可见时脚本把面板
+   收成胶囊并让到浮层上沿之外，避免出现「按钮被盖住却仍可被 Tab 聚焦」的不可达控件。 */
+.fx-monitor-root {
+  position: fixed;
+  top: 8px;
+  right: 16px;
+  z-index: 2147482990;
+  max-width: calc(100vw - 16px);
+  pointer-events: none;
+}
+
+.fx-monitor-root > * {
+  pointer-events: auto;
+}
+
+.fx-monitor {
+  display: flex;
+  flex-direction: column;
+  width: 380px;
+  max-width: min(380px, calc(100vw - 16px));
+  max-height: min(520px, calc(100vh - 24px));
+  border: 1px solid var(--fx-line);
+  border-radius: var(--fx-r-lg);
+  background: var(--bg-primary, #ffffff);
+  box-shadow:
+    0 18px 48px color-mix(in srgb, var(--fx-text) 20%, transparent),
+    0 2px 8px color-mix(in srgb, var(--fx-text) 8%, transparent);
+  overflow: hidden;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--fx-text);
+  animation: fx-monitor-in 0.16s ease-out;
+}
+
+.fx-monitor *,
+.fx-monitor *::before,
+.fx-monitor *::after {
+  box-sizing: border-box;
+}
+
+/* ------------------------------- 折叠胶囊 ------------------------------- */
+
+.fx-monitor.is-collapsed {
+  width: auto;
+  max-width: none;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--bg-primary, #ffffff) 94%, transparent);
+  box-shadow:
+    0 8px 22px color-mix(in srgb, var(--fx-text) 16%, transparent),
+    0 1px 3px color-mix(in srgb, var(--fx-text) 8%, transparent);
+  transition:
+    background-color 0.15s ease,
+    transform 0.18s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.fx-monitor.is-collapsed:hover {
+  background: var(--bg-primary, #ffffff);
+  transform: translateY(-1px);
+}
+
+/* 折叠胶囊整颗都是拖动热区：内部按钮沿用抓取游标，拖动中切为 grabbing。 */
+.fx-monitor.is-collapsed,
+.fx-monitor.is-collapsed .fx-monitor-pill {
+  cursor: grab;
+}
+
+.fx-monitor-root.is-dragging .fx-monitor.is-collapsed,
+.fx-monitor-root.is-dragging .fx-monitor-pill,
+.fx-monitor-root.is-dragging .fx-monitor-head {
+  cursor: grabbing;
+}
+
+/* 拖动中保持原尺寸并关闭过渡：hover / 按下的缩放动画会让位移看起来慢半拍。 */
+.fx-monitor-root.is-dragging .fx-monitor.is-collapsed {
+  transform: none;
+  transition: none;
+}
+
+/* 拖动位移写在 transform 上：pointerdown 时已提前提升合成层，这里只负责拖动中禁止选中。 */
+.fx-monitor-root.is-dragging {
+  user-select: none;
+}
+
+.fx-monitor-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 30px;
+  padding: 0 10px 0 9px;
+  border: 0;
+  border-radius: inherit;
+  background: transparent;
+  color: var(--fx-text-2);
+  font: inherit;
+  font-size: 11.5px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.fx-monitor-pill:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--fx-accent) 45%, transparent);
+}
+
+.fx-monitor-pill-icon {
+  display: inline-flex;
+  align-items: center;
+  color: var(--fx-accent-text);
+}
+
+.fx-monitor-pill-title {
+  font-weight: 600;
+  color: var(--fx-text);
+}
+
+.fx-monitor-pill-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  min-width: 20px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--fx-surface-2);
+  color: var(--fx-text-2);
+  font-size: 10px;
+  font-weight: 650;
+  line-height: 1.7;
+  font-variant-numeric: tabular-nums;
+}
+
+.fx-monitor-pill-badge.is-running {
+  background: var(--fx-accent-soft);
+  color: var(--fx-accent-text);
+}
+
+.fx-monitor-pill-caret {
+  display: inline-flex;
+  align-items: center;
+  color: var(--fx-text-3);
+}
+
+/* -------------------------------- 头部 -------------------------------- */
+
+.fx-monitor-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 10px 9px 12px;
+  border-bottom: 1px solid var(--fx-line-soft);
+  background: color-mix(in srgb, var(--fx-surface) 52%, transparent);
+  cursor: grab;
+}
+
+.fx-monitor-head-icon {
+  flex: none;
+  display: inline-flex;
+  color: var(--fx-accent-text);
+}
+
+.fx-monitor-head-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.fx-monitor-title {
+  font-size: 12.5px;
+  font-weight: 650;
+  letter-spacing: 0.01em;
+}
+
+.fx-monitor-sub {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 10px;
+  margin-top: 1px;
+  font-size: 10px;
+  color: var(--fx-text-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.fx-monitor-sum {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+}
+
+.fx-monitor-sum.is-running {
+  color: var(--fx-accent-text);
+}
+
+.fx-monitor-collapse-icon {
+  transform: rotate(180deg);
+}
+
+/* 钉住按钮：图标按钮（基础样式沿用 .fx-icon-btn），钉住后保持展开，点击面板外部不再自动收起。 */
+.fx-monitor-pin {
+  flex: none;
+  color: var(--fx-text-3);
+}
+
+.fx-monitor-pin.is-active {
+  background: var(--fx-accent-soft);
+  color: var(--fx-accent-text);
+}
+
+.fx-monitor-pin.is-active:hover {
+  background: color-mix(in srgb, var(--fx-accent) 20%, transparent);
+}
+
+/* -------------------------------- 列表 -------------------------------- */
+
+.fx-monitor-list {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px 10px;
+  overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+}
+
+.fx-monitor-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 7px 9px;
+  border: 1px solid var(--fx-line-soft);
+  border-radius: var(--fx-r);
+  background: color-mix(in srgb, var(--fx-surface) 58%, transparent);
+  transition:
+    background-color 0.15s ease,
+    border-color 0.15s ease;
+}
+
+.fx-monitor-item:hover {
+  border-color: var(--fx-line);
+  background: color-mix(in srgb, var(--fx-surface) 92%, transparent);
+}
+
+.fx-monitor-item-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.fx-monitor-state {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  color: var(--fx-text-3);
+}
+
+.fx-monitor-state.is-running {
+  color: var(--fx-accent-text);
+}
+
+.fx-monitor-state.is-done {
+  color: var(--fx-green);
+}
+
+.fx-monitor-state.is-error {
+  color: var(--fx-danger);
+}
+
+.fx-monitor-state.is-detached {
+  color: var(--fx-orange);
+}
+
+.fx-monitor-project {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11.5px;
+  font-weight: 600;
+}
+
+.fx-monitor-current {
+  flex: none;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--fx-accent-soft);
+  color: var(--fx-accent-text);
+  font-size: 9px;
+  font-weight: 600;
+  line-height: 1.6;
+}
+
+.fx-monitor-status {
+  flex: none;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--fx-surface-2);
+  color: var(--fx-text-3);
+  font-size: 9px;
+  font-weight: 600;
+  line-height: 1.6;
+}
+
+.fx-monitor-status.is-running {
+  background: var(--fx-accent-soft);
+  color: var(--fx-accent-text);
+}
+
+.fx-monitor-status.is-done {
+  background: var(--fx-green-soft);
+  color: var(--fx-green);
+}
+
+.fx-monitor-status.is-error {
+  background: var(--fx-danger-soft);
+  color: var(--fx-danger);
+}
+
+.fx-monitor-status.is-detached {
+  background: var(--fx-orange-soft);
+  color: var(--fx-orange);
+}
+
+.fx-monitor-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 8px;
+  min-width: 0;
+  font-size: 10px;
+  color: var(--fx-text-3);
+}
+
+.fx-monitor-kind {
+  flex: none;
+  font-weight: 500;
+  color: var(--fx-text-2);
+}
+
+.fx-monitor-scope {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 指标与操作同处一行：指标可折行，操作是文字按钮，空间不足时整组换到下一行。 */
+.fx-monitor-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  min-width: 0;
+}
+
+.fx-monitor-metrics {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 8px;
+  font-size: 9.5px;
+  color: var(--fx-text-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.fx-monitor-metrics span {
+  white-space: nowrap;
+}
+
+.fx-monitor-metrics span + span::before {
+  content: "";
+  display: inline-block;
+  width: 3px;
+  height: 3px;
+  margin-right: 6px;
+  border-radius: 50%;
+  background: var(--fx-line);
+  vertical-align: middle;
+}
+
+.fx-monitor-actions {
+  flex: 0 1 auto;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 2px;
+  margin-left: auto;
+}
+
+/* 文字按钮：动作含义靠文案表达，不再用图标；hover 与面板其它次要按钮一致。 */
+.fx-monitor-action {
+  display: inline-flex;
+  align-items: center;
+  height: 22px;
+  padding: 0 6px;
+  border: 1px solid transparent;
+  border-radius: var(--fx-r-sm);
+  background: transparent;
+  color: var(--fx-text-3);
+  font: inherit;
+  font-size: 10px;
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background-color 0.15s ease,
+    color 0.15s ease,
+    border-color 0.15s ease;
+}
+
+.fx-monitor-action:hover {
+  background: var(--fx-hover);
+  color: var(--fx-text);
+}
+
+.fx-monitor-action:focus-visible {
+  outline: none;
+  border-color: var(--fx-accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--fx-accent) 32%, transparent);
+}
+
+/* 主操作：整行里唯一会修改工作台数据的按钮，用强调色文字突出。 */
+.fx-monitor-primary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 22px;
+  padding: 0 8px;
+  border: 1px solid color-mix(in srgb, var(--fx-accent) 26%, transparent);
+  border-radius: var(--fx-r-sm);
+  background: var(--fx-accent-soft);
+  color: var(--fx-accent-text);
+  font: inherit;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background-color 0.15s ease,
+    border-color 0.15s ease;
+}
+
+.fx-monitor-primary:hover {
+  border-color: color-mix(in srgb, var(--fx-accent) 40%, transparent);
+  background: color-mix(in srgb, var(--fx-accent) 20%, transparent);
+}
+
+.fx-monitor-primary:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--fx-accent) 32%, transparent);
+}
+
+.fx-monitor-error,
+.fx-monitor-warn {
+  padding: 4px 6px;
+  border-radius: var(--fx-r-sm);
+  font-size: 10px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.fx-monitor-error {
+  background: var(--fx-danger-soft);
+  color: var(--fx-danger);
+}
+
+.fx-monitor-warn {
+  background: var(--fx-orange-soft);
+  color: var(--fx-orange);
+}
+
+.fx-monitor-notice {
+  padding: 4px 6px;
+  border-radius: var(--fx-r-sm);
+  font-size: 10px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  background: var(--fx-surface-2);
+  color: var(--fx-text-2);
+}
+
+.fx-monitor-notice.is-success {
+  background: var(--fx-accent-soft);
+  color: var(--fx-accent);
+}
+
+.fx-monitor-notice.is-error {
+  background: var(--fx-danger-soft);
+  color: var(--fx-danger);
+}
+
+/* 清理确认态的范围说明：动作、条数与不可恢复警告在第二次点击前可见。 */
+.fx-monitor-cleanup {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.fx-monitor-cleanup-plan {
+  padding: 4px 6px;
+  border: 1px solid var(--fx-line-soft);
+  border-radius: var(--fx-r-sm);
+  background: var(--fx-surface-2);
+  color: var(--fx-text-2);
+  font-size: 10px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+/* 上一轮遗留的自动收尾提示：只读说明 + 安全入口，与可执行的暂存 / 清理按钮分开放置。 */
+.fx-monitor-carryover {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 5px 6px;
+  border: 1px solid var(--fx-line-soft);
+  border-radius: var(--fx-r-sm);
+  background: color-mix(in srgb, var(--fx-surface-2) 70%, transparent);
+  font-size: 10px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.fx-monitor-carryover-text {
+  font-weight: 600;
+  color: var(--fx-text-2);
+}
+
+.fx-monitor-carryover-hint {
+  color: var(--fx-text-3);
+}
+
+.fx-monitor-carryover .fx-monitor-actions {
+  margin-top: 1px;
+}
+
+/* -------------------------------- 底部 -------------------------------- */
+
+.fx-monitor-foot {
+  flex: none;
+  padding: 7px 12px 9px;
+  border-top: 1px solid var(--fx-line-soft);
+  font-size: 9.5px;
+  line-height: 1.5;
+  color: var(--fx-text-3);
+}
+
+@keyframes fx-monitor-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@media (max-width: 560px) {
+  .fx-monitor-root {
+    right: 8px;
+  }
+
+  .fx-monitor {
+    width: min(380px, calc(100vw - 16px));
+  }
+}
+
+/* 极窄窗口：操作整组独占一行并贴右，避免挤压项目名与指标。 */
+@media (max-width: 380px) {
+  .fx-monitor-actions {
+    width: 100%;
+    justify-content: flex-end;
+  }
 }

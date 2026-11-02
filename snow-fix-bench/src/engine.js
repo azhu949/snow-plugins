@@ -70,6 +70,7 @@ import {
   currentStep,
   normalizeStatusFilter,
   normalizeSeverityFilter,
+  resolveStageRunState,
 } from "./issues.js";
 import { buildReviewPrompt, buildFixPrompt, buildVerifyPrompt, estimateVerifyIssueChars, langText } from "./prompts.js";
 import { parseReviewResult, parseFixResults, parseVerifyResults, normalizeSeverityScope } from "./parse.js";
@@ -92,6 +93,110 @@ const ENGINE_CACHE = new WeakMap();
 // 活动指标写盘节流：流式输出期间指标持续变化，不能每轮轮询都整份保存状态。
 const ACTIVITY_METRICS_SAVE_MS = 60_000;
 
+// 本轮清理计划：目标 issue、候选会话与审查基准缺失都按冻结在会话上的设置推导。
+// 自动清理与监控面板的清理确认共用这一份口径，避免「确认时看到的范围」与「实际执行的范围」不一致。
+export function planCleanupRun(snapshot, session) {
+  const targetIds = new Set(
+    (Array.isArray(session.allIssueIds) && session.allIssueIds.length
+      ? session.allIssueIds
+      : session.issueIds) || [],
+  );
+  const cleanupKinds = new Set(normalizeCleanupSessionKinds(session.cleanupSessionKinds));
+  // 本轮修复会话始终用于匹配 issue 的修复来源；是否清理由勾选范围决定。
+  const fixSessionIds =
+    Array.isArray(session.sessionIds) && session.sessionIds.length
+      ? session.sessionIds
+      : [session.conversationId];
+  const fixConversationIds = new Set(fixSessionIds.map((conversationId) => String(conversationId)));
+  // 复审会话也属于本轮，按设置是否勾选「复审会话」决定是否一并归档 / 删除。
+  const verifySession = snapshot.state.sessions.verify;
+  const verifyForRun =
+    verifySession && verifySession.fixConversationId === session.conversationId ? verifySession : null;
+  // 审查会话按本轮目标 issue 的来源会话收集：只有勾选「审查会话」时才纳入清理。
+  // 只处理台账里仍记录的审查会话，避免对已被清理的旧来源重复发起归档 / 删除。
+  const knownReviewIds = new Set(
+    conversationsForKind(snapshot.state, "review").map((entry) => entry.conversationId),
+  );
+  // 修复期间用户新发起的审查若通过指纹命中并重开本轮 issue，会把 issue.source 改写为
+  // 新审查会话（见 mergeReviewIssues）。因此只收集本轮修复启动前已存在的审查会话，
+  // 避免把用户新发起的审查会话当成本轮来源归档 / 删除。
+  const reviewCreatedAt = new Map(
+    conversationsForKind(snapshot.state, "review").map((entry) => [
+      String(entry.conversationId),
+      Number(entry.createdAt) || 0,
+    ]),
+  );
+  // 本轮启动时间只使用 startFix 时冻结的事实值：续批会覆盖 startedAt，台账条目也可能
+  // 因清理或旧数据迁移缺失、时间失真，从台账反推会得到偏大的基准并扩大清理范围。
+  // 旧数据没有该字段时保持为 0，本轮的审查会话清理会保守跳过，避免不可逆误删。
+  const fixRunStartedAt = Number(session.runStartedAt) || 0;
+  // 自动清理只处理本轮「已修复」且复审未待确认的条目。
+  // 「不存在」是未改动代码的取证结论，误判成本不对称：一律保留，交由用户定向审查确认后
+  // 再在「处理结果」中显式勾选清理。该断言同时决定来源会话保护范围（见下）。
+  const isFixedForRun = (issue) =>
+    issue.status === ISSUE_STATUS.fixed &&
+    issue.verify?.status !== "uncertain" &&
+    fixConversationIds.has(String(issue.fix?.conversationId || ""));
+  // 未归档且仍未定论的条目还要靠来源会话取证：只要还有一条这样的条目引用某个审查会话，
+  // 该会话就不能清理，否则卡片的「来源会话」入口失效。已归档条目不再阻止清理：删除模式会在
+  // 清理成功后清空它们的来源引用（见下面的 delete 分支），入口随之消失，而不是变成死链。
+  // 被保留的「不存在」条目会阻止其来源会话被清理，这是保留证据链的预期代价。
+  const unresolvedSourceIds = new Set(
+    snapshot.state.issues
+      .filter((issue) => issue.status !== ISSUE_STATUS.archived && !isFixedForRun(issue))
+      .map((issue) => String(issue.source?.conversationId || ""))
+      .filter(Boolean),
+  );
+  // 勾选审查会话时先按台账与来源保护筛出候选会话，再单独判定时间基准：
+  // 这样能把「基准缺失（旧版本启动的轮次）」与「被来源保护过滤」区分开，前者必须提示用户。
+  const reviewCandidates = cleanupKinds.has("review")
+    ? Array.from(
+        new Set(
+          snapshot.state.issues
+            .filter((issue) => targetIds.has(issue.id))
+            .map((issue) => String(issue.source?.conversationId || ""))
+            .filter(
+              (conversationId) =>
+                Boolean(conversationId) &&
+                knownReviewIds.has(conversationId) &&
+                !unresolvedSourceIds.has(conversationId),
+            ),
+        ),
+      )
+    : [];
+  // 旧版本启动的修复轮次没有 runStartedAt：候选会话无法判定是否早于本轮，只能保守跳过。
+  // 这种情况必须计入提示，否则界面显示「处理 N 个会话」却不解释审查会话为何一个都没处理。
+  const reviewBaselineMissing = fixRunStartedAt <= 0 && reviewCandidates.length > 0;
+  const reviewIds = reviewCandidates.filter((conversationId) => {
+    const createdAt = reviewCreatedAt.get(conversationId) || 0;
+    // 审查创建时间或本轮启动时间无法确定时保守跳过，避免误删修复期间的新审查。
+    return createdAt > 0 && fixRunStartedAt > 0 && createdAt < fixRunStartedAt;
+  });
+  let sessionIds = Array.from(
+    new Set(
+      [
+        ...(cleanupKinds.has("fix") ? fixSessionIds : []),
+        ...(cleanupKinds.has("verify") ? verifyForRun?.sessionIds || [] : []),
+        ...reviewIds,
+      ].filter(Boolean),
+    ),
+  );
+  return {
+    action: session?.cleanupAction === "delete" ? "delete" : "archive",
+    targetIds,
+    fixConversationIds,
+    verifyForRun,
+    isFixedForRun,
+    sessionIds,
+    reviewBaselineMissing,
+    reviewCandidateCount: reviewCandidates.length,
+    issueCount: snapshot.state.issues.filter(
+      (issue) => targetIds.has(issue.id) && isFixedForRun(issue),
+    ).length,
+  };
+}
+
+
 export function resolveEngine(api) {
   let engine = ENGINE_CACHE.get(api);
   if (!engine) {
@@ -99,6 +204,12 @@ export function resolveEngine(api) {
     ENGINE_CACHE.set(api, engine);
   }
   return engine;
+}
+
+// 后台项目引擎：只负责某一个项目的会话跟踪与结果回写，不渲染界面、不抢占宿主
+// 的项目 / 会话切换。悬浮监控面板用它让非当前项目的修复流程继续执行。
+export function createHeadlessEngine(api, directoryId) {
+  return createEngine(api, { headless: true, directoryId: String(directoryId || "") });
 }
 
 // 严重程度范围比较：按归一化结果比对，避免顺序或重复差异被当成用户改动。
@@ -395,11 +506,20 @@ function isUnstagedFile(file) {
   return file.workdirStatus === "?" || (file.workdirStatus !== " " && file.workdirStatus !== "");
 }
 
-function createEngine(api) {
+function createEngine(api, options = {}) {
   const t = createT(() => api.locale);
+  const headless = options.headless === true;
+  const headlessProjectId = String(options.directoryId || "");
+  // 主引擎切换到某个项目前，监控面板先让出该项目的后台引擎：
+  // 否则后台引擎可能在主引擎读取状态之后继续写入，造成旧快照覆盖新进度。
+  let projectSwitchHook =
+    typeof options.onProjectSwitch === "function" ? options.onProjectSwitch : null;
   const store = createStore({
     status: "loading",
     error: "",
+    // 项目状态读取失败：项目本身可用（仍为 ready），但 state 只是空台账。
+    // 只放在快照顶层，不写入持久化 state：监控据此避免把空台账当成会话已退休。
+    stateUnavailable: false,
     project: null,
     state: createIssueState(null),
     git: {
@@ -422,6 +542,8 @@ function createEngine(api) {
     selected: [],
     dialog: null,
     activity: null,
+    // 用户在活动卡片上点过「关闭」的会话：监控面板据此同步移除对应条目。
+    dismissedActivity: null,
     // 审查完成时若用户正在使用其它弹窗，本次自动修复范围暂存到这里，等待列表入口重新打开。
     pendingAutoFix: null,
     toast: null,
@@ -435,6 +557,9 @@ function createEngine(api) {
   let projectSubscriptionPromise = null;
   let saving = Promise.resolve();
   let projectEpoch = 0;
+  // 引擎生命周期代次：unmount 到 0 时递增。发起于停止之前、仍在 await 的收尾链
+  // 据此在写盘前失去资格，把该项目交给接管方，避免旧快照覆盖新进度。
+  let stopEpoch = 0;
   const tracking = new Map();
   const starting = new Map();
   // 每个会话最近一次活动指标落盘时间：按 conversationId 独立节流，互不抑制。
@@ -470,6 +595,10 @@ function createEngine(api) {
     return store.get().project?.directoryId || "";
   }
 
+  function setProjectSwitchHook(hook) {
+    projectSwitchHook = typeof hook === "function" ? hook : null;
+  }
+
   function captureProject() {
     const project = store.get().project;
     if (!project?.directoryId) return null;
@@ -478,6 +607,7 @@ function createEngine(api) {
       name: project.name,
       path: project.path,
       epoch: projectEpoch,
+      stopEpoch,
     };
   }
 
@@ -486,6 +616,8 @@ function createEngine(api) {
     const directoryId = token?.directoryId || token?.projectId;
     if (!project || !directoryId || project.directoryId !== directoryId) return false;
     if (token.epoch !== undefined && token.epoch !== projectEpoch) return false;
+    // 停止前发起的 token 与当前生命周期代次不符：停止后不再写盘、不再续批。
+    if (token.stopEpoch !== undefined && token.stopEpoch !== stopEpoch) return false;
     return true;
   }
 
@@ -646,8 +778,18 @@ function createEngine(api) {
     return hasFixConflict(ids);
   }
 
+  // 后台引擎的这条会话是项目被接管时遗留的交接产物：它从未写入 state，也没有任何一方继续跟踪。
+  // 此时不能硬删除：宿主删除会连同刚启动的回合与记录一起丢弃，用户事后无从追溯这一批是否执行过。
+  // 归档保留会话与已产生的内容，符合「交接」而非「用户主动清理」的语义；归档同样会中止回合，
+  // 因此这里保住的是记录，而不是这次模型调用。
+  // 主引擎路径仍是用户明确放弃的一次性会话，沿用硬删除，避免归档列表堆积。
   async function closeConversation(conversationId) {
     if (!conversationId) return;
+    if (headless) {
+      // 归档失败也不降级为删除：交接场景宁可留下一条未归档会话，也不能不可恢复地删。
+      await runWrite("conversations.archive", { conversationIds: [conversationId] });
+      return;
+    }
     const removed = await runWrite("conversations.remove", { conversationId });
     if (!removed.ok) await runWrite("conversations.archive", { conversationIds: [conversationId] });
   }
@@ -659,6 +801,13 @@ function createEngine(api) {
     if (!conversationId) return false;
     const result = await runWrite("conversations.activate", { conversationId });
     return Boolean(result.ok);
+  }
+
+  // 后台引擎创建续批 / 复审会话时不能切换宿主界面，否则用户正在看的项目会被悄悄换走；
+  // 结果仍会写入项目状态，监控面板上的进度继续更新。
+  async function activateCreatedConversation(conversationId) {
+    if (headless) return true;
+    return activateConversation(conversationId);
   }
 
   async function runWrite(actionId, params) {
@@ -809,6 +958,12 @@ function createEngine(api) {
     }, 6000);
   }
 
+  // 供监控面板等外部控制器显示提示：后台引擎的 toast 不会渲染在界面上，
+  // 由主引擎统一提示，避免用户点了按钮却看不到执行结果。
+  function showToast(kind, text) {
+    setToast(kind, text);
+  }
+
   function clearToast() {
     if (toastTimer) {
       clearTimeout(toastTimer);
@@ -846,7 +1001,7 @@ function createEngine(api) {
   // 仅宿主持续报告 running 而没有可观测进展时不刷新，卡片才能显示“多久没更新”。
   // 指标只更新 store.activity：state.sessions 里的同一份指标改为落盘时合并，
   // 避免流式期间每轮进展都替换整份 state 引用、触发面板全量重渲染。
-  function updateActivityMetrics(conversationId, patch) {
+  function updateActivityMetrics(conversationId, patch, guard) {
     const current = store.get().activity;
     if (!current || current.conversationId !== conversationId) return;
     const next = { ...current };
@@ -877,9 +1032,11 @@ function createEngine(api) {
     });
     const at = nowMs();
     if (at - (metricsSavedAt.get(conversationId) || 0) < ACTIVITY_METRICS_SAVE_MS) return;
+    // 停止后仍在途的指标写盘会用旧快照覆盖接管方的新进度：只接受发起时冻结的代次。
+    if (guard && !isProjectCurrent(guard)) return;
     metricsSavedAt.set(conversationId, at);
     // 写盘按会话节流：saveState 内部合并最新指标，终态迁移的保存也会带走最新值。
-    void saveState({ projectId: latest.project?.directoryId });
+    void saveState({ projectId: latest.project?.directoryId, lifecycle: guard?.stopEpoch });
   }
 
   // 落盘前把内存指标合并进待写入的 state：只在保存路径发生，不参与逐轮通知。
@@ -911,6 +1068,13 @@ function createEngine(api) {
     const snapshot = store.get();
     const projectId = String(scope.projectId || snapshot.project?.directoryId || "");
     if (!projectId) return { ok: false };
+    // 停止后的在途收尾不再写盘：调用方显式传入发起时的生命周期代次，
+    // 代次不符即放弃本次写入，交给接管该项目的引擎。
+    // 例外：force 表示宿主副作用已经发生（如会话已删除 / 归档），
+    // 这笔记录不能丢弃，否则本地状态会与宿主永久不一致。
+    if (scope.force !== true && scope.lifecycle !== undefined && scope.lifecycle !== stopEpoch) {
+      return { ok: false, stopped: true };
+    }
     // 落盘前把内存中的活动指标并进 state：指标只在这里进入持久化与内存态。
     const state = applySessionMetrics(scope.state || snapshot.state);
     const payload = { ...state, projectId, updatedAt: nowMs() };
@@ -933,6 +1097,28 @@ function createEngine(api) {
         return { ok: false, error };
       });
     return saving;
+  }
+
+  // 清理写盘前的基线读取：同一项目的主引擎与后台引擎各有一份内存状态，
+  // 动作前冻结的基线可能早于接管方写入的新进度。这里读取盘上最新状态，
+  // 仅在调用方确认它确实更新时作为合并基座；读取失败或没有数据时返回 null。
+  async function readPersistedProjectState(projectId, fallbackState) {
+    try {
+      const raw = await api.storage.getJson(STORE_PREFIX + projectId);
+      if (!raw || typeof raw !== "object") return null;
+      // normalizeIssueState 会收敛版本与字段，并补齐会话台账。
+      const normalized = normalizeIssueState(raw, {
+        directoryId: projectId,
+        name: String(fallbackState?.projectName || ""),
+        path: String(fallbackState?.projectPath || ""),
+      });
+      // 归一化会给缺失 updatedAt 的历史 / 损坏数据补 nowMs()：那会让旧快照被误判成
+      // 「盘上更新」并顶掉内存里更新的进度。这里还原真实时间戳，缺失按 0 处理。
+      normalized.updatedAt = Number(raw.updatedAt) || 0;
+      return normalized;
+    } catch {
+      return null;
+    }
   }
 
   // 脚本级设置与项目 issue 分开存储：读取失败时保留默认值，不打断工作台启动。
@@ -1314,6 +1500,10 @@ function createEngine(api) {
       kind,
       conversationId: session.conversationId,
       startedAt: session.startedAt,
+      // 两级计时：flowStartedAt 是整条流程起点（审查开始），stageStartedAt 是当前阶段
+      // （审查 / 修复 / 复审）的起点，二者都跨批次稳定；0 表示旧数据未记录，按本批起点展示。
+      flowStartedAt: Number(session.flowStartedAt) || 0,
+      stageStartedAt: Number(session.stageStartedAt) || 0,
       phase: "waiting",
       message: "",
       error: "",
@@ -1385,6 +1575,14 @@ function createEngine(api) {
       kind: String(directory?.kind || "local"),
     };
     if (!project.directoryId) return;
+    if (projectSwitchHook) {
+      try {
+        // 接管前先等后台引擎把已入队的写盘完成：hook 返回 unmount 的 flush。
+        await projectSwitchHook(project.directoryId);
+      } catch {
+        // 监控侧异常不影响工作台自身的项目切换。
+      }
+    }
     const epoch = ++projectEpoch;
     // 切换项目时停止所有跟踪并作废在途启动，避免上一项目的会话结果写入新项目状态。
     cancelAllTracking();
@@ -1442,6 +1640,7 @@ function createEngine(api) {
       state,
       status: "ready",
       error: "",
+      stateUnavailable: Boolean(loadError),
       selected: [],
       statusFilter: "all",
       severityFilter: "all",
@@ -1460,8 +1659,12 @@ function createEngine(api) {
         commandError: "",
       },
     });
-    void loadGit();
-    void loadRootTree();
+    // 后台引擎只维护会话状态，不读取 Git / 文件树，避免切换项目时为非当前项目
+    // 产生多余的终端与文件系统调用。
+    if (!headless) {
+      void loadGit();
+      void loadRootTree();
+    }
     if (mounted > 0) resumeTracking();
   }
 
@@ -1517,7 +1720,18 @@ function createEngine(api) {
     try {
       const response = await api.metadata.get("projects");
       const domain = response?.domains?.projects;
-      store.set({ projects: normalizeProjects(domain) });
+      const normalized = normalizeProjects(domain);
+      store.set({ projects: normalized });
+      if (headless) {
+        // 后台引擎绑定固定项目：不跟随宿主当前项目，也不订阅项目切换。
+        const target = normalized.directories.find((item) => item.directoryId === headlessProjectId);
+        if (!target) {
+          store.set({ status: "error", error: "project-missing" });
+          return;
+        }
+        await setProject(target);
+        return;
+      }
       const active = domain?.active;
       if (!active?.directoryId) {
         store.set({ status: "no-project" });
@@ -1546,12 +1760,18 @@ function createEngine(api) {
 
   function unmount() {
     mounted = Math.max(0, mounted - 1);
-    if (mounted > 0) return;
+    if (mounted > 0) return null;
+    // 必须先递增代次再取消跟踪：在途 await 恢复后即使重新 mount，
+    // 旧 token 的 stopEpoch 也不会再匹配当前值。
+    stopEpoch += 1;
     cancelAllTracking();
     if (projectSubscription) {
       projectSubscription.unsubscribe();
       projectSubscription = null;
     }
+    // 返回已入队的写盘链：接管方在读取本项目状态前先等它完成，
+    // 避免后台引擎的在途保存与接管方读盘交错后被旧快照覆盖。
+    return saving.catch(() => null);
   }
 
   async function loadProjects() {
@@ -1841,7 +2061,7 @@ function createEngine(api) {
         throw new Error(t("fx.error.projectSwitched"));
       }
       // 会话创建成功后就切过去，避免用户还要在侧栏手动点一次。
-      await activateConversation(conversationId);
+      await activateCreatedConversation(conversationId);
       // activate 是宿主 IPC 往返：期间可能切换项目，必须重新校验后再读取当前状态。
       if (!isProjectCurrent(token)) {
         await closeConversation(conversationId);
@@ -1857,6 +2077,9 @@ function createEngine(api) {
             conversationId,
             title,
             startedAt: at,
+            // 审查就是整条流程的起点：后续由本轮审查触发的修复与自动复审都从这里累计总耗时。
+            flowStartedAt: at,
+            stageStartedAt: at,
             status: "running",
             scopeLabel: built.scopeLabel,
             // 冻结本次审查实际使用的严重度范围，完成解析时不读取可能已改动的设置。
@@ -1880,6 +2103,8 @@ function createEngine(api) {
           kind: "review",
           conversationId,
           startedAt: at,
+          flowStartedAt: at,
+          stageStartedAt: at,
           phase: "waiting",
           message: "",
           error: "",
@@ -1895,12 +2120,22 @@ function createEngine(api) {
             : t("fx.toast.reviewStartedScope", { scope: built.scopeLabel }),
         ),
       );
-      await saveState({ projectId: token.directoryId, state });
+      const saved = await saveState({
+        projectId: token.directoryId,
+        state,
+        lifecycle: token.stopEpoch,
+      });
+      if (saved?.stopped) {
+        // 写盘前已被停止：会话已经创建并 autoReply 发出提示词，不能留下无人跟踪的孤儿。
+        await closeConversation(conversationId);
+        throw new Error(t("fx.error.projectSwitched"));
+      }
       void track({
         kind: "review",
         conversationId,
         projectId: token.directoryId,
         epoch: token.epoch,
+        stopEpoch: token.stopEpoch,
       });
     } finally {
       releaseStart("review", reservation);
@@ -2143,7 +2378,7 @@ function createEngine(api) {
           if (busy) {
             lastActivityAt = nowMs();
             displayUpdateAt = lastActivityAt;
-            updateActivityMetrics(conversationId, { lastUpdateAt: displayUpdateAt });
+            updateActivityMetrics(conversationId, { lastUpdateAt: displayUpdateAt }, token);
           }
         }
       } else if (busy) {
@@ -2213,7 +2448,7 @@ function createEngine(api) {
         lastMessageSignature = messageSignature;
         lastActivityAt = nowMs();
         displayUpdateAt = lastActivityAt;
-        updateActivityMetrics(conversationId, { lastUpdateAt: displayUpdateAt });
+        updateActivityMetrics(conversationId, { lastUpdateAt: displayUpdateAt }, token);
       }
       // 会话可能在中途被删除：连续为空达到阈值后用 conversations 域确认存在性，
       // 首次跟踪与重连恢复都适用；确认不存在时立即结束，避免修复中状态挂到超时。
@@ -2239,7 +2474,7 @@ function createEngine(api) {
         if (isErrorStatus(message)) return total;
         return total + String(message.content || "").length + String(message.thinking || "").length;
       }, 0);
-      updateActivityMetrics(conversationId, { receivedChars, lastUpdateAt: displayUpdateAt });
+      updateActivityMetrics(conversationId, { receivedChars, lastUpdateAt: displayUpdateAt }, token);
       // 只把尾部、非流式、空内容的错误消息视为当前失败；历史错误或已重试成功不算。
       if (
         !isStreaming &&
@@ -2276,7 +2511,7 @@ function createEngine(api) {
           stableUnknown = 0;
           lastActivityAt = nowMs();
           displayUpdateAt = lastActivityAt;
-          updateActivityMetrics(conversationId, { lastUpdateAt: displayUpdateAt });
+          updateActivityMetrics(conversationId, { lastUpdateAt: displayUpdateAt }, token);
         }
         abortedPolls = 0;
         emptyResponsePolls = 0;
@@ -2333,9 +2568,12 @@ function createEngine(api) {
     }
   }
 
-  async function finishReview(conversationId, text, token) {
+  async function finishReview(conversationId, text, token, guardOverride) {
     const snapshot = store.get();
     if (token && (!isCurrentToken(token) || !isProjectCurrent(token))) return false;
+    // 入口冻结的生命周期代次：收尾内部重新 captureProject() 会在停止后拿到新代次，
+    // 等于绕开栅栏，因此续批 / 自动修复与写盘都必须沿用这一份。
+    const guard = token || guardOverride || captureProject();
     const session = snapshot.state.sessions.review;
     if (!session || session.conversationId !== conversationId) return false;
     const parsedResult = parseReviewResult(text, {
@@ -2363,7 +2601,11 @@ function createEngine(api) {
             : snapshot.activity,
       });
       setToast("error", t("fx.toast.reviewParseFailed"));
-      await saveState({ projectId: snapshot.project?.directoryId, state: failedState });
+      await saveState({
+        projectId: snapshot.project?.directoryId,
+        state: failedState,
+        lifecycle: guard?.stopEpoch,
+      });
       return true;
     }
     const parsed = parsedResult.issues;
@@ -2406,16 +2648,24 @@ function createEngine(api) {
           : t("fx.toast.reviewEmpty"),
       );
     }
-    await saveState({ projectId: snapshot.project?.directoryId, state: nextState });
+    await saveState({
+      projectId: snapshot.project?.directoryId,
+      state: nextState,
+      lifecycle: guard?.stopEpoch,
+    });
     // 自动修复：默认开启，但未确认过 opt-in 时先等待确认，避免升级后静默修改工作区。
     // 设置读取失败时内存值为默认 true，内层确认分支会拦住静默修改；
     // 外层只看开关本身，用户在会话内关闭后不再重复弹确认框。
     // 仅修复本次审查新增或重开的 issue；保存期间可能被归档 / 删除，
     // 因此以最新状态复核后仍为 open 才启动。
+    // 后台引擎没有渲染器，也不能替用户确认自动修复：未 opt-in 时确认框只落在内存、
+    // 用户回到项目后已丢失；已 opt-in 时则会在无人值守的后台新建修复会话并消耗模型调用。
+    // 与自动暂存 / 自动清理一致，自动修复只在工作台主引擎跟踪当前项目时执行。
     if (
+      !headless &&
       autoFixIds.length &&
       store.get().settings.autoFixAfterReview &&
-      (!token || isProjectCurrent(token))
+      (!guard || isProjectCurrent(guard))
     ) {
       const current = store.get();
       const openIds = new Set(
@@ -2448,7 +2698,7 @@ function createEngine(api) {
           void startFix(targets, { auto: true })
             .then((started) => {
               if (started) return;
-              if (token && !isProjectCurrent(token)) return;
+              if (guard && !isProjectCurrent(guard)) return;
               // 启动被复审 / 修复互斥拒绝时保留本轮范围，用户可在列表入口稍后重试。
               const latest = store.get();
               const stillFixable = targets.filter((id) =>
@@ -2468,6 +2718,7 @@ function createEngine(api) {
   async function finishFix(conversationId, text, token, options = {}) {
     const snapshot = store.get();
     if (token && (!isCurrentToken(token) || !isProjectCurrent(token))) return false;
+    const guard = token || options.guard || captureProject();
     const session = snapshot.state.sessions.fix;
     if (!session || session.conversationId !== conversationId) return false;
     const parsedResults = parseFixResults(text);
@@ -2527,7 +2778,11 @@ function createEngine(api) {
             : snapshot.activity,
       });
       setToast("error", t("fx.toast.fixParseFailed"));
-      await saveState({ projectId: snapshot.project?.directoryId, state: nextState });
+      await saveState({
+        projectId: snapshot.project?.directoryId,
+        state: nextState,
+        lifecycle: guard?.stopEpoch,
+      });
       return true;
     }
     const applied = applyFixResults(snapshot.state.issues, results, {
@@ -2554,16 +2809,22 @@ function createEngine(api) {
         blocked: applied.blocked,
       }),
     );
-    await saveState({ projectId: snapshot.project?.directoryId, state: nextState });
+    await saveState({
+      projectId: snapshot.project?.directoryId,
+      state: nextState,
+      lifecycle: guard?.stopEpoch,
+    });
 
     // 分批修复：本批完成后继续下一批；队列为空时收尾并按需自动清理。
     // 手动重新解析的路径不自动续批，避免与可能仍在运行的旧会话并发修改同一批文件。
     if (options.skipContinue === true) return true;
+    // 保存期间可能已被停止跟踪：剩余队列交给接管方，不再新建会话。
+    if (guard && !isProjectCurrent(guard)) return true;
     const latest = store.get();
     const currentSession = latest.state.sessions.fix;
     if (currentSession && currentSession.conversationId === conversationId) {
-      const outcome = await continueFixQueue(latest, currentSession, token);
-      if (outcome === "empty") await finishFixRun(currentSession);
+      const outcome = await continueFixQueue(latest, currentSession, guard);
+      if (outcome === "empty") await finishFixRun(currentSession, guard);
     }
     return true;
   }
@@ -2656,7 +2917,11 @@ function createEngine(api) {
         t("fx.activity.failed", { error: message }),
       );
       setToast("error", t("fx.toast.fixFailed", { error: message }));
-      await saveState({ projectId: project.directoryId, state: failedState });
+      await saveState({
+        projectId: project.directoryId,
+        state: failedState,
+        lifecycle: guard.stopEpoch,
+      });
       return "error";
     }
     const conversationId = created.data?.conversationId;
@@ -2673,15 +2938,21 @@ function createEngine(api) {
         t("fx.activity.failed", { error: message }),
       );
       setToast("error", t("fx.toast.fixFailed", { error: message }));
-      await saveState({ projectId: project.directoryId, state: failedState });
+      await saveState({
+        projectId: project.directoryId,
+        state: failedState,
+        lifecycle: guard.stopEpoch,
+      });
       return "error";
     }
+    // 创建期间后台引擎被接管（stopEpoch 递增）时，这条新会话已经用 autoReply 发出提示词：
+    // closeConversation 在后台只归档，保留本次派发的记录，不做不可恢复的删除。
     if (!isProjectCurrent(guard)) {
       await closeConversation(conversationId);
       return "error";
     }
     // 续批同样切换到新会话，用户可以立即看到下一批的执行过程。
-    await activateConversation(conversationId);
+    await activateCreatedConversation(conversationId);
     // activate 也是异步等待：期间可能切换项目、刷新或审查完成，必须重新校验。
     if (!isProjectCurrent(guard)) {
       await closeConversation(conversationId);
@@ -2747,6 +3018,10 @@ function createEngine(api) {
         kind: "fix",
         conversationId,
         startedAt: at,
+        // 续批沿用流程起点与修复节点起点，换批只刷新本批 startedAt。
+        flowStartedAt: Number(currentSession.flowStartedAt) || 0,
+        stageStartedAt:
+          Number(currentSession.stageStartedAt) || Number(currentSession.runStartedAt) || 0,
         phase: "waiting",
         message: "",
         error: "",
@@ -2766,12 +3041,26 @@ function createEngine(api) {
         }),
       ),
     );
-    await saveState({ projectId: project.directoryId, state: nextState });
+    const saved = await saveState({
+      projectId: project.directoryId,
+      state: nextState,
+      lifecycle: guard.stopEpoch,
+    });
+    if (saved?.stopped) {
+      // 续批会话已 autoReply 发出提示词，但状态没能落盘：归档这条孤儿会话。
+      // 盘上仍是上一批的 done + 非空 queue，由下一次装载的显式中断分支提示用户。
+      await closeConversation(conversationId);
+      return "error";
+    }
+    // 写盘成功后若已被停止：盘上是 running + 新会话，交给接管方恢复跟踪，
+    // 旧引擎不能再挂轮询（track 会用冻结代次拒绝）。
+    if (!isProjectCurrent(guard)) return "error";
     void track({
       kind: "fix",
       conversationId,
       projectId: project.directoryId,
       epoch: guard.epoch ?? projectEpoch,
+      stopEpoch: guard.stopEpoch,
     });
     return "started";
   }
@@ -3152,7 +3441,8 @@ function createEngine(api) {
   }
 
   // 全部批次完成：收尾会话状态；开启复审时先只读复核，再按需自动清理。
-  async function finishFixRun(session) {
+  async function finishFixRun(session, guard) {
+    if (guard && !isProjectCurrent(guard)) return;
     const snapshot = store.get();
     const projectId = snapshot.project?.directoryId;
     if (!projectId) return;
@@ -3166,9 +3456,11 @@ function createEngine(api) {
     };
     store.set({ state: doneState });
     setToast("success", t("fx.toast.fixAllDone", { batches: session.batchTotal }));
-    await saveState({ projectId, state: doneState });
+    await saveState({ projectId, state: doneState, lifecycle: guard?.stopEpoch });
     // 开了复审时，暂存与清理都等复审结束再执行：整条自动化链的最后一步才改写索引，
     // 修复刚结束就把改动塞进索引会让复审期间的 git 状态和用户预期不一致。
+    // 保存期间可能已被停止跟踪：不再启动复审，交给接管方继续。
+    if (guard && !isProjectCurrent(guard)) return;
     let verifyOutcome = "empty";
     if (store.get().settings?.verifyAfterFix) {
       verifyOutcome = await startVerify(session);
@@ -3177,8 +3469,11 @@ function createEngine(api) {
     }
     // 复审没有接管（关闭 / 本轮没有可复核目标 / 启动失败）：自动化链到此结束，先暂存再清理。
     // 启动失败时仍不自动清理：未完成复核的修复结论不能被自动归档 / 删除。
-    await stageFixRun(session, store.get().project);
-    if (verifyOutcome === "empty" && session.autoCleanup) await autoCleanupFixRun(session);
+    if (guard && !isProjectCurrent(guard)) return;
+    await stageFixRun(session, store.get().project, guard);
+    if (verifyOutcome === "empty" && session.autoCleanup) {
+      if (!guard || isProjectCurrent(guard)) await autoCleanupFixRun(session);
+    }
   }
 
   // 一轮修复的会话集合：修复会话用自身会话集合，复审会话用启动时冻结的修复会话集合。
@@ -3197,31 +3492,47 @@ function createEngine(api) {
     return Array.isArray(ids) ? ids.join("|") : "";
   }
 
-  // 已持久化的暂存结果：staging / done / error / empty 都表示本轮已经处理过。
-  // 重载后不重放本轮暂存，避免把用户随后的改动再次推进索引。
-  function isStageRunRecorded(ids) {
+  // 读取暂存状态时按时间戳收敛：超时口径统一由 resolveStageRunState 提供，
+  // 避免归一化、引擎去重与面板展示三处各写一份判断。
+  // 未超时的 staging 仍按已处理去重，避免把随后改动再次推进索引。
+  function stageRunStateWithAge(session) {
+    return resolveStageRunState(session, nowMs());
+  }
+
+  // 本轮已持久化的暂存状态；没有记录时返回空串。
+  // 面板据此区分「从未暂存」与「暂存失败」：后者仍要给出重试入口。
+  function stageRunStateOf(ids) {
     const target = stageRunKeyOf(ids);
-    if (!target) return false;
+    if (!target) return "";
     const sessions = store.get().state.sessions;
-    return ["fix", "verify"].some((kind) => {
+    for (const kind of ["fix", "verify"]) {
       const session = sessions[kind];
-      if (!session || !session.stageRunState) return false;
+      if (!session || !session.stageRunState) continue;
       const recorded =
         Array.isArray(session.stageRunIds) && session.stageRunIds.length
           ? stageRunKeyOf(session.stageRunIds)
           : stageRunKeyOf(stageRunIdsOf(session));
-      return recorded === target;
-    });
+      if (recorded === target) return stageRunStateWithAge(session);
+    }
+    return "";
+  }
+
+  // 已持久化的暂存结果：staging / done / error / empty 都表示本轮已经处理过。
+  // 重载后不重放本轮暂存，避免把用户随后的改动再次推进索引。
+  // 「暂存失败后由用户点重试」是唯一例外，由 stageFixRun 的 allowRetryFailed 放开。
+  function isStageRunRecorded(ids) {
+    return Boolean(stageRunStateOf(ids));
   }
 
   // 把暂存状态写回本轮会话：只更新三个标记字段，其余字段以最新快照为准，
   // 避免用调用方传入的旧会话对象覆盖并发写入的状态。
-  async function markStageRun(ids, outcome) {
+  async function markStageRun(ids, outcome, guard) {
+    if (guard && !isProjectCurrent(guard)) return;
     const snapshot = store.get();
     const projectId = snapshot.project?.directoryId;
     if (!projectId) return;
-    const guard = captureProject();
-    if (!guard || guard.directoryId !== projectId) return;
+    const projectGuard = guard || captureProject();
+    if (!projectGuard || projectGuard.directoryId !== projectId || !isProjectCurrent(projectGuard)) return;
     const target = stageRunKeyOf(ids);
     const nextSessions = { ...snapshot.state.sessions };
     let changed = false;
@@ -3239,33 +3550,87 @@ function createEngine(api) {
     if (!changed) return;
     const nextState = { ...snapshot.state, sessions: nextSessions };
     store.set({ state: nextState });
-    await saveState({ projectId, state: nextState });
+    await saveState({ projectId, state: nextState, lifecycle: projectGuard.stopEpoch });
   }
 
   // 自动暂存统一入口：一轮修复只暂存一次。复审开启时由复审收尾调用，
   // 关闭复审（或本轮没有可复核目标）时由修复收尾调用，保证暂存永远是自动化链的最后一步。
-  async function stageFixRun(session, project) {
-    if (!session || session.stageEnabled !== true) return;
+  async function stageFixRun(session, project, guard, options = {}) {
+    // 后台引擎不自动写 Git 索引：git add 属于用户可见的自动化收尾，
+    // 只在工作台主引擎处理当前项目时自动执行；用户在监控面板上显式点击
+    // 「暂存改动」时（userInitiated）才允许后台引擎补做，保证跨项目同样有入口。
+    if (headless && options.userInitiated !== true) return "deferred";
+    if (guard && !isProjectCurrent(guard)) return "deferred";
+    if (!session || session.stageEnabled !== true) return "empty";
     const ids = stageRunIdsOf(session);
     const runKey = stageRunKeyOf(ids);
-    if (!runKey || stagedRuns.has(runKey)) return;
+    if (!runKey) return "empty";
+    // 用户显式点「重试暂存」时，只有持久化状态确实是 error 才放开去重：
+    // done / staging / empty 仍然不重复执行 git add，避免把后续改动再次推进索引。
+    const retryFailed = options.allowRetryFailed === true && stageRunStateOf(ids) === "error";
+    if (retryFailed) stagedRuns.delete(runKey);
+    if (!retryFailed && stagedRuns.has(runKey)) return "done";
     // 已持久化的暂存结果同样算已完成：重载、恢复跟踪与重新解析都不会重复 git add。
-    if (isStageRunRecorded(ids)) {
+    if (!retryFailed && isStageRunRecorded(ids)) {
       stagedRuns.add(runKey);
-      return;
+      return "done";
     }
+
     // 先占位再执行：复审收尾与修复收尾不会因为并发回调各跑一次 git add。
     stagedRuns.add(runKey);
     let outcome = "error";
     try {
       // 执行前落盘占位：暂存途中重载也不会把本轮当成未处理而重放。
-      await markStageRun(ids, "staging");
+      await markStageRun(ids, "staging", guard);
       outcome = (await stageRunChanges(session, project)) || "error";
     } catch (error) {
       setToast("error", t("fx.toast.stageFailed", { error: String(error?.message || error) }));
     } finally {
-      await markStageRun(ids, outcome);
+      await markStageRun(ids, outcome, guard);
     }
+    return outcome;
+  }
+
+  // 监控面板上的显式补做暂存：本轮冻结的开关就是用户的授权，因此后台引擎也可以执行。
+  // 只处理已完成的修复轮次；自动清理不在这里执行——归档 / 删除会话仍走
+  // 「处理结果」对话框，由用户在目标项目的确认框里勾选。
+  async function stageRunManually() {
+    const snapshot = store.get();
+    if (snapshot.status !== "ready") return "deferred";
+    const project = snapshot.project;
+    if (!project?.directoryId) return "deferred";
+    const guard = captureProject();
+    if (!guard || !isProjectCurrent(guard)) return "deferred";
+    const fixSession = snapshot.state.sessions.fix;
+    const verifySession = snapshot.state.sessions.verify;
+    let target = null;
+    if (fixSession && fixSession.status === "done" && fixSession.stageEnabled === true) {
+      target = fixSession;
+    }
+    if (
+      !target &&
+      verifySession &&
+      verifySession.status === "done" &&
+      verifySession.stageEnabled === true &&
+      verifySession.fixConversationId
+    ) {
+      // 修复会话可能已被清理：复审会话冻结了同一轮修复的会话集合，用它作为去重键。
+      target = {
+        conversationId: verifySession.fixConversationId,
+        sessionIds: verifySession.fixSessionIds,
+        stageEnabled: true,
+      };
+    }
+    if (!target) return "empty";
+    const outcome = await stageFixRun(target, project, guard, {
+      userInitiated: true,
+      // 面板上的「重试暂存」只在收尾失败后出现：用户点击即授权重跑一次 git add。
+      allowRetryFailed: true,
+    });
+    // 执行期间项目被停止跟踪或引擎被卸载时，stageFixRun 会返回 empty：
+    // 这不是「没有可暂存的改动」，按未执行提示，避免误导。
+    if (outcome === "empty" && !isProjectCurrent(guard)) return "deferred";
+    return outcome;
   }
 
   // 复审结束后的收尾暂存：只读复审不改工作区，所以把暂存放到整条自动化链的最后。
@@ -3277,6 +3642,8 @@ function createEngine(api) {
     const snapshot = store.get();
     const project = snapshot.project;
     if (!project?.directoryId) return;
+    const guard = captureProject();
+    if (guard && !isProjectCurrent(guard)) return;
     const fixConversationId = String(verifySession.fixConversationId);
     const fixSession = snapshot.state.sessions.fix;
     // 新一轮修复已接管时，旧轮的暂存不能落到新轮的改动上。
@@ -3299,6 +3666,7 @@ function createEngine(api) {
         stageEnabled: verifySession.stageEnabled,
       },
       project,
+      guard,
     );
   }
 
@@ -3505,7 +3873,7 @@ function createEngine(api) {
       await closeConversation(conversationId);
       return "error";
     }
-    await activateConversation(conversationId);
+    await activateCreatedConversation(conversationId);
     if (!isProjectCurrent(guard)) {
       await closeConversation(conversationId);
       return "error";
@@ -3546,10 +3914,20 @@ function createEngine(api) {
       .map((issue) => issue.id);
     const liveTotal = liveQueue.length ? batchTotal : 1;
     const at = nowMs();
+    // 自动复审是本轮自动化链的收尾：流程起点沿用修复链（审查开始），节点起点是本批复审启动；
+    // 手动复审 / 定向审查由用户独立发起，流程与节点都以本次启动为准。
+    const flowStartedAt = manual
+      ? at
+      : Number(fixSession.flowStartedAt) ||
+        Number(fixSession.runStartedAt) ||
+        Number(fixSession.startedAt) ||
+        at;
     const verifySession = {
       conversationId,
       title,
       startedAt: at,
+      flowStartedAt,
+      stageStartedAt: at,
       status: "running",
       scopeLabel: recheckOnly
         ? liveTotal > 1
@@ -3605,6 +3983,8 @@ function createEngine(api) {
         kind: "verify",
         conversationId,
         startedAt: at,
+        flowStartedAt,
+        stageStartedAt: at,
         phase: "waiting",
         message: "",
         error: "",
@@ -3630,13 +4010,24 @@ function createEngine(api) {
             : t("fx.toast.verifyStarted", { count: stillIssues.length }),
       ),
     );
-    await saveState({ projectId: project.directoryId, state: nextState });
+    const saved = await saveState({
+      projectId: project.directoryId,
+      state: nextState,
+      lifecycle: guard.stopEpoch,
+    });
+    if (saved?.stopped) {
+      // 续批会话已 autoReply 发出提示词，但状态没能落盘：归档这条孤儿会话，
+      // 盘上保留上一批的已完成状态，接管方不会误以为还有可恢复的轮询。
+      await closeConversation(conversationId);
+      return "error";
+    }
     if (!isProjectCurrent(guard)) return "error";
     void track({
       kind: "verify",
       conversationId,
       projectId: project.directoryId,
       epoch: guard.epoch ?? projectEpoch,
+      stopEpoch: guard.stopEpoch,
     });
     return "started";
   }
@@ -3710,23 +4101,27 @@ function createEngine(api) {
       apiProfile: normalizeApiProfile(snapshot.settings?.apiProfile),
     });
     if (!created.ok) {
+      if (!isProjectCurrent(guard)) return "error";
       await failVerify(
         snapshot,
         session,
         session.conversationId,
         "verify-batch-create-failed",
         t("fx.toast.verifyBatchCreateFailed", { error: created.error || "conversations.create failed" }),
+        guard,
       );
       return "error";
     }
     const conversationId = created.data?.conversationId;
     if (!conversationId) {
+      if (!isProjectCurrent(guard)) return "error";
       await failVerify(
         snapshot,
         session,
         session.conversationId,
         "verify-batch-create-failed",
         t("fx.toast.verifyBatchCreateFailed", { error: "conversations.create returned no id" }),
+        guard,
       );
       return "error";
     }
@@ -3734,7 +4129,7 @@ function createEngine(api) {
       await closeConversation(conversationId);
       return "error";
     }
-    await activateConversation(conversationId);
+    await activateCreatedConversation(conversationId);
     if (!isProjectCurrent(guard)) {
       await closeConversation(conversationId);
       return "error";
@@ -3762,6 +4157,7 @@ function createEngine(api) {
         session.conversationId,
         "verify-batch-create-failed",
         t("fx.toast.verifyBatchEmpty"),
+        guard,
       );
       return "error";
     }
@@ -3818,6 +4214,9 @@ function createEngine(api) {
         kind: "verify",
         conversationId,
         startedAt: at,
+        // 续批沿用流程起点与复审节点起点，换批只刷新本批 startedAt。
+        flowStartedAt: Number(current.flowStartedAt) || 0,
+        stageStartedAt: Number(current.stageStartedAt) || 0,
         phase: "waiting",
         message: "",
         error: "",
@@ -3837,19 +4236,25 @@ function createEngine(api) {
         }),
       ),
     );
-    await saveState({ projectId: project.directoryId, state: nextState });
+    await saveState({
+      projectId: project.directoryId,
+      state: nextState,
+      lifecycle: guard.stopEpoch,
+    });
     if (!isProjectCurrent(guard)) return "error";
     void track({
       kind: "verify",
       conversationId,
       projectId: project.directoryId,
       epoch: guard.epoch ?? projectEpoch,
+      stopEpoch: guard.stopEpoch,
     });
     return "started";
   }
 
   // 复审失败收尾：保留会话与重解析入口，不标记完成、不触发自动清理。
-  async function failVerify(snapshot, session, conversationId, lastError, message) {
+  async function failVerify(snapshot, session, conversationId, lastError, message, guard) {
+    if (guard && !isProjectCurrent(guard)) return true;
     const nextState = {
       ...snapshot.state,
       sessions: {
@@ -3865,20 +4270,26 @@ function createEngine(api) {
           : snapshot.activity,
     });
     setToast("error", message);
-    await saveState({ projectId: snapshot.project?.directoryId, state: nextState });
+    await saveState({
+      projectId: snapshot.project?.directoryId,
+      state: nextState,
+      lifecycle: guard?.stopEpoch,
+    });
     // 复审的三种终态失败（解析失败 / 结论过期 / 续批会话创建失败）都不会走到
     // finishVerify 的暂存，按文档「中断即暂存」在这里补一次自动化链收尾。
     // stageAfterVerify 自带开关、同一轮修复与换代轮次守卫；复审不改工作区，
     // 提前暂存不会漏掉落盘改动，重新解析成功后也只会暂存一次。
+    if (guard && !isProjectCurrent(guard)) return true;
     await stageAfterVerify(nextState.sessions.verify);
     return true;
   }
 
   // 复审完成：回写结论；解析失败时保留修复结论，不自动清理，等待用户重试。
   // 分批时每批只回写本批白名单，队列清空后才标记完成并触发自动清理。
-  async function finishVerify(conversationId, text, token) {
+  async function finishVerify(conversationId, text, token, guardOverride) {
     const snapshot = store.get();
     if (token && (!isCurrentToken(token) || !isProjectCurrent(token))) return false;
+    const guard = token || guardOverride || captureProject();
     const session = snapshot.state.sessions.verify;
     if (!session || session.conversationId !== conversationId) return false;
     const results = parseVerifyResults(text);
@@ -3895,6 +4306,7 @@ function createEngine(api) {
         conversationId,
         "verify-parse-failed",
         t("fx.toast.verifyParseFailed"),
+        guard,
       );
     }
     // 续批创建失败后重新解析同一批：结论已经写过，不能再按“过期”拒绝，否则队列无法继续。
@@ -3918,6 +4330,7 @@ function createEngine(api) {
         conversationId,
         "verify-expired",
         t("fx.toast.verifyExpired"),
+        guard,
       );
     }
     const countedSession = {
@@ -3940,15 +4353,21 @@ function createEngine(api) {
           ? { ...snapshot.activity, phase: "done", message: "" }
           : snapshot.activity,
     });
-    await saveState({ projectId: snapshot.project?.directoryId, state: countedState });
+    await saveState({
+      projectId: snapshot.project?.directoryId,
+      state: countedState,
+      lifecycle: guard?.stopEpoch,
+    });
     // 还有后续批次时继续创建会话；只有队列耗尽或无可继续目标才收尾。
     const latest = store.get();
     const current = latest.state.sessions.verify;
     if (!current || current.conversationId !== conversationId) return true;
     if (Array.isArray(current.queue) && current.queue.length) {
-      const outcome = await continueVerifyQueue(latest, current, token);
+      const outcome = await continueVerifyQueue(latest, current, guard);
       if (outcome !== "empty") return true;
     }
+    // 续批期间可能已被停止跟踪：不再写终态，交给接管方。
+    if (guard && !isProjectCurrent(guard)) return true;
     const finalSnapshot = store.get();
     const finishedBase = finalSnapshot.state.sessions.verify;
     if (!finishedBase || finishedBase.conversationId !== conversationId) return true;
@@ -3979,11 +4398,18 @@ function createEngine(api) {
         },
       ),
     );
-    await saveState({ projectId: finalSnapshot.project?.directoryId, state: doneState });
+    await saveState({
+      projectId: finalSnapshot.project?.directoryId,
+      state: doneState,
+      lifecycle: guard?.stopEpoch,
+    });
     // 复审是自动化链的最后一环：先暂存本轮改动，再按需自动清理（清理会删掉本轮 issue，
     // 暂存必须排在它前面才能读到本轮改动的文件清单）。
+    if (guard && !isProjectCurrent(guard)) return true;
     await stageAfterVerify(finishedSession);
-    if (finishedSession.autoCleanup) await autoCleanupAfterVerify(finishedSession);
+    if (finishedSession.autoCleanup) {
+      if (!guard || isProjectCurrent(guard)) await autoCleanupAfterVerify(finishedSession);
+    }
     return true;
   }
 
@@ -4007,96 +4433,34 @@ function createEngine(api) {
 
   // 自动清理本轮已修复 issue 与本轮会话，动作为归档或删除。
   // 会话范围由设置里的「自动清理会话范围」决定：未勾选的类型保留，可在「处理结果」中手动清理。
-  async function autoCleanupFixRun(session) {
+  async function autoCleanupFixRun(session, options = {}) {
+    // 后台引擎不自动归档 / 删除会话：不可逆清理必须由用户显式触发。
+    // 监控面板的「清理」按钮以 userInitiated 调用，点击（含面板内二次确认）即用户授权。
+    if (headless && options.userInitiated !== true) return { status: "deferred" };
     const snapshot = store.get();
     const projectId = snapshot.project?.directoryId;
-    if (!projectId) return;
-    if (snapshot.state.sessions.fix?.conversationId !== session.conversationId) return;
-    const targetIds = new Set(
-      (Array.isArray(session.allIssueIds) && session.allIssueIds.length
-        ? session.allIssueIds
-        : session.issueIds) || [],
-    );
-    const cleanupKinds = new Set(normalizeCleanupSessionKinds(session.cleanupSessionKinds));
-    // 本轮修复会话始终用于匹配 issue 的修复来源；是否清理由勾选范围决定。
-    const fixSessionIds =
-      Array.isArray(session.sessionIds) && session.sessionIds.length
-        ? session.sessionIds
-        : [session.conversationId];
-    const fixConversationIds = new Set(fixSessionIds.map((conversationId) => String(conversationId)));
-    // 复审会话也属于本轮，按设置是否勾选「复审会话」决定是否一并归档 / 删除。
-    const verifySession = snapshot.state.sessions.verify;
-    const verifyForRun =
-      verifySession && verifySession.fixConversationId === session.conversationId ? verifySession : null;
-    // 审查会话按本轮目标 issue 的来源会话收集：只有勾选「审查会话」时才纳入清理。
-    // 只处理台账里仍记录的审查会话，避免对已被清理的旧来源重复发起归档 / 删除。
-    const knownReviewIds = new Set(
-      conversationsForKind(snapshot.state, "review").map((entry) => entry.conversationId),
-    );
-    // 修复期间用户新发起的审查若通过指纹命中并重开本轮 issue，会把 issue.source 改写为
-    // 新审查会话（见 mergeReviewIssues）。因此只收集本轮修复启动前已存在的审查会话，
-    // 避免把用户新发起的审查会话当成本轮来源归档 / 删除。
-    const reviewCreatedAt = new Map(
-      conversationsForKind(snapshot.state, "review").map((entry) => [
-        String(entry.conversationId),
-        Number(entry.createdAt) || 0,
-      ]),
-    );
-    // 本轮启动时间只使用 startFix 时冻结的事实值：续批会覆盖 startedAt，台账条目也可能
-    // 因清理或旧数据迁移缺失、时间失真，从台账反推会得到偏大的基准并扩大清理范围。
-    // 旧数据没有该字段时保持为 0，本轮的审查会话清理会保守跳过，避免不可逆误删。
-    const fixRunStartedAt = Number(session.runStartedAt) || 0;
-    // 自动清理只处理本轮「已修复」且复审未待确认的条目。
-    // 「不存在」是未改动代码的取证结论，误判成本不对称：一律保留，交由用户定向审查确认后
-    // 再在「处理结果」中显式勾选清理。该断言同时决定来源会话保护范围（见下）。
-    const isFixedForRun = (issue) =>
-      issue.status === ISSUE_STATUS.fixed &&
-      issue.verify?.status !== "uncertain" &&
-      fixConversationIds.has(String(issue.fix?.conversationId || ""));
-    // 未归档且仍未定论的条目还要靠来源会话取证：只要还有一条这样的条目引用某个审查会话，
-    // 该会话就不能清理，否则卡片的「来源会话」入口失效。已归档条目不再阻止清理：删除模式会在
-    // 清理成功后清空它们的来源引用（见下面的 delete 分支），入口随之消失，而不是变成死链。
-    // 被保留的「不存在」条目会阻止其来源会话被清理，这是保留证据链的预期代价。
-    const unresolvedSourceIds = new Set(
-      snapshot.state.issues
-        .filter((issue) => issue.status !== ISSUE_STATUS.archived && !isFixedForRun(issue))
-        .map((issue) => String(issue.source?.conversationId || ""))
-        .filter(Boolean),
-    );
-    // 勾选审查会话时先按台账与来源保护筛出候选会话，再单独判定时间基准：
-    // 这样能把「基准缺失（旧版本启动的轮次）」与「被来源保护过滤」区分开，前者必须提示用户。
-    const reviewCandidates = cleanupKinds.has("review")
-      ? Array.from(
-          new Set(
-            snapshot.state.issues
-              .filter((issue) => targetIds.has(issue.id))
-              .map((issue) => String(issue.source?.conversationId || ""))
-              .filter(
-                (conversationId) =>
-                  Boolean(conversationId) &&
-                  knownReviewIds.has(conversationId) &&
-                  !unresolvedSourceIds.has(conversationId),
-              ),
-          ),
-        )
-      : [];
-    // 旧版本启动的修复轮次没有 runStartedAt：候选会话无法判定是否早于本轮，只能保守跳过。
-    // 这种情况必须计入提示，否则界面显示「处理 N 个会话」却不解释审查会话为何一个都没处理。
-    const reviewBaselineMissing = fixRunStartedAt <= 0 && reviewCandidates.length > 0;
-    const reviewIds = reviewCandidates.filter((conversationId) => {
-      const createdAt = reviewCreatedAt.get(conversationId) || 0;
-      // 审查创建时间或本轮启动时间无法确定时保守跳过，避免误删修复期间的新审查。
-      return createdAt > 0 && fixRunStartedAt > 0 && createdAt < fixRunStartedAt;
-    });
-    let sessionIds = Array.from(
-      new Set(
-        [
-          ...(cleanupKinds.has("fix") ? fixSessionIds : []),
-          ...(cleanupKinds.has("verify") ? verifyForRun?.sessionIds || [] : []),
-          ...reviewIds,
-        ].filter(Boolean),
-      ),
-    );
+    if (!projectId) return { status: "deferred" };
+    if (snapshot.state.sessions.fix?.conversationId !== session.conversationId) {
+      return { status: "empty" };
+    }
+    // 本轮已在「处理结果」中被显式处置（含只保留修复会话）：cleanupRun 指向本轮时，
+    // 冻结的 delete / archive 已不再代表用户意图，复审收尾不得重放自动清理。
+    // 与 cleanupRunManually 的幂等口径一致，命中时零宿主副作用。
+    if (String(snapshot.state.cleanupRun?.fixConversationId || "") === String(session.conversationId)) {
+      return { status: "empty" };
+    }
+    const guard = captureProject();
+    if (!guard || !isProjectCurrent(guard)) return { status: "deferred" };
+    const plan = planCleanupRun(snapshot, session);
+    const {
+      targetIds,
+      fixConversationIds,
+      verifyForRun,
+      isFixedForRun,
+      reviewBaselineMissing,
+      reviewCandidateCount,
+    } = plan;
+    let sessionIds = plan.sessionIds;
     // 审查会话是普通会话，用户可继续追问触发新一轮输出：清理前必须用 runtime 核对运行状态，
     // 与「处理结果」手动清理的规则保持一致；修复 / 复审的旧批次同样核对，避免被重开时误删。
     let skippedSessionCount = 0;
@@ -4105,8 +4469,9 @@ function createEngine(api) {
     let runtimeUnreadable = false;
     if (sessionIds.length) {
       const runState = await readCleanupRunState(sessionIds);
-      // runtime 读取是异步往返：期间可能切换项目，必须重新校验。
-      if (currentProjectId() !== projectId) return;
+      // runtime 读取是异步往返：期间可能切换项目或被卸载，必须重新校验。
+      // 这一步仍在不可逆动作之前，守卫失败不会产生任何宿主副作用。
+      if (!isProjectCurrent(guard)) return { status: "deferred" };
       // runtime 不可读时无法证明任何待清理会话已结束：修复 / 复审会话同样可被用户在宿主
       // 重开后继续运行，持久化状态与台账无法替代宿主运行状态。此时不再整体暂停本轮清理，
       // 降级为「跳过全部会话、仅继续处理 issue」：会话交给「处理结果」手动确认（与手动清理
@@ -4126,6 +4491,10 @@ function createEngine(api) {
         }
       }
     }
+    // 不可逆动作发出后无法回滚：先冻结属于本项目的状态基线。
+    // 等待 runWrite 期间项目可能被切换，届时 store 里已是另一个项目，
+    // 不能再拿它作为本次写入的 base。
+    const runBase = store.get();
     const sessionIdSet = new Set(sessionIds.map((conversationId) => String(conversationId)));
     const requestedAction = session.cleanupAction === "delete" ? "delete" : "archive";
     // 删除不可恢复，且此时用户没有任何确认机会：runtime 不可读时把删除降级为归档，
@@ -4135,7 +4504,7 @@ function createEngine(api) {
     // 旧轮次缺少启动时间基准而被跳过的审查会话同样要计入提示，否则用户无从得知原因。
     // 该数量必须与仍在运行被保留的 skippedSessionCount 分开统计：基准缺失文案声称
     // 「N 个审查会话」，混入修复 / 复审会话会让数字与「处理结果」的实际遗留不符。
-    const baselineSkippedCount = reviewBaselineMissing ? reviewCandidates.length : 0;
+    const baselineSkippedCount = reviewBaselineMissing ? reviewCandidateCount : 0;
     let cleanupError = "";
     const cleanedIds = new Set();
     if (action === "delete") {
@@ -4160,62 +4529,102 @@ function createEngine(api) {
         if (cleanedIds.size === sessionIds.length) cleanupError = "";
       }
     }
-    if (currentProjectId() !== projectId) return;
     // 会话清理失败不再阻断 issue 的归档 / 删除：未成功的会话保留在台账与 conversationLog 中，
     // 交给「处理结果」手动重试，本轮已确认的修复结论仍照常写入，避免一次会话清理失败让
     // 整轮自动清理看似什么都没做。
+    // 宿主会话已经删除 / 归档：副作用既已发生，状态就必须记录，不能再以项目切换为由丢弃。
     const latest = store.get();
-    // 清理写会话期间可能已有审查完成并重新打开某个 issue：必须以最新状态重新筛选，
-    // 只处理仍是 fixed 且修复会话属于本轮的条目，避免误删回归项或归档为错误来源状态。
-    // 修复来源始终以本轮修复会话判定，与是否勾选「修复会话」清理无关。
-    const fixedIssues = latest.state.issues.filter(
-      // 复审未通过的条目已退回待修复；待确认的条目保留，避免把未验证的结论自动归档。
-      // 只收「已修复」：保留的「不存在」条目不在自动清理范围内。
-      (issue) => targetIds.has(issue.id) && isFixedForRun(issue),
-    );
-    const fixedIds = new Set(fixedIssues.map((issue) => issue.id));
-    let issues = latest.state.issues;
-    if (action === "delete") {
-      issues = issues.filter((issue) => !fixedIds.has(issue.id));
-      // 删除不可恢复：清空仍引用被删会话的条目来源（含已归档条目），
-      // 避免卡片留下必然打开失败的「来源会话」入口。
-      issues = clearIssueSourceConversations(issues, cleanedIds);
-    } else {
-      issues = issues.map((issue) => (fixedIds.has(issue.id) ? archiveIssueRecord(issue) : issue));
-    }
-    // 只有确认处理成功的会话才从台账移除；未成功或未勾选的会话保留供手动清理。
-    const sessions = { ...latest.state.sessions };
-    const fixSession = sessions.fix;
-    if (!fixSession || !fixSession.conversationId || cleanedIds.has(String(fixSession.conversationId))) {
-      sessions.fix = null;
-    } else {
-      sessions.fix = {
-        ...fixSession,
-        sessionIds: (Array.isArray(fixSession.sessionIds) ? fixSession.sessionIds : []).filter(
-          (conversationId) => !cleanedIds.has(String(conversationId)),
-        ),
+    const sameProject = latest.project?.directoryId === projectId;
+    // 项目已切换时 store 里是接管方的状态，不能作为本项目的 base；
+    // 动作前冻结的 runBase 同样不能整份覆盖：接管该项目的引擎（主引擎或后台引擎）
+    // 可能在等待宿主动作期间写入了新进度（issue 状态、sessions、conversationLog）。
+    // 因此写盘前重新读取本项目的持久化状态，只在其确实更新时作为合并基座。
+    const memoryBase = sameProject ? latest : runBase;
+    const persisted = await readPersistedProjectState(projectId, memoryBase.state);
+    const baseState =
+      persisted && Number(persisted.updatedAt) > Number(memoryBase.state?.updatedAt)
+        ? persisted
+        : memoryBase.state;
+    // 把本轮清理结果投影到给定基座：基座可能来自内存，也可能是写盘前重新读回的盘上状态。
+    // 除 issues / conversationLog / sessions / cleanupRun 外整份继承基座，
+    // 以盘上状态重建时才不会丢掉接管方刚写入的进度。
+    const projectCleanup = (base) => {
+      // 清理写会话期间可能已有审查完成并重新打开某个 issue：必须以基座的最新状态重新筛选，
+      // 只处理仍是 fixed 且修复会话属于本轮的条目，避免误删回归项或归档为错误来源状态。
+      // 修复来源始终以本轮修复会话判定，与是否勾选「修复会话」清理无关。
+      const fixedIssues = base.issues.filter(
+        // 复审未通过的条目已退回待修复；待确认的条目保留，避免把未验证的结论自动归档。
+        // 只收「已修复」：保留的「不存在」条目不在自动清理范围内。
+        (issue) => targetIds.has(issue.id) && isFixedForRun(issue),
+      );
+      const fixedIds = new Set(fixedIssues.map((issue) => issue.id));
+      let issues = base.issues;
+      if (action === "delete") {
+        issues = issues.filter((issue) => !fixedIds.has(issue.id));
+        // 删除不可恢复：清空仍引用被删会话的条目来源（含已归档条目），
+        // 避免卡片留下必然打开失败的「来源会话」入口。
+        issues = clearIssueSourceConversations(issues, cleanedIds);
+      } else {
+        issues = issues.map((issue) => (fixedIds.has(issue.id) ? archiveIssueRecord(issue) : issue));
+      }
+      // 只有确认处理成功的会话才从台账移除；未成功或未勾选的会话保留供手动清理。
+      const sessions = { ...base.sessions };
+      const fixSession = sessions.fix;
+      if (!fixSession || !fixSession.conversationId || cleanedIds.has(String(fixSession.conversationId))) {
+        sessions.fix = null;
+      } else {
+        sessions.fix = {
+          ...fixSession,
+          sessionIds: (Array.isArray(fixSession.sessionIds) ? fixSession.sessionIds : []).filter(
+            (conversationId) => !cleanedIds.has(String(conversationId)),
+          ),
+        };
+      }
+      // 复审会话同样只在确认清理成功后才移除，失败时保留供下一次清理重试。
+      // 基座可能来自盘上更新的状态，其中可能已有新一轮复审：只有仍是本轮那一条时才置空。
+      if (
+        verifyForRun &&
+        String(sessions.verify?.conversationId || "") === String(verifyForRun.conversationId) &&
+        cleanedIds.has(String(verifyForRun.conversationId))
+      ) {
+        sessions.verify = null;
+      }
+      // 审查会话被清理后同步移除记录，避免面板与「处理结果」把已归档会话当成待处理项。
+      if (sessions.review && cleanedIds.has(String(sessions.review.conversationId))) {
+        sessions.review = null;
+      }
+      // 基座里可能已有另一轮的清理标记：它指向基座中当前那一轮修复会话时，
+      // 不能被本轮覆盖，否则那一轮的面板「清理」入口会重新出现。
+      const baseCleanupRun = base.cleanupRun;
+      const keepsBaseCleanupRun =
+        Boolean(baseCleanupRun?.fixConversationId) &&
+        String(baseCleanupRun.fixConversationId) !== String(session.conversationId) &&
+        String(baseCleanupRun.fixConversationId) ===
+          String(base.sessions?.fix?.conversationId || "");
+      const nextState = {
+        ...base,
+        issues,
+        conversationLog: removeConversationsFromLog(base.conversationLog, cleanedIds),
+        sessions,
+        // 本轮清理结果：面板据此隐藏「清理」入口，重载后也不会重复执行。
+        cleanupRun: keepsBaseCleanupRun
+          ? baseCleanupRun
+          : {
+              fixConversationId: String(session.conversationId),
+              action,
+              at: nowMs(),
+            },
       };
-    }
-    // 复审会话同样只在确认清理成功后才移除，失败时保留供下一次清理重试。
-    if (verifyForRun && cleanedIds.has(String(verifyForRun.conversationId))) {
-      sessions.verify = null;
-    }
-    // 审查会话被清理后同步移除记录，避免面板与「处理结果」把已归档会话当成待处理项。
-    if (sessions.review && cleanedIds.has(String(sessions.review.conversationId))) {
-      sessions.review = null;
-    }
-    const nextState = {
-      ...latest.state,
-      issues,
-      conversationLog: removeConversationsFromLog(latest.state.conversationLog, cleanedIds),
-      sessions,
+      return { fixedIssues, nextState };
     };
+    const { fixedIssues, nextState } = projectCleanup(baseState);
     // 只关闭本轮被清理的会话卡片；等待期间新启动的审查卡片不能被一并清掉。
     const activity =
-      latest.activity && sessionIdSet.has(String(latest.activity.conversationId || ""))
+      memoryBase.activity && sessionIdSet.has(String(memoryBase.activity.conversationId || ""))
         ? null
-        : latest.activity;
-    store.set({ state: nextState, activity, selected: [] });
+        : memoryBase.activity;
+    // 项目已切换时 store 属于接管方：不改动它的界面状态；持久化仍写入本项目键。
+    if (sameProject) store.set({ state: nextState, activity, selected: [] });
     // skipped 只统计仍在运行或无法确认状态的会话，baseline 只统计基准缺失的审查会话：
     // 各分支文案各用各的数字，避免合计值在任一文案里被错误归因。
     const toastValues = {
@@ -4226,45 +4635,92 @@ function createEngine(api) {
     };
     // 提示优先级：清理失败 > 删除降级 > 基准缺失 > 常规归档 / 删除。
     // 降级与基准缺失都必须走 error 级，避免 6 秒后自动消失时用户错过「删除意图被否决」。
-    setToast(
-      cleanupError || downgradedToArchive || reviewBaselineMissing ? "error" : "success",
-      cleanupError
-        ? t("fx.toast.autoCleanupFailed", { error: cleanupError })
-        : downgradedToArchive
-          ? t("fx.toast.autoCleanupDowngraded", toastValues)
-          : reviewBaselineMissing
+    const toastKind =
+      cleanupError || downgradedToArchive || reviewBaselineMissing ? "error" : "success";
+    const toastText = cleanupError
+      ? t("fx.toast.autoCleanupFailed", { error: cleanupError })
+      : downgradedToArchive
+        ? t("fx.toast.autoCleanupDowngraded", toastValues)
+        : reviewBaselineMissing
+          ? t(
+              skippedSessionCount
+                ? action === "delete"
+                  ? "fx.toast.autoCleanupBaselineDeletedSkipped"
+                  : "fx.toast.autoCleanupBaselineArchivedSkipped"
+                : action === "delete"
+                  ? "fx.toast.autoCleanupBaselineDeleted"
+                  : "fx.toast.autoCleanupBaselineArchived",
+              toastValues,
+            )
+          : action === "delete"
             ? t(
                 skippedSessionCount
-                  ? action === "delete"
-                    ? "fx.toast.autoCleanupBaselineDeletedSkipped"
-                    : "fx.toast.autoCleanupBaselineArchivedSkipped"
-                  : action === "delete"
-                    ? "fx.toast.autoCleanupBaselineDeleted"
-                    : "fx.toast.autoCleanupBaselineArchived",
+                  ? "fx.toast.autoCleanupDeletedSkipped"
+                  : "fx.toast.autoCleanupDeleted",
                 toastValues,
               )
-            : action === "delete"
-              ? t(
-                  skippedSessionCount
-                    ? "fx.toast.autoCleanupDeletedSkipped"
-                    : "fx.toast.autoCleanupDeleted",
-                  toastValues,
-                )
-              : t(
-                  skippedSessionCount ? "fx.toast.autoCleanupDoneSkipped" : "fx.toast.autoCleanupDone",
-                  toastValues,
-                ),
-    );
-    await saveState({ projectId, state: nextState });
+            : t(
+                skippedSessionCount ? "fx.toast.autoCleanupDoneSkipped" : "fx.toast.autoCleanupDone",
+                toastValues,
+              );
+    // 写盘前最后一次回读：接管该项目的引擎可能在上面的基座读取之后又写入了新进度。
+    // 盘上时间戳确实前进时，以盘上状态重建基座并重新投影本轮清理结果，
+    // 避免这次写入把新审查结果 / 修复进度 / 会话台账整份回退。
+    const beforeWrite = await readPersistedProjectState(projectId, nextState);
+    const beforeWriteUpdatedAt = Number(beforeWrite?.updatedAt) || 0;
+    const writeState =
+      beforeWrite && beforeWriteUpdatedAt > (Number(baseState.updatedAt) || 0)
+        ? projectCleanup(beforeWrite).nextState
+        : nextState;
+    if (sameProject) setToast(toastKind, toastText);
+    // 宿主会话已经删除 / 归档：副作用已发生，必须落盘。
+    // force 只表示这笔记录不能丢（跳过生命周期代次校验），基座对齐由上面的回读保证。
+    await saveState({ projectId, state: writeState, force: true });
+    return {
+      status: "done",
+      issues: fixedIssues.length,
+      sessions: cleanedIds.size,
+      error: cleanupError,
+      action,
+      // 面板「确认清理」据此说明删除为何没执行、哪些会话被保留：
+      // action 只表示最终动作，无法区分「本就要归档」与「删除被降级」，因此单独给出 downgraded。
+      downgraded: downgradedToArchive,
+      skipped: skippedSessionCount,
+      baseline: baselineSkippedCount,
+    };
+  }
+
+  // 监控面板上的显式清理：本轮冻结的 autoCleanup / cleanupAction / cleanupSessionKinds
+  // 就是用户授权，面板内二次确认后立即执行，后台引擎同样可以执行。
+  async function cleanupRunManually() {
+    const snapshot = store.get();
+    if (snapshot.status !== "ready") return { status: "deferred" };
+    const project = snapshot.project;
+    if (!project?.directoryId) return { status: "deferred" };
+    const fixSession = snapshot.state.sessions.fix;
+    if (!fixSession || fixSession.status !== "done" || fixSession.autoCleanup !== true) {
+      return { status: "empty" };
+    }
+    // 已清理过同一轮：按钮应已隐藏，这里再做一次幂等保护。
+    if (snapshot.state.cleanupRun?.fixConversationId === String(fixSession.conversationId)) {
+      return { status: "empty" };
+    }
+    const guard = captureProject();
+    if (!guard || !isProjectCurrent(guard)) return { status: "deferred" };
+    return await autoCleanupFixRun(fixSession, { userInitiated: true });
   }
 
   async function track(job) {
+    // 生命周期代次必须由发起方冻结后显式传入：unmount 后 stopEpoch 已递增，
+    // 用实时代次兜底会给已停止的引擎发通行证，让它重新挂起轮询。
+    if (mounted === 0 || typeof job.stopEpoch !== "number") return;
     const token = {
       kind: job.kind,
       conversationId: job.conversationId,
       projectId: job.projectId || currentProjectId(),
       directoryId: job.projectId || currentProjectId(),
       epoch: job.epoch ?? projectEpoch,
+      stopEpoch: job.stopEpoch,
       cancelled: false,
     };
     // 启动路径在 await saveState 之后才调用 track：保存窗口内用户可能已停止跟踪
@@ -4349,7 +4805,11 @@ function createEngine(api) {
         "error",
         timedOut ? t("fx.activity.timeout") : displayError,
       );
-      await saveState({ projectId: token.projectId, state: nextState });
+      await saveState({
+        projectId: token.projectId,
+        state: nextState,
+        lifecycle: token.stopEpoch,
+      });
       // 复审中断（报错 / 超时）：自动化链无法继续，本轮改动不再等复审结论，直接收尾暂存。
       // 用户之后重新解析成功时，stageFixRun 的去重键会阻止重复 git add。
       if (job.kind === "verify") await stageAfterVerify(nextState.sessions.verify);
@@ -4383,6 +4843,7 @@ function createEngine(api) {
         conversationId: session.conversationId,
         projectId: project.directoryId,
         epoch: projectEpoch,
+        stopEpoch,
         resumed: true,
       });
     }
@@ -4390,6 +4851,9 @@ function createEngine(api) {
 
   async function detachTracking() {
     const snapshot = store.get();
+    // 停止跟踪会写回会话状态并可能触发复审收尾暂存：入口冻结代次，停止后不再落盘。
+    const guard = captureProject();
+    if (!guard || !isProjectCurrent(guard)) return;
     const activity = snapshot.activity;
     if (!activity) return;
     const token = tracking.get(activity.kind);
@@ -4405,8 +4869,13 @@ function createEngine(api) {
         },
       };
       store.set({ state, activity: { ...activity, phase: "detached", message: "" } });
-      await saveState({ projectId: snapshot.project?.directoryId, state });
+      await saveState({
+        projectId: snapshot.project?.directoryId,
+        state,
+        lifecycle: guard.stopEpoch,
+      });
       // 复审停止跟踪：只读复审不会再改动工作区，本轮暂存不必继续等复审结论。
+      if (!isProjectCurrent(guard)) return;
       if (sessionKey === "verify") await stageAfterVerify(state.sessions.verify);
       return;
     }
@@ -4415,6 +4884,9 @@ function createEngine(api) {
 
   async function retryParse() {
     const snapshot = store.get();
+    // 重新解析会读取宿主、回写结果甚至续批：入口冻结代次，期间被停止 / 接管必须放弃。
+    const guard = captureProject();
+    if (!guard || !isProjectCurrent(guard)) return;
     const activity = snapshot.activity;
     if (!activity) return;
     const sessionKey = sessionKeyOf(activity.kind);
@@ -4425,16 +4897,16 @@ function createEngine(api) {
     }
     // done 会话的结果已经合并过：再次解析会把已修复 issue 标成回归并重新打开。
     if (activity.phase !== "error" && activity.phase !== "detached") return;
-    const projectId = snapshot.project?.directoryId || "";
+    const projectId = guard.directoryId;
     // detached 只表示工作台停止读取，报错 / 超时同样不代表宿主会话已经结束。
     // 重新解析会合并结果，但仍要先确认会话已空闲，避免与仍在运行的宿主会话并发改文件。
     const detachedFix = sessionKey === "fix" && activity.phase === "detached";
     try {
       const { text, live } = await readConversationText(activity.conversationId);
-      if (currentProjectId() !== projectId) return;
+      if (!isProjectCurrent(guard)) return;
       if (store.get().activity?.conversationId !== activity.conversationId) return;
       const runState = await readSessionRunState(activity.conversationId, live);
-      if (currentProjectId() !== projectId) return;
+      if (!isProjectCurrent(guard)) return;
       const latest = store.get();
       const latestSession = latest.state.sessions[sessionKey];
       if (
@@ -4473,8 +4945,8 @@ function createEngine(api) {
         };
         store.set({ state: nextState });
       }
-      if (activity.kind === "review") await finishReview(activity.conversationId, text);
-      else if (activity.kind === "verify") await finishVerify(activity.conversationId, text);
+      if (activity.kind === "review") await finishReview(activity.conversationId, text, null, guard);
+      else if (activity.kind === "verify") await finishVerify(activity.conversationId, text, null, guard);
       else {
         // 手动重新解析只回写本批结果，不自动新建下一批会话。
         // 队列没有可派发的 issue 时仍交给 finishFix 收尾，保留自动清理路径。
@@ -4489,7 +4961,7 @@ function createEngine(api) {
           );
           if (next.batchIds.length) finishOptions = { skipContinue: true };
         }
-        await finishFix(activity.conversationId, text, null, finishOptions);
+        await finishFix(activity.conversationId, text, null, { ...finishOptions, guard });
       }
     } catch (error) {
       setToast("error", t("fx.activity.failed", { error: String(error?.message || error) }));
@@ -4499,12 +4971,14 @@ function createEngine(api) {
   // 手动停止跟踪或跟踪报错后，重新挂接同一会话：
   // 先把会话状态恢复为 running、活动回到 waiting，再按原有轮询继续读取结果。
   async function resumeActivityTracking() {
+    // 进入时冻结项目与生命周期代次：保存与重新挂接都使用这份 guard，
+    // 避免等待期间被主引擎接管 / 卸载后仍用实时代次给旧引擎发通行证。
+    const guard = captureProject();
+    if (!guard || !isProjectCurrent(guard)) return;
     const snapshot = store.get();
     const activity = snapshot.activity;
     if (!activity) return;
     if (activity.phase === "done" || activity.phase === "dismissed") return;
-    const project = snapshot.project;
-    if (!project?.directoryId) return;
     const sessionKey = sessionKeyOf(activity.kind);
     const session = snapshot.state.sessions[sessionKey];
     if (!session || session.conversationId !== activity.conversationId) {
@@ -4549,15 +5023,37 @@ function createEngine(api) {
         lastUpdateAt: restoredUpdateAt,
       },
     });
-    await saveState({ projectId: project.directoryId, state });
-    if (currentProjectId() !== project.directoryId) return;
+    const saved = await saveState({
+      projectId: guard.directoryId,
+      state,
+      lifecycle: guard.stopEpoch,
+    });
+    // 保存窗口内可能被主引擎接管或卸载：旧引擎必须放弃跟踪，
+    // 只由接管方继续轮询同一会话，避免双重解析与重复回写。
+    if (saved?.stopped || !isProjectCurrent(guard)) return;
     void track({
       kind: activity.kind,
       conversationId: activity.conversationId,
-      projectId: project.directoryId,
-      epoch: projectEpoch,
+      projectId: guard.directoryId,
+      epoch: guard.epoch,
+      stopEpoch: guard.stopEpoch,
       resumed: true,
     });
+  }
+
+  // 修复流程起点：选中 issue 全部来自当前审查会话时，沿用该审查的流程起点
+  // （审查 → 修复 → 自动复审属于同一条自动化链）；否则（历史 issue、混合来源、
+  // 直接修复）本轮修复自身就是流程起点，避免把几天前的审查时长算进来。
+  function resolveFixFlowStartedAt(snapshot, issues, fallback) {
+    const review = snapshot?.state?.sessions?.review;
+    const reviewId = String(review?.conversationId || "");
+    if (!reviewId) return fallback;
+    const fromReview =
+      issues.length > 0 &&
+      issues.every((issue) => String(issue.source?.conversationId || "") === reviewId);
+    if (!fromReview) return fallback;
+    const flow = Number(review.flowStartedAt) || Number(review.startedAt) || fallback;
+    return flow > 0 && flow <= fallback ? flow : fallback;
   }
 
   async function startFix(issueIds, options = {}) {
@@ -4579,6 +5075,8 @@ function createEngine(api) {
         (issue) => selectedIds.includes(issue.id) && isFixSelectable(issue),
       );
       if (!issues.length) throw new Error(t("fx.toast.noSelection"));
+      // 流程起点：由本轮审查触发的修复沿用审查开始时间，否则以本轮修复启动为准。
+      const flowStartedAt = resolveFixFlowStartedAt(snapshot, issues, runStartedAt);
       // 复审读取期间启动修复会让结论建立在半成品代码上：先串行。
       if (isSessionUnsettled(snapshot.state.sessions.verify, snapshot.activity)) {
         setToast("error", t("fx.toast.fixWaitVerify"));
@@ -4643,7 +5141,7 @@ function createEngine(api) {
         throw new Error(t("fx.error.projectSwitched"));
       }
       // 会话创建成功后就切过去，避免用户还要在侧栏手动点一次。
-      await activateConversation(conversationId);
+      await activateCreatedConversation(conversationId);
       // activate 期间可能切换项目，也可能有其他审查完成并更新 store：
       // 先复核项目，再基于最新状态构造本批修改，避免旧快照覆盖并发结果。
       if (!isProjectCurrent(token)) {
@@ -4691,6 +5189,9 @@ function createEngine(api) {
             startedAt: at,
             // 分批修复共用同一本轮启动时间，用于自动清理时区分修复期间新发起的审查会话。
             runStartedAt,
+            // 两级计时：流程起点（可能早于修复）与修复节点起点（首批启动）。
+            flowStartedAt,
+            stageStartedAt: runStartedAt,
             status: "running",
             scopeLabel: isMultiBatch
               ? t("fx.fix.scopeBatch", { count: liveIssues.length, batch: 1, total: batchTotal })
@@ -4728,6 +5229,8 @@ function createEngine(api) {
           kind: "fix",
           conversationId,
           startedAt: at,
+          flowStartedAt,
+          stageStartedAt: runStartedAt,
           phase: "waiting",
           message: "",
           error: "",
@@ -4745,12 +5248,22 @@ function createEngine(api) {
             : t("fx.toast.fixStarted"),
         ),
       );
-      await saveState({ projectId: token.directoryId, state: nextState });
+      const saved = await saveState({
+        projectId: token.directoryId,
+        state: nextState,
+        lifecycle: token.stopEpoch,
+      });
+      if (saved?.stopped) {
+        // 写盘前已被停止：会话已经创建并 autoReply 发出提示词，不能留下无人跟踪的孤儿。
+        await closeConversation(conversationId);
+        throw new Error(t("fx.error.projectSwitched"));
+      }
       void track({
         kind: "fix",
         conversationId,
         projectId: token.directoryId,
         epoch: token.epoch,
+        stopEpoch: token.stopEpoch,
       });
       return true;
     } finally {
@@ -4865,11 +5378,29 @@ function createEngine(api) {
     let activity = latest.activity;
     if (activity && cleanedIds.has(activity.conversationId)) activity = null;
     else if (activity && activity.phase === "done") activity = null;
+    // 「处理结果」同样是本轮的显式处置：用户为本轮修复会话选择「保留」后，
+    // 面板的「清理」不再代表其意图（它会按本轮冻结的动作删除 / 归档该会话）。
+    // 只在这个组合下写幂等标记：显式 keep（archive / delete 会让 sessions.fix 置空，
+    // 面板入口本就失效）、本轮确实开启自动清理、且会话已完成（此时弹窗默认 archive，
+    // keep 必为用户手选）。未带 fix 键的局部调用只处理了若干 issue，不算整轮已处理。
+    const runFixSession = initial.state.sessions.fix;
+    const runFixConversationId = String(runFixSession?.conversationId || "");
+    const runKeptByDialog =
+      Boolean(runFixConversationId) &&
+      runFixSession?.autoCleanup === true &&
+      runFixSession.status === "done" &&
+      sessionActions.fix === "keep" &&
+      String(sessions.fix?.conversationId || "") === runFixConversationId;
     const nextState = {
       ...latest.state,
       issues,
       conversationLog: removeConversationsFromLog(latest.state.conversationLog, cleanedIds),
       sessions,
+      // 本轮已被显式处理：写入幂等标记，面板不再显示会按冻结动作重放的「清理」入口。
+      // 未命中时保持原标记不动，避免影响其它轮次。
+      ...(runKeptByDialog
+        ? { cleanupRun: { fixConversationId: runFixConversationId, action: "keep", at: nowMs() } }
+        : {}),
     };
     store.set({
       state: nextState,
@@ -5057,8 +5588,20 @@ function createEngine(api) {
 
   async function dismissActivity() {
     const snapshot = store.get();
+    // 关闭卡片会写回会话终态并可能触发复审收尾暂存：入口冻结代次，停止后不再落盘。
+    const guard = captureProject();
+    if (!guard || !isProjectCurrent(guard)) return;
     const activity = snapshot.activity;
     if (!activity) return;
+    // 记录被关闭的会话：跨项目监控面板按同一会话移除对应条目，避免主面板已关闭
+    // 但监控面板还挂着一条已完成记录。
+    store.set({
+      dismissedActivity: {
+        conversationId: activity.conversationId,
+        kind: activity.kind,
+        at: nowMs(),
+      },
+    });
     if (activity.phase === "done" || activity.phase === "dismissed") {
       store.set({ activity: null });
       return;
@@ -5090,7 +5633,11 @@ function createEngine(api) {
         const token = tracking.get(sessionKey);
         if (token && token.conversationId === activity.conversationId) cancelToken(token);
         store.set({ state, activity: null });
-        await saveState({ projectId: snapshot.project?.directoryId, state });
+        await saveState({
+          projectId: snapshot.project?.directoryId,
+          state,
+          lifecycle: guard.stopEpoch,
+        });
         return;
       }
       store.set({ activity: null });
@@ -5121,7 +5668,12 @@ function createEngine(api) {
       if (sessionKey === "verify") stageVerifySession = state.sessions.verify;
     }
     store.set({ state, activity: null });
-    await saveState({ projectId: snapshot.project?.directoryId, state });
+    await saveState({
+      projectId: snapshot.project?.directoryId,
+      state,
+      lifecycle: guard.stopEpoch,
+    });
+    if (!isProjectCurrent(guard)) return;
     if (stageVerifySession) await stageAfterVerify(stageVerifySession);
   }
 
@@ -5608,9 +6160,11 @@ function createEngine(api) {
     store,
     mount,
     unmount,
+    setProjectSwitchHook,
     refresh,
     reload,
     clearToast,
+    showToast,
     activateProject,
     loadProjects,
     setStatusFilter,
@@ -5651,6 +6205,8 @@ function createEngine(api) {
     detachTracking,
     retryParse,
     resumeActivityTracking,
+    stageRunManually,
+    cleanupRunManually,
     loadCommitsViaCommand,
     canRunCommitCommand,
     buildReviewRequest,

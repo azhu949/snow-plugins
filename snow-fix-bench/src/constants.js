@@ -14,6 +14,17 @@ const STORE_PREFIX = "fixbench:v2:";
 const STORE_VERSION = 2;
 // 脚本级偏好：与项目 issue 分开存放，切换项目后仍然生效。
 const SETTINGS_KEY = `${STORE_PREFIX}settings`;
+// 跨项目执行登记：悬浮监控面板据此列出正在执行 / 已完成待处理的修复流程。
+// 与项目 issue 分开存放，切换项目或被跟踪项目不在前台时仍然有效。
+const MONITOR_KEY = `${STORE_PREFIX}monitor`;
+const MONITOR_VERSION = 1;
+// 已完成条目在面板中保留的时长：足够用户回来处理，避免长期堆积。
+const MONITOR_FINISHED_KEEP_MS = 7 * 24 * 60 * 60 * 1000;
+const MONITOR_MAX_ENTRIES = 20;
+// 暂存状态超过该时长仍是 staging，说明执行已被切换项目 / 卸载 / 关闭页面中断：
+// 读取侧按失败收敛，面板给出「重试暂存」，避免按钮永久停在禁用的「暂存中」。
+// 阈值需明显大于分批 git add 的实际耗时（单次调用上限 60 秒，文件多时会分多片）。
+const STAGE_RUN_STALE_MS = 10 * 60 * 1000;
 
 // 会话跟踪超时：不再使用固定总时长，而按“是否还有新进展”判定。
 // 代码审查在大型项目上可能跑过 15 分钟：只要会话仍在流式输出、执行工具或排队下一轮，
@@ -232,6 +243,9 @@ const FALLBACK = {
   "fx.activity.session": "会话 {{id}}",
   "fx.activity.hint": "面板只读取会话进度，不会中止 AI 运行。",
   "fx.activity.elapsed": "已运行 {{time}}",
+  "fx.activity.totalElapsed": "总耗时 {{time}}",
+  "fx.activity.totalFinished": "总用时 {{time}}",
+  "fx.activity.nodeElapsed": "本节点耗时 {{time}}",
   "fx.activity.phase": "阶段：{{phase}}",
   "fx.activity.receivedChars": "已接收 {{count}} 字符",
   "fx.activity.lastUpdate": "最后更新 {{time}}",
@@ -247,6 +261,68 @@ const FALLBACK = {
   "fx.activity.fixUnsettled": "修复会话可能仍在运行，请先继续跟踪或等待其结束后再重新解析。",
   "fx.activity.sessionUnsettled": "会话可能仍在运行，请先继续跟踪或等待其结束后再重新解析。",
   "fx.activity.verifyBatchFailed": "下一批复审会话创建失败，剩余批次已保留；可重新解析继续。",
+  "fx.activity.fixQueueInterrupted": "本批修复已完成，但续批期间跟踪被停止，剩余批次没有派发；可在列表中重新勾选剩余 issue 继续修复。",
+
+  "fx.monitor.title": "修复执行",
+  "fx.monitor.subtitle": "跨项目执行监控",
+  "fx.monitor.aria": "修复执行监控",
+  "fx.monitor.running": "{{count}} 个执行中",
+  "fx.monitor.pending": "{{count}} 个待处理",
+  "fx.monitor.summary": "{{running}} 个执行中 · {{finished}} 个待处理",
+  "fx.monitor.collapse": "收起",
+  "fx.monitor.expand": "展开",
+  "fx.monitor.expandOverWorkbench": "展开监控（会先收起工作台）",
+  "fx.monitor.pin": "钉住",
+  "fx.monitor.pinned": "已钉住",
+  "fx.monitor.current": "当前",
+  "fx.monitor.kind.review": "代码审查",
+  "fx.monitor.kind.fix": "批量修复",
+  "fx.monitor.kind.verify": "只读复核",
+  "fx.monitor.status.running": "执行中",
+  "fx.monitor.status.done": "已完成",
+  "fx.monitor.status.error": "跟踪中断",
+  "fx.monitor.status.detached": "已停止跟踪",
+  "fx.monitor.elapsed": "已运行 {{time}}",
+  "fx.monitor.totalElapsed": "总耗时 {{time}}",
+  "fx.monitor.finished": "用时 {{time}}",
+  "fx.monitor.totalFinished": "总用时 {{time}}",
+  "fx.monitor.nodeElapsed": "本节点耗时 {{time}}",
+  "fx.monitor.batch": "第 {{batch}}/{{total}} 批",
+  "fx.monitor.issues": "{{count}} 条 issue",
+  "fx.monitor.received": "已接收 {{count}} 字符",
+  "fx.monitor.updated": "{{time}}更新",
+  "fx.monitor.openWorkbench": "打开工作台",
+  "fx.monitor.openSession": "打开会话",
+  "fx.monitor.cleanup": "处理结果",
+  "fx.monitor.stage": "暂存改动",
+  "fx.monitor.staging": "暂存中",
+  "fx.monitor.stageRetry": "重试暂存",
+  "fx.monitor.stageUnsupported": "SSH 项目不支持自动暂存，请在远端仓库手动执行 git add。",
+  "fx.monitor.cleanupRun": "清理",
+  "fx.monitor.cleanupConfirm": "确认清理",
+  "fx.monitor.cleanupCancel": "取消",
+  "fx.monitor.cleanupRunning": "清理中",
+  "fx.monitor.cleanupConfirmDelete": "确认删除",
+  "fx.monitor.cleanupConfirmArchive": "确认归档",
+  "fx.monitor.cleanupPlanDelete": "将删除 {{issues}} 条 issue、至多 {{sessions}} 个会话",
+  "fx.monitor.cleanupPlanArchive": "将归档 {{issues}} 条 issue、至多 {{sessions}} 个会话",
+  "fx.monitor.cleanupIrreversible": "删除不可恢复：issue 与本轮相关会话都会永久丢失。",
+  "fx.monitor.cleanupBaseline": "{{count}} 个审查会话缺少启动时间基准，会保留，可在「处理结果」中手动处理。",
+  "fx.monitor.stop": "停止跟踪",
+  "fx.monitor.detachNoEngine": "该项目的后台引擎不可用，已停止面板跟踪；会话可能仍在宿主中运行，可用「打开会话」查看。",
+  "fx.monitor.detachNotReady": "该项目的后台跟踪尚未就绪，已停止面板跟踪；装载完成后不会自动恢复。会话可能仍在运行，可用「打开会话」查看。",
+  "fx.monitor.actionNotReady": "该项目的后台跟踪尚未就绪，请稍后重试。",
+  "fx.monitor.registryUnavailable": "监控登记读取失败或数据已损坏，已暂停写盘以保护其它项目的记录；本次只显示当前会话的进度。",
+  "fx.monitor.stateUnreadable": "项目状态读取失败，暂时无法确认执行进度；条目已保留，可用「打开会话」查看。",
+  "fx.monitor.resume": "继续跟踪",
+  "fx.monitor.retry": "重新解析",
+  "fx.monitor.dismiss": "关闭",
+  "fx.monitor.carryover": "上一轮「{{kind}}」的会话记录已被后续执行接管，其中自动收尾没有全部完成。",
+  "fx.monitor.carryoverStage": "自动暂存未完成：如改动尚未暂存，请打开上一轮会话确认改动文件后手动 git add。",
+  "fx.monitor.carryoverCleanup": "自动清理未完成：可在「处理结果」中确认后手动清理。",
+  "fx.monitor.carryoverSession": "打开上一轮会话",
+  "fx.monitor.carryoverDismiss": "知道了",
+  "fx.monitor.hint": "面板跨项目跟踪修复会话，不会中止 AI；已完成且本轮开启自动暂存的条目可直接点「暂存改动」，开启自动清理的条目点「清理」后会在确认态显示动作、issue 条数与会话数，删除不可恢复。点击面板外部自动收起，钉住后保持展开。",
 
   "fx.toast.reviewStarted": "已新建审查会话，正在跟踪结果。",
   "fx.toast.reviewStartedScope": "已新建审查会话（{{scope}}），正在跟踪结果。",
@@ -300,6 +376,18 @@ const FALLBACK = {
     "自动暂存已跳过：{{count}} 个候选路径包含无法安全传给 git 的字符，未执行 git add。候选：{{files}}。",
   "fx.toast.stageStatusUnavailable": "自动暂存已跳过：无法读取当前 Git 改动状态（{{error}}）。",
   "fx.toast.stageFailed": "自动暂存失败：{{error}}",
+  "fx.toast.stageManualDone": "已补做自动暂存：本轮修复的改动已进入暂存区。",
+  "fx.toast.stageManualEmpty": "未执行暂存：本轮没有可确认的改动文件。",
+  "fx.toast.stageManualFailed": "暂存失败：请在终端查看 Git 输出，或手动执行 git add。",
+  "fx.toast.stageManualDeferred": "暂存未执行：该项目当前不可用，请稍后重试。",
+  "fx.toast.stageManualUnavailable": "暂存不可用：无法读取该项目的状态。",
+  "fx.toast.cleanupManualDone": "已清理：{{issues}} 条 issue，{{sessions}} 个会话。",
+  "fx.toast.cleanupManualEmpty": "没有可清理的内容。",
+  "fx.toast.cleanupManualDeferred": "清理未执行：该项目当前不可用，请稍后重试。",
+  "fx.toast.cleanupManualFailed": "清理未完全成功：{{error}}",
+  "fx.toast.cleanupManualUnavailable": "清理不可用：无法读取该项目的状态。",
+  "fx.toast.resumeTrackingUnavailable": "继续跟踪不可用：无法读取该项目的状态。",
+  "fx.toast.retryParseUnavailable": "重新解析不可用：无法读取该项目的状态。",
   "fx.toast.stageNotFoundSkipped":
     "自动暂存已跳过：本轮候选文件都只被「不存在」条目声明（这些记录通常表示代码未改动）。候选：{{files}}。",
   "fx.stage.description": "自动暂存本轮修复改动（git add）",
@@ -553,6 +641,11 @@ export {
   STORE_PREFIX,
   STORE_VERSION,
   SETTINGS_KEY,
+  MONITOR_KEY,
+  MONITOR_VERSION,
+  MONITOR_FINISHED_KEEP_MS,
+  MONITOR_MAX_ENTRIES,
+  STAGE_RUN_STALE_MS,
   REVIEW_IDLE_TIMEOUT_MS,
   REVIEW_MAX_TIMEOUT_MS,
   FIX_IDLE_TIMEOUT_MS,
