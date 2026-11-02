@@ -166,9 +166,11 @@ function MonitorEntry({ entry, monitor, api, t, now, current, pending, notice })
     // 面板侧同时要求本轮修复会话仍存在（cleanupReady）：引擎的清理只作用于 sessions.fix，
     // 修复会话被「处理结果」归档后这个按钮点了只会提示没有可清理的内容。
     const cleanupPending = entry.autoCleanup && entry.cleanupState !== "done";
+    // 自动清理与面板清理共用引擎的在途锁：任一来源正在清理时都显示禁用的「清理中」。
+    const cleanupRunning = pending.cleanup === "running" || entry.cleanupState === "running";
     // 确认态必须让用户看到动作与范围：删除不可恢复（动作与确认态在组件作用域计算）。
     if (cleanupPending && entry.cleanupReady !== false) {
-      if (pending.cleanup === "running") {
+      if (cleanupRunning) {
         actions.push(textAction("cleanup", t("fx.monitor.cleanupRunning"), null, true));
       } else if (cleanupConfirming) {
         actions.push(

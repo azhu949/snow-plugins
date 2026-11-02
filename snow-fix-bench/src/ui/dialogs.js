@@ -477,7 +477,7 @@ function FixDialog({ dialog, snapshot, engine, api, t }) {
   const footer = h(
     "div",
     { className: "fx-dialog-actions" },
-    h("button", { className: "fx-btn", onClick: () => engine.closeDialog() }, t("fx.fix.cancel")),
+    h("button", { className: "fx-btn", onClick: () => engine.closeDialog({ decline: true }) }, t("fx.fix.cancel")),
     h(
       "button",
       {
@@ -492,7 +492,7 @@ function FixDialog({ dialog, snapshot, engine, api, t }) {
       busy ? t("fx.fix.busy") : t("fx.fix.start"),
     ),
   );
-  return h(DialogShell, { title: t("fx.fix.title"), closeLabel: t("fx.close"), api, error: dialog.error, onClose: () => engine.closeDialog(), footer }, body);
+  return h(DialogShell, { title: t("fx.fix.title"), closeLabel: t("fx.close"), api, error: dialog.error, onClose: () => engine.closeDialog({ decline: true }), footer }, body);
 }
 
 function VerifyDialog({ dialog, snapshot, engine, api, t }) {

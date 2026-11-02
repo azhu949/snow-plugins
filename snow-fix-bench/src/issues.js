@@ -1,5 +1,5 @@
 // issue 数据模型：合并、去重、状态流转与筛选排序。
-import { ISSUE_STATUS, SEVERITY, STORE_VERSION, SESSION_MISSING_POLLS, FALLBACK, VERIFY_STATUSES, STAGE_RUN_STALE_MS } from "./constants.js";
+import { ISSUE_STATUS, SEVERITY, STORE_VERSION, SESSION_MISSING_POLLS, FALLBACK, VERIFY_STATUSES, STAGE_RUN_STALE_MS, STAGE_RUN_RECOVER_MS } from "./constants.js";
 import { nowMs, uid, normalizeText } from "./util.js";
 import { normalizeSeverity, normalizeSeverityScope, severityRank, statusRank } from "./parse.js";
 import { normalizeCleanupSessionKinds } from "./settings.js";
@@ -697,6 +697,9 @@ function normalizeSession(raw) {
     // 自动暂存开关：随本轮冻结，重开后仍按同一轮判断是否暂存，避免误暂存或误报。
     // 旧的启动基线字段不再解析、不再写入，归一化时自然丢弃。
     stageEnabled,
+    // 修复完成后自动复审的开关：随本轮冻结，在线收尾与后台补做共用同一次判定；
+    // null 表示旧数据没有记录，读取方回退当前设置。
+    verifyEnabled: typeof raw.verifyEnabled === "boolean" ? raw.verifyEnabled : null,
     // 暂存去重状态：重载后据此判定本轮是否已经处理过暂存，避免重复 git add。
     stageRunIds: Array.isArray(raw.stageRunIds)
       ? Array.from(
@@ -718,6 +721,33 @@ function normalizeSession(raw) {
       ? raw.fixSessionIds.map(String).filter(Boolean)
       : [],
     fixIssueIds: Array.isArray(raw.fixIssueIds) ? raw.fixIssueIds.map(String).filter(Boolean) : [],
+    // 本轮审查完成后待自动修复的目标（新增 / 重开的 issue）。
+    // 审查收尾时写入，自动修复启动后清空为 []；null 表示旧数据没有记录，
+    // 恢复入口会按审查来源反推，后台引擎据此补做被宿主项目切换打断的自动修复。
+    autoFixIds:
+      raw.autoFixIds === null
+        ? null
+        : Array.isArray(raw.autoFixIds)
+          ? Array.from(
+              new Set(
+                raw.autoFixIds
+                  .map((id) => String(id || "").trim())
+                  .filter((id) => id && id.length <= 200),
+              ),
+            ).slice(0, 500)
+          : null,
+    // 本轮审查开始时冻结的自动修复开关：收尾派发、列表入口与后台补做共用这一份判定，
+    // 运行期间改设置不影响已开始的轮次；null 表示旧数据没有记录，读取方回退当前设置。
+    autoFixEnabled: typeof raw.autoFixEnabled === "boolean" ? raw.autoFixEnabled : null,
+    // 待自动修复范围的写入时刻（审查收尾）：恢复入口与后台补做共用的时效基准。
+    // 0 表示旧数据没有记录，回退 lastUpdateAt / startedAt。
+    autoFixReadyAt: Math.max(0, Number(raw.autoFixReadyAt) || 0),
+    // 用户取消 / 关闭自动修复确认框的时刻：0 表示未拒绝。
+    // 只阻止自动派发，不清空 autoFixIds，列表入口仍可手动重新确认。
+    autoFixDeclinedAt: Math.max(0, Number(raw.autoFixDeclinedAt) || 0),
+    // 自动修复派发在途时刻：会话创建到 sessions.fix 落盘之间，接管该项目的引擎
+    // 只能看到共享状态里的这个标记，据此按 busy 延后重试；0 表示没有在途派发。
+    autoFixDispatchingAt: Math.max(0, Number(raw.autoFixDispatchingAt) || 0),
     autoCleanup: Boolean(raw.autoCleanup),
     cleanupAction: raw.cleanupAction === "delete" ? "delete" : "archive",
     // 自动清理的会话范围在启动时随本轮冻结：旧数据缺失时回退默认（修复 + 复审）。
@@ -744,6 +774,19 @@ function resolveStageRunState(session, now = nowMs()) {
   if (outcome !== "staging") return outcome || "";
   const at = Number(session?.stageRunAt) || 0;
   return at > 0 && now - at <= STAGE_RUN_STALE_MS ? "staging" : "error";
+}
+
+// 自动补做收尾（暂存 / 复审）的时效口径：以最后一次可证明的活动时刻为基准
+// （暂存占位 / 会话更新 / 本轮启动）。缺少全部时间基准时按过期处理：
+// 宁可让用户在面板显式重试，也不在无人值守时写索引或为历史轮次新建模型会话。
+function isStageRecoverable(target, now = nowMs()) {
+  const at = Math.max(
+    Number(target?.stageRunAt) || 0,
+    Number(target?.lastUpdateAt) || 0,
+    Number(target?.runStartedAt) || 0,
+    Number(target?.startedAt) || 0,
+  );
+  return at > 0 && now - at <= STAGE_RUN_RECOVER_MS;
 }
 
 // 运行中的会话：持久化 status 为主，内存 activity 只对同一会话提供实时补充。
@@ -1117,4 +1160,5 @@ export {
   normalizeStatusFilter,
   normalizeSeverityFilter,
   resolveStageRunState,
+  isStageRecoverable,
 };

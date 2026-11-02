@@ -23,6 +23,7 @@ import {
   TREE_LOAD_LIMIT,
   SESSION_MISSING_POLLS,
   SESSION_MISSING_RECHECK_POLLS,
+  STAGE_RUN_STALE_MS,
   ISSUE_STATUS,
   MAX_VERIFY_BATCH_ISSUES,
   MAX_VERIFY_PROMPT_CHARS,
@@ -71,6 +72,7 @@ import {
   normalizeStatusFilter,
   normalizeSeverityFilter,
   resolveStageRunState,
+  isStageRecoverable,
 } from "./issues.js";
 import { buildReviewPrompt, buildFixPrompt, buildVerifyPrompt, estimateVerifyIssueChars, langText } from "./prompts.js";
 import { parseReviewResult, parseFixResults, parseVerifyResults, normalizeSeverityScope } from "./parse.js";
@@ -92,6 +94,15 @@ import { CUSTOM_PROMPT_SLOTS } from "./constants.js";
 const ENGINE_CACHE = new WeakMap();
 // 活动指标写盘节流：流式输出期间指标持续变化，不能每轮轮询都整份保存状态。
 const ACTIVITY_METRICS_SAVE_MS = 60_000;
+// 旧版本审查没有记录待自动修复范围（autoFixIds）时的补做窗口：只自动续跑最近一轮，
+// 更早的审查只在列表中保留手动入口，避免升级后对历史轮次批量消耗模型调用。
+const REVIEW_AUTOFIX_RECOVER_MS = 24 * 60 * 60 * 1000;
+// 自动派发在途租约：会话创建到 sessions.fix 落盘之间，接管该项目的引擎只能看到
+// 共享状态里的「派发中」标记。租约避免引擎崩溃 / 被项目切换 fence 后残留的标记
+// 让接管方永久 busy。
+const AUTO_FIX_DISPATCH_LEASE_MS = 2 * 60 * 1000;
+// 命中在途标记时的补做间隔：接管方按 busy 延后重试，而不是直接放弃本轮自动修复。
+const AUTO_FIX_DISPATCH_RETRY_MS = 5 * 1000;
 
 // 本轮清理计划：目标 issue、候选会话与审查基准缺失都按冻结在会话上的设置推导。
 // 自动清理与监控面板的清理确认共用这一份口径，避免「确认时看到的范围」与「实际执行的范围」不一致。
@@ -542,6 +553,8 @@ function createEngine(api, options = {}) {
     selected: [],
     dialog: null,
     activity: null,
+    // 清理在途状态：只放在快照顶层，不写入持久化 state，重载后不会残留。
+    cleanupInFlight: null,
     // 用户在活动卡片上点过「关闭」的会话：监控面板据此同步移除对应条目。
     dismissedActivity: null,
     // 审查完成时若用户正在使用其它弹窗，本次自动修复范围暂存到这里，等待列表入口重新打开。
@@ -580,7 +593,24 @@ function createEngine(api, options = {}) {
   // 已执行过自动暂存的本轮修复：复审收尾与修复收尾共用同一把去重键（修复会话集合），
   // 避免同一轮改动被 git add 两次、提示重复弹出。
   const stagedRuns = new Set();
+  // 清理在途槽位：同一轮复用同一个任务，不同轮次串行，避免重复写宿主与项目状态。
+  let cleanupInFlight = null;
+  // 自动收尾补做的单飞标记：mount / 切换项目连续触发时只跑一次。
+  let pendingFinishRunning = false;
+  // 补做任务的代次：切换项目 / 卸载后旧任务的 finally 不能清掉新任务的单飞标记。
+  let pendingFinishSeq = 0;
+  // staging 被切项目中断后的延迟补做：等到统一超时口径再重试，避免与原 git add 并发。
+  let pendingFinishTimer = 0;
+  // 待自动修复的恢复任务单飞标记：挂载 / 切回项目连续触发时只启动一次修复。
+  let pendingAutoFixRunning = false;
+  let pendingAutoFixSeq = 0;
+  // 修复 / 复审收尾后的补做触发：收尾运行在 track 的 try 内，此刻 tracking 仍持有
+  // 当前 token，直接调用 resumePendingAutoFix 会被 busy 分支拒绝，因此推迟到收尾任务之后。
+  // timer 单飞：同一轮多个结束事件只安排一次；seq 用于卸载 / 切项目后作废旧回调。
+  let pendingAutoFixKicker = 0;
+  let pendingAutoFixKickSeq = 0;
   let persistBlocked = false;
+
   let gitSeq = 0;
   let treeSeq = 0;
   let commandSeq = 0;
@@ -1155,19 +1185,34 @@ function createEngine(api, options = {}) {
       merged.customPrompts = { ...base.customPrompts, ...patch.customPrompts };
     }
     const next = normalizeSettings(merged);
-    // 调用方显式改写开关（设置弹窗或确认流程）即视为用户确认，之后不再重复询问。
-    if (Object.prototype.hasOwnProperty.call(patch || {}, "autoFixAfterReview")) {
+    // 显式确认自动修复才写入确认凭据：确认框点开始，或在设置里把开关打开。
+    // 关闭开关不再算确认，避免「关闭后又被当成已确认」被后台路径继承。
+    if (patch?.autoFixOptIn === true || patch?.autoFixAfterReview === true) {
       next.autoFixOptIn = true;
+      next.autoFixOptInConfirmedAt = nowMs();
     }
     if (!loaded) {
       store.set({ settings: next });
+      refreshAutoFixEntry();
       return { ok: false, persisted: false, settings: next };
     }
     store.set({ settings: next });
+    refreshAutoFixEntry();
     try {
       await api.storage.setJson(SETTINGS_KEY, next);
       // 设置已成功落盘，读取失败的降级状态随之解除。
       store.set({ settingsLoadFailed: false });
+      // 关闭自动修复即作废当前审查尚未派发的范围：派发与恢复共用「当前开关可否决」的口径，
+      // 避免用户重新开启后补派发本轮已经取消的自动修复。没有范围时不会产生额外写盘。
+      if (next.autoFixAfterReview !== true) {
+        try {
+          await clearReviewAutoFixIds(captureProject());
+        } catch {
+          // 项目状态写失败不能反过来让设置保存显示失败：当前开关关闭时范围同样无法被恢复。
+        }
+      }
+      // settingsLoadFailed 解除后才能重新判定入口：设置恢复时旧轮次可能应重新显示。
+      refreshAutoFixEntry();
       return { ok: true, persisted: true, settings: next };
     } catch (error) {
       // 写盘失败时回滚到本次合并前的可信基底，避免未保存的值继续参与后续逻辑。
@@ -1180,6 +1225,25 @@ function createEngine(api, options = {}) {
       );
       return { ok: false, persisted: false, error };
     }
+  }
+
+  // 自动修复的显式确认凭据：旧版本推断出的 autoFixOptIn 不能证明用户在新版本确认过，
+  // 只有确认框 / 显式开启开关写入的时间戳才算，避免升级后无人值守地修改工作区。
+  function hasConfirmedAutoFix(settings) {
+    return (
+      settings?.autoFixAfterReview === true &&
+      settings?.autoFixOptIn === true &&
+      Number(settings?.autoFixOptInConfirmedAt) > 0
+    );
+  }
+
+  // 开关变化后立即同步列表入口：关闭自动修复时收起「开始自动修复」，避免误导。
+  // 只收起不创建：入口的创建仍由 setProject / 审查收尾负责，避免脱离上下文复活旧轮次。
+  function refreshAutoFixEntry() {
+    const snapshot = store.get();
+    if (snapshot.status !== "ready") return;
+    if (resolveAutoFixRound(snapshot.state, snapshot).enabled) return;
+    if (snapshot.pendingAutoFix) store.set({ pendingAutoFix: null });
   }
 
   async function readDirectory(path) {
@@ -1575,6 +1639,15 @@ function createEngine(api, options = {}) {
       kind: String(directory?.kind || "local"),
     };
     if (!project.directoryId) return;
+    // 切项目后旧项目的延迟补做不再适用于新项目：只保留新项目自己的收尾。
+    if (pendingFinishTimer) {
+      clearTimeout(pendingFinishTimer);
+      pendingFinishTimer = 0;
+    }
+    // 旧项目的补做任务会通过代次守卫自行退出；允许新项目立即开始自己的补做。
+    pendingFinishSeq += 1;
+    pendingFinishRunning = false;
+    cancelResumePendingAutoFix();
     if (projectSwitchHook) {
       try {
         // 接管前先等后台引擎把已入队的写盘完成：hook 返回 unmount 的 flush。
@@ -1647,7 +1720,9 @@ function createEngine(api, options = {}) {
       searchQuery: "",
       dialog: null,
       activity: buildActivityFromState(state),
-      pendingAutoFix: null,
+      // 审查完成但自动修复未派发（未确认 / 互斥 / 设置读取失败）时恢复列表入口；
+      // autoFixIds 随项目状态持久化，切回项目或重载后都不会丢失。
+      pendingAutoFix: restorePendingAutoFix(state),
       tree: { root: project.path, nodes: [], expanded: {}, loading: {}, error: "", unavailable: false },
       git: {
         loading: true,
@@ -1665,7 +1740,18 @@ function createEngine(api, options = {}) {
       void loadGit();
       void loadRootTree();
     }
-    if (mounted > 0) resumeTracking();
+    // 旧项目在途的自动修复补做已随代次失效：新项目必须能立即发起自己的补做，
+    // 否则旧任务的 finally 之前，这里的 resume 会被单飞标记直接拒绝且没有重试点。
+    // 递增代次让旧任务的 finally 因 seq 不匹配自动失效，不能用它清掉新的标记。
+    pendingAutoFixSeq += 1;
+    pendingAutoFixRunning = false;
+    if (mounted > 0) {
+      resumeTracking();
+      // 切回 / 重新挂载后补做此前被代次守卫中止的自动收尾。
+      void resumePendingFinish();
+      // 后台引擎接管 / 切回项目后继续本轮尚未派发的自动修复。
+      void resumePendingAutoFix().catch(() => {});
+    }
   }
 
   function ensureProjectSubscription() {
@@ -1755,16 +1841,32 @@ function createEngine(api, options = {}) {
     if (store.get().status === "ready") {
       ensureProjectSubscription();
       resumeTracking();
+      // 页面重载后后台引擎接管项目时同样补做未完成的自动收尾。
+      void resumePendingFinish();
+      // 审查已完成但自动修复尚未派发的轮次由接管引擎继续。
+      void resumePendingAutoFix().catch(() => {});
     }
   }
 
   function unmount() {
+
     mounted = Math.max(0, mounted - 1);
     if (mounted > 0) return null;
     // 必须先递增代次再取消跟踪：在途 await 恢复后即使重新 mount，
     // 旧 token 的 stopEpoch 也不会再匹配当前值。
     stopEpoch += 1;
     cancelAllTracking();
+    if (pendingFinishTimer) {
+      clearTimeout(pendingFinishTimer);
+      pendingFinishTimer = 0;
+    }
+    // 卸载后旧补做任务即使晚到也不能清掉下一次挂载的标记。
+    pendingFinishSeq += 1;
+    pendingFinishRunning = false;
+    // 自动修复补做同样按代次失效：重新挂载时要能立刻开始本项目的补做。
+    pendingAutoFixSeq += 1;
+    pendingAutoFixRunning = false;
+    cancelResumePendingAutoFix();
     if (projectSubscription) {
       projectSubscription.unsubscribe();
       projectSubscription = null;
@@ -1869,7 +1971,18 @@ function createEngine(api, options = {}) {
     store.set({ dialog });
   }
 
-  function closeDialog() {
+  // 关闭弹窗。自动修复确认框只有在用户于弹窗内主动取消 / 关闭时才视为放弃本轮派发：
+  // 收起工作台、展开监控等界面操作必须走 decline:false，否则拒绝标记会把后台补做
+  // 与切回项目的恢复一并挡住。默认不写拒绝标记，避免新的关闭入口重复踩坑。
+  function closeDialog(options = {}) {
+    const dialog = store.get().dialog;
+    if (dialog?.type === "fix" && dialog.autoFixOptIn === true) {
+      store.set({ dialog: null });
+      // 列表入口保留：取消只放弃自动派发，范围仍可由用户手动重开确认框。
+      holdPendingAutoFix(dialog.issueIds, dialog.notice || t("fx.toast.autoFixConfirm"));
+      if (options.decline === true) void writeAutoFixDeclinedAt(null, nowMs()).catch(() => {});
+      return;
+    }
     store.set({ dialog: null });
   }
 
@@ -2084,6 +2197,13 @@ function createEngine(api, options = {}) {
             scopeLabel: built.scopeLabel,
             // 冻结本次审查实际使用的严重度范围，完成解析时不读取可能已改动的设置。
             issueSeverities: [...built.severities],
+            // 冻结本轮是否开启自动修复：收尾派发、列表入口与后台补做共用这一份判定；
+            // 设置读取失败时不冻结，收尾回退当前设置并走「先确认」分支。
+            autoFixEnabled: current.settingsLoadFailed
+              ? null
+              : current.settings?.autoFixAfterReview === true,
+            autoFixReadyAt: 0,
+            autoFixDispatchingAt: 0,
             issueIds: [],
             lastError: "",
           },
@@ -2609,15 +2729,24 @@ function createEngine(api, options = {}) {
       return true;
     }
     const parsed = parsedResult.issues;
+    // 本轮是否开启自动修复：冻结值决定本轮资格，当前开关只能否决、不能启用。
+    // 旧数据没有冻结标记时回退当前设置，由内层「未确认」分支继续拦住静默执行。
+    const roundAutoFix = shouldAutoFixRound(session, snapshot.settings);
+    // 落盘、派发与恢复共用同一口径：审查期间关闭开关的轮次不再保留待自动修复范围，
+    // 避免重新开启后由恢复链路补派发本轮已经取消的自动修复。
+    const autoFixNow = roundAutoFix && store.get().settings?.autoFixAfterReview === true;
+    // 待自动修复范围随审查收尾一起落盘：本轮审查新增 / 重开的 issue 由接管该项目的
+    // 引擎（主引擎或后台引擎）继续修复；未确认自动修复时先保留，回到项目后可恢复入口。
     const nextState = {
       ...snapshot.state,
       sessions: {
         ...snapshot.state.sessions,
-        review: { ...session, status: "done", lastError: "" },
+        review: { ...session, status: "done", lastError: "", autoFixIds: [], autoFixReadyAt: 0, autoFixDispatchingAt: 0 },
       },
     };
     const activityDone =
       snapshot.activity?.conversationId === conversationId
+
         ? { ...snapshot.activity, phase: "done", message: "" }
         : snapshot.activity;
     let added = 0;
@@ -2636,6 +2765,19 @@ function createEngine(api, options = {}) {
       updated = merged.updated;
       reopened = merged.reopened;
       autoFixIds = Array.from(new Set([...merged.addedIds, ...merged.reopenedIds]));
+      nextState.sessions = {
+        ...nextState.sessions,
+        review: {
+          ...nextState.sessions.review,
+          // 本轮未开启自动修复：不记录范围，避免之后重新开启开关时把旧轮次当成待确认。
+          autoFixIds: autoFixNow ? autoFixIds : [],
+          autoFixReadyAt: autoFixNow && autoFixIds.length ? nowMs() : 0,
+          // 新一轮范围覆盖上一轮的拒绝标记：拒绝只作用于当时那批目标。
+          autoFixDeclinedAt: 0,
+          // 新一轮收尾不继承上一轮可能残留的派发中标记。
+          autoFixDispatchingAt: 0,
+        },
+      };
       store.set({ state: nextState, activity: activityDone, selected: [] });
       setToast("success", t("fx.toast.reviewDone", { added, updated, reopened }));
     } else {
@@ -2658,13 +2800,14 @@ function createEngine(api, options = {}) {
     // 外层只看开关本身，用户在会话内关闭后不再重复弹确认框。
     // 仅修复本次审查新增或重开的 issue；保存期间可能被归档 / 删除，
     // 因此以最新状态复核后仍为 open 才启动。
-    // 后台引擎没有渲染器，也不能替用户确认自动修复：未 opt-in 时确认框只落在内存、
-    // 用户回到项目后已丢失；已 opt-in 时则会在无人值守的后台新建修复会话并消耗模型调用。
-    // 自动暂存与自动清理已放开后台执行（授权在启动时冻结），自动修复保持只在前台执行。
+    // 已确认自动修复（autoFixOptIn）时后台引擎同样启动：多个项目并行时，宿主当前选中的
+    // 项目不能决定另一个项目的自动化链是否继续。后台没有确认界面，未确认时只保留
+    // autoFixIds（已随本次审查收尾落盘），用户回到项目后由 setProject 恢复列表入口，
+    // 不会在无人值守时静默消耗模型调用。
     if (
-      !headless &&
+      autoFixNow &&
       autoFixIds.length &&
-      store.get().settings.autoFixAfterReview &&
+      store.get().settings?.autoFixAfterReview === true &&
       (!guard || isProjectCurrent(guard))
     ) {
       const current = store.get();
@@ -2676,28 +2819,37 @@ function createEngine(api, options = {}) {
       const targets = autoFixIds.filter((id) => openIds.has(id));
       if (targets.length) {
         const notice = t("fx.toast.autoFixConfirm");
-        if (current.settingsLoadFailed || !current.settings.autoFixOptIn) {
-          // 设置读取失败或用户尚未确认自动修复：只预选本次范围，等待确认后再修改工作区。
-          const verifyUnsettled = isSessionUnsettled(current.state.sessions.verify, current.activity);
-          if (!current.dialog && !verifyUnsettled) {
-            // 打开失败说明存在修复冲突：同样把范围留在列表中，避免关闭提示后无从恢复。
-            if (!openFixDialog(targets, { notice, autoFixOptIn: true })) {
-              holdPendingAutoFix(targets, notice);
-            }
+        if (current.settingsLoadFailed || !hasConfirmedAutoFix(current.settings)) {
+          if (headless) {
+            // 后台不能替用户确认：范围已随审查结果落盘，切回项目后列表会恢复入口。
+            setToast("info", t("fx.toast.autoFixDeferredHeadless", { count: targets.length }));
           } else {
-            // 用户正在使用设置 / 清理 / 删除弹窗，或复审尚未结束：不覆盖现有界面，改为保留范围并在列表提供入口。
-            holdPendingAutoFix(targets, notice);
-            setToast(
-              "info",
-              current.dialog
-                ? t("fx.toast.autoFixPending", { count: targets.length })
-                : t("fx.toast.autoFixDeferred", { count: targets.length }),
-            );
+            // 设置读取失败或用户尚未确认自动修复：只预选本次范围，等待确认后再修改工作区。
+            const verifyUnsettled = isSessionUnsettled(current.state.sessions.verify, current.activity);
+            if (!current.dialog && !verifyUnsettled) {
+              // 打开失败说明存在修复冲突：同样把范围留在列表中，避免关闭提示后无从恢复。
+              if (!openFixDialog(targets, { notice, autoFixOptIn: true })) {
+                holdPendingAutoFix(targets, notice);
+              }
+            } else {
+              // 用户正在使用设置 / 清理 / 删除弹窗，或复审尚未结束：不覆盖现有界面，改为保留范围并在列表提供入口。
+              holdPendingAutoFix(targets, notice);
+              setToast(
+                "info",
+                current.dialog
+                  ? t("fx.toast.autoFixPending", { count: targets.length })
+                  : t("fx.toast.autoFixDeferred", { count: targets.length }),
+              );
+            }
           }
         } else {
           void startFix(targets, { auto: true })
             .then((started) => {
-              if (started) return;
+              if (started) {
+                // 本轮待自动修复范围已派发：清空记录，重载或切回项目后不会重复启动。
+                void clearReviewAutoFixIds(guard, conversationId);
+                return;
+              }
               if (guard && !isProjectCurrent(guard)) return;
               // 启动被复审 / 修复互斥拒绝时保留本轮范围，用户可在列表入口稍后重试。
               const latest = store.get();
@@ -2716,6 +2868,7 @@ function createEngine(api, options = {}) {
   }
 
   async function finishFix(conversationId, text, token, options = {}) {
+
     const snapshot = store.get();
     if (token && (!isCurrentToken(token) || !isProjectCurrent(token))) return false;
     const guard = token || options.guard || captureProject();
@@ -3462,7 +3615,7 @@ function createEngine(api, options = {}) {
     // 保存期间可能已被停止跟踪：不再启动复审，交给接管方继续。
     if (guard && !isProjectCurrent(guard)) return;
     let verifyOutcome = "empty";
-    if (store.get().settings?.verifyAfterFix) {
+    if (shouldVerifyRound(session, store.get().settings)) {
       verifyOutcome = await startVerify(session);
       // 复审已接管收尾：暂存与清理都由复审收尾触发。
       if (verifyOutcome === "started") return;
@@ -3671,7 +3824,7 @@ function createEngine(api, options = {}) {
     const manual = scope?.manual === true;
     if (manual && (!Array.isArray(scope.issueIds) || !scope.issueIds.length)) return "empty";
     if (!manual && !scope?.conversationId) return "empty";
-    if (!manual && !store.get().settings?.verifyAfterFix) return "empty";
+    if (!manual && !shouldVerifyRound(scope, store.get().settings)) return "empty";
     // 复审读取期间不允许修复会话改写工作区：结论可能建立在半成品代码上。
     // finishFixRun 会先把 fix 置为 done，因此正常的“修复结束立即复审”不受影响。
     const before = store.get();
@@ -3773,7 +3926,7 @@ function createEngine(api, options = {}) {
     if (!guard?.directoryId || !project?.directoryId || project.directoryId !== guard.directoryId) {
       return "error";
     }
-    if (!manual && !store.get().settings?.verifyAfterFix) return "empty";
+    if (!manual && !shouldVerifyRound(fixSession, store.get().settings)) return "empty";
     if (store.get().state.sessions.verify?.status === "running") {
       setToast("error", t("fx.toast.verifyBusy"));
       return "error";
@@ -4406,6 +4559,9 @@ function createEngine(api, options = {}) {
     if (finishedSession.autoCleanup) {
       if (!guard || isProjectCurrent(guard)) await autoCleanupAfterVerify(finishedSession);
     }
+    // 手动重新解析路径（retryParse）不经过 track 的 finally：这里同样补一次。
+    // 已由 track 安排过时会被单飞标记合并，不会重复派发。
+    scheduleResumePendingAutoFix();
     return true;
   }
 
@@ -4429,7 +4585,34 @@ function createEngine(api, options = {}) {
 
   // 自动清理本轮已修复 issue 与本轮会话，动作为归档或删除。
   // 会话范围由设置里的「自动清理会话范围」决定：未勾选的类型保留，可在「处理结果」中手动清理。
+  // 自动清理与面板清理共用同一在途任务：同一轮后到调用直接等待并复用结果，
+  // 不同轮次则串行等待，避免同一批会话被重复归档 / 删除。
   async function autoCleanupFixRun(session) {
+    const fixConversationId = String(session?.conversationId || "");
+    if (cleanupInFlight) {
+      if (cleanupInFlight.fixConversationId === fixConversationId) {
+        return cleanupInFlight.task || { status: "running" };
+      }
+      if (cleanupInFlight.task) await cleanupInFlight.task.catch(() => null);
+      // 等待期间可能已有新的清理开始：本轮不再并入，交给下一次收尾。
+      if (cleanupInFlight) return { status: "deferred" };
+    }
+    const token = { fixConversationId, task: null };
+    cleanupInFlight = token;
+    store.set({
+      cleanupInFlight: { fixConversationId, startedAt: nowMs() },
+    });
+    const task = performAutoCleanupFixRun(session).finally(() => {
+      if (cleanupInFlight === token) {
+        cleanupInFlight = null;
+        store.set({ cleanupInFlight: null });
+      }
+    });
+    token.task = task;
+    return task;
+  }
+
+  async function performAutoCleanupFixRun(session) {
     // 自动清理按本轮启动时冻结的开关与动作执行（autoCleanup / cleanupAction /
     // cleanupSessionKinds），用户关闭开关时不会走到这里。主引擎与后台引擎一致：
     // 项目切走后由后台引擎接管，收尾不会因为宿主当前项目不是它而跳过。
@@ -4691,12 +4874,21 @@ function createEngine(api, options = {}) {
 
   // 监控面板上的显式清理（单条与批量入口共用）：本轮冻结的 autoCleanup / cleanupAction /
   // cleanupSessionKinds 就是用户授权，面板内二次确认后立即执行，后台引擎同样可以执行。
-  async function cleanupRunManually() {
+  async function cleanupRunManually(options) {
     const snapshot = store.get();
     if (snapshot.status !== "ready") return { status: "deferred" };
     const project = snapshot.project;
     if (!project?.directoryId) return { status: "deferred" };
+    const expectedFixConversationId = String(options?.fixConversationId || "");
     const fixSession = snapshot.state.sessions.fix;
+    // 面板确认的是某一轮修复：调用时若当前轮次已变化，直接跳过，
+    // 避免清理用户没有在确认页看到的新一轮。
+    if (
+      expectedFixConversationId &&
+      String(fixSession?.conversationId || "") !== expectedFixConversationId
+    ) {
+      return { status: "stale" };
+    }
     if (!fixSession || fixSession.status !== "done" || fixSession.autoCleanup !== true) {
       return { status: "empty" };
     }
@@ -4817,6 +5009,9 @@ function createEngine(api, options = {}) {
       // 终态保存已在 try / catch 中完成，之后不再需要该会话的暂存指标。
       sessionMetrics.delete(token.conversationId);
       if (tracking.get(token.kind) === token) tracking.delete(token.kind);
+      // 修复 / 复审自然结束（含正常完成、报错、超时）：本轮审查的自动修复范围
+      // 可能因互斥没有派发，这里补一次。必须排在 token 移除之后，否则仍会判 busy。
+      if (token.kind === "fix" || token.kind === "verify") scheduleResumePendingAutoFix();
     }
   }
 
@@ -4845,6 +5040,142 @@ function createEngine(api, options = {}) {
         stopEpoch,
         resumed: true,
       });
+    }
+  }
+
+  // 后台引擎挂载 / 切回项目后补做被代次守卫中止的自动收尾：
+  // 只处理仍冻结了自动复审、自动暂存或自动清理的已完成修复轮次，顺序与在线收尾一致
+  // （先复审，复审接管后暂存与清理都交给 finishVerify）。
+  // 暂存只补做「被切换 / 卸载 / 关闭页面打断」的轮次（持久化原文仍是 staging，读取侧超时收敛为
+  // error）；持久化原文就是 error 表示 git add 确实失败过，保留给面板「重试暂存」由用户显式授权。
+  // 复审未结束、复审批次未派发完时一律等待；本轮应复审却没有复审会话时按 finishFixRun 同口径补做，
+  // 补做失败则只完成暂存，绝不对未复核的修复结论执行自动清理。
+  async function resumePendingFinish() {
+    if (pendingFinishRunning) return "running";
+    pendingFinishRunning = true;
+    const seq = ++pendingFinishSeq;
+    let guard = null;
+    try {
+      const snapshot = store.get();
+      if (
+        snapshot.status !== "ready" ||
+        snapshot.stateUnavailable === true ||
+        snapshot.settingsLoadFailed === true
+      ) {
+        return "deferred";
+      }
+      const project = snapshot.project;
+      if (!project?.directoryId) return "deferred";
+      guard = captureProject();
+      if (!guard || !isProjectCurrent(guard)) return "deferred";
+      const fixSession = snapshot.state.sessions.fix;
+      if (!fixSession || fixSession.status !== "done") return "empty";
+      const verifySession = snapshot.state.sessions.verify;
+      const verifyForRun =
+        verifySession &&
+        String(verifySession.fixConversationId || "") === String(fixSession.conversationId)
+          ? verifySession
+          : null;
+      if (verifyForRun && isSessionUnsettled(verifyForRun, snapshot.activity)) return "deferred";
+      if (Array.isArray(verifyForRun?.queue) && verifyForRun.queue.length) return "deferred";
+
+      const stageState = resolveStageRunState(fixSession);
+      if (stageState === "staging") {
+        // staging 未超时说明原调用链可能仍在写索引：等统一超时口径把它判为 error 后再补做，
+        // 避免后台引擎与原 git add 并发。项目切走后原调用链已失去写回资格，定时补做即可。
+        const elapsed = nowMs() - (Number(fixSession.stageRunAt) || 0);
+        const wait = Math.max(1000, STAGE_RUN_STALE_MS - elapsed + 1000);
+        if (!pendingFinishTimer && mounted > 0) {
+          pendingFinishTimer = setTimeout(() => {
+            pendingFinishTimer = 0;
+            if (mounted > 0) void resumePendingFinish();
+          }, wait);
+        }
+        return "deferred";
+      }
+      // 只有持久化原文仍是 staging 才说明原调用链被切换 / 卸载 / 关闭页面打断：
+      // 读取侧会把它按超时收敛为 error（resolveStageRunState），持久化本身不写回。
+      // 原文就是 error 表示 git add 确实失败过（SSH 项目、git status 不可读、候选无法确认、
+      // 路径被拒、分批 add 失败），这些原因不会因为重新挂载而消失；后台重跑没有内容基线，
+      // 会按整文件把失败之后用户新做的改动一并推进索引。
+      // 这类轮次继续保持「由用户在面板点重试暂存」的授权约定（stageRunManually）。
+      // 从未写过暂存占位（空状态）的旧轮次同样按数据年龄收敛：超过补做窗口只保留面板入口，
+      // 避免升级 / 重新打开项目时对历史轮次整文件 git add。
+      // 窗口是轮次级的收尾时效，下面的补做复审共用同一判定：复审会话会继承 stageEnabled，
+      // 复审收尾的 stageAfterVerify 仍会把本轮声明的文件整文件 git add。
+      const stageInterrupted = String(fixSession.stageRunState || "") === "staging";
+      const roundRecoverable = isStageRecoverable(fixSession);
+      const stagePending =
+        fixSession.stageEnabled === true &&
+        roundRecoverable &&
+        (stageState === "" || (stageState === "error" && stageInterrupted));
+      // 本轮仍有未完成的自动化收尾才值得补做复审：已收尾完毕的历史轮次不再新建模型会话。
+      const cleaned =
+        String(snapshot.state.cleanupRun?.fixConversationId || "") === String(fixSession.conversationId);
+      const cleanupPending = fixSession.autoCleanup === true && !cleaned;
+      // 续批被中断时本轮并未修完：既不补复审，也不能按已完成轮次暂存 / 自动清理。
+      // 在线路径（finishFix 的 skipContinue 与代次失效分支）同样不写索引；暂存只保留
+      // 面板的显式「暂存改动」入口，避免把半成品与修复前既有改动整文件推进索引。
+      const queuePending = Array.isArray(fixSession.queue) && fixSession.queue.length > 0;
+      if (queuePending) return "empty";
+      // 与 finishFixRun 同序：先补复审，复审接管后暂存与清理都由 finishVerify 收尾。
+      // 在线收尾可能在保存或创建复审会话期间被切走，这里按同一口径补做；否则
+      // 「应复审却没有复审会话」的轮次会永远停在未复审，也不会触发自动清理。
+      // 补做复审同样受轮次级补做窗口约束：历史轮次不再新建模型会话，
+      // 也避免复审收尾的 stageAfterVerify 在无人值守时整文件 git add。
+      let verifyOutcome = "empty";
+      if (
+        !verifyForRun &&
+        roundRecoverable &&
+        shouldVerifyRound(fixSession, store.get().settings) &&
+        (stagePending || cleanupPending)
+      ) {
+        verifyOutcome = await startVerify(fixSession);
+        // 补做期间项目被切走 / 引擎被卸载：交给下一次接管。
+        if (!isProjectCurrent(guard)) return "deferred";
+        // 复审已接管：暂存与清理交给 finishVerify，这里不再重复执行。
+        if (verifyOutcome === "started") return "started";
+      }
+      // 补做复审是异步过程，期间可能已有新一轮修复接管：旧轮的暂存与清理不能落到新轮的工作区上。
+      const latestFix = store.get().state.sessions.fix;
+      if (!latestFix || String(latestFix.conversationId) !== String(fixSession.conversationId)) {
+        return "deferred";
+      }
+      let stageOutcome = "empty";
+      if (stagePending) {
+        stageOutcome = await stageFixRun(fixSession, project, guard, {
+          // 中断态 staging 在读取侧已是 error，必须放开去重才能补做；
+          // 真实失败不会进入这里，去重保持关闭。
+          allowRetryFailed: stageInterrupted,
+        });
+        // 暂存期间项目被切走 / 引擎被卸载：交给下一次接管。
+        if (!isProjectCurrent(guard)) return "deferred";
+      }
+      // 与 finishFixRun / finishVerify 的在线口径保持一致：暂存失败不阻断自动清理
+      // （设置说明同样是「暂存失败不影响清理，原因会以提示说明」）。
+      // 失败原因已由 stageRunChanges / stageFixRun 的 toast 说明，这里不再重复提示。
+      // 只有 deferred（项目已切走 / 守卫失效）才交回下一次接管，避免与原调用链并发写索引。
+      if (stageOutcome === "deferred") return "deferred";
+
+      if (fixSession.autoCleanup !== true || cleaned) return stageOutcome;
+      // 超出补做窗口的历史轮次同样不自动清理：补做复审已被跳过（或从未执行），
+      // 未复核的修复结论不能自动归档 / 删除；面板条目仍保留显式的「清理」入口。
+      if (!roundRecoverable) return stageOutcome;
+      // 补做复审失败（互斥 / 创建会话失败）：暂存照常完成，但未复核的修复结论不能自动清理。
+      // 下一次接管会按同一口径再试；复审成功后由 finishVerify 触发清理。
+      if (verifyOutcome === "error") return stageOutcome;
+      if (verifyForRun && verifyForRun.status !== "done") return "deferred";
+      const result = await autoCleanupFixRun(fixSession);
+      return String(result?.status || "empty");
+    } catch (error) {
+      // 补做链上的意外异常不能变成未处理的 Promise 拒绝（setProject / mount / 定时器
+      // 都是 void 调用）。暂存与清理标记都已落盘，保留状态交给下一次接管重试。
+      if (!guard || !isProjectCurrent(guard)) return "deferred";
+      setToast("error", String(error?.message || error));
+      return "error";
+    } finally {
+      // 切项目 / 卸载已经开启新一轮补做时，旧任务不能清掉新的单飞标记。
+      if (seq === pendingFinishSeq) pendingFinishRunning = false;
     }
   }
 
@@ -5065,6 +5396,8 @@ function createEngine(api, options = {}) {
       setDialogError("fix", t("fx.toast.fixBusy"));
       return false;
     }
+    // 自动派发在途标记的时间戳：0 表示本轮不是自动派发或未写标记。
+    let dispatchAt = 0;
     try {
       // 本轮启动时间在首批创建前冻结：续批会覆盖 startedAt，该值只用于判定审查会话是否早于本轮修复。
       const runStartedAt = nowMs();
@@ -5096,6 +5429,9 @@ function createEngine(api, options = {}) {
       // 早期实现会在启动前采集内容基线（rev-parse / status / 分批 hash-object），
       // 多轮终端往返把新建会话拖成「点了没反应」。
       const stageEnabled = snapshot.settings?.autoStageAfterFix === true;
+      // 修复完成后自动复审的开关同样在首批创建前冻结：在线收尾与后台补做都按本轮的值判定，
+      // 运行期间改设置不影响已开始的轮次。
+      const verifyEnabled = snapshot.settings?.verifyAfterFix === true;
       if (!isProjectCurrent(token)) throw new Error(t("fx.error.projectSwitched"));
       const batches = planFixBatches(issues.map((issue) => issue.id), batchSize);
       const batchIds = batches[0] || [];
@@ -5123,6 +5459,19 @@ function createEngine(api, options = {}) {
             count: batchIssues.length,
             time,
           });
+      // 自动派发：创建会话前先把派发意图落盘。会话创建与 sessions.fix 落盘之间
+      // 接管该项目的引擎只能看到上一轮已结束的 sessions.fix 与未清空的
+      // autoFixIds，会重复创建修复会话；共享标记让它按 busy 延后重试。
+      if (options.auto === true) {
+        dispatchAt = await beginAutoFixDispatch(
+          token,
+          snapshot.state.sessions.review?.conversationId,
+          issues.map((issue) => issue.id),
+        );
+        // 写盘失败 / 已被接管：磁盘上没有标记，接管方无法识别，不能再创建会话。
+        if (dispatchAt === null) throw new Error(t("fx.error.projectSwitched"));
+        if (!isProjectCurrent(token)) throw new Error(t("fx.error.projectSwitched"));
+      }
       const created = await createConversation({
         directoryId: token.directoryId,
         title,
@@ -5177,11 +5526,37 @@ function createEngine(api, options = {}) {
             ...(Array.isArray(previousFix.sessionIds) ? previousFix.sessionIds : []),
           ])
         : current.state.issues;
+      // 本轮待自动修复范围：本次启动的修复一旦命中其中任意一条，即视为范围已被消费。
+      // 手动修复同样消费范围，避免重载 / 切回项目后入口恢复或后台补做再次派发。
+      const reviewBefore = current.state.sessions.review;
+      const pendingAutoFixIds = new Set(
+        Array.isArray(reviewBefore?.autoFixIds) ? reviewBefore.autoFixIds.map(String) : [],
+      );
+      const consumesAutoFix =
+        pendingAutoFixIds.size > 0 && issues.some((issue) => pendingAutoFixIds.has(issue.id));
+      // 自动派发成功后，在途标记必须与 sessions.fix 同一次落盘清零：
+      // 分两次写会让接管方短暂看到「修复已落盘但标记仍在」，被判成 busy。
+      const clearsDispatch = Boolean(
+        dispatchAt && reviewBefore && Number(reviewBefore.autoFixDispatchingAt) === dispatchAt,
+      );
+      const reviewNext =
+        consumesAutoFix || clearsDispatch
+          ? {
+              ...reviewBefore,
+              ...(consumesAutoFix
+                ? { autoFixIds: [], autoFixReadyAt: 0, autoFixDeclinedAt: 0 }
+                : {}),
+              ...(clearsDispatch ? { autoFixDispatchingAt: 0 } : {}),
+            }
+          : null;
       const nextState = {
         ...current.state,
         issues: markIssuesFixing(issuesBase, liveIssues.map((issue) => issue.id), conversationId),
         sessions: {
           ...current.state.sessions,
+          // 命中本轮待自动修复范围时一并清空：范围已由本次启动的修复消费；
+          // 自动派发则在同一次落盘中清掉在途标记，与 sessions.fix 同步生效。
+          ...(reviewNext ? { review: reviewNext } : {}),
           fix: {
             conversationId,
             title,
@@ -5204,6 +5579,8 @@ function createEngine(api, options = {}) {
             claimedIssueFiles: claimIssueFiles(issues),
             // 自动暂存的开关随会话持久化：续批与重开都不跟随设置变化。
             stageEnabled,
+            // 自动复审的开关随本轮冻结：修复结束后才打开设置，也不会为历史轮次补建复审。
+            verifyEnabled,
             sessionIds: [conversationId],
             autoCleanup: Boolean(current.settings?.autoCleanupAfterFix),
             cleanupAction: current.settings?.autoCleanupAction === "delete" ? "delete" : "archive",
@@ -5266,6 +5643,10 @@ function createEngine(api, options = {}) {
       });
       return true;
     } finally {
+      // 派发结束（成功 / 失败 / 被项目切换中止）都清掉共享标记：成功路径已在
+      // sessions.fix 的同一次落盘中清零，这里兜底失败分支；项目已切换时不动盘，
+      // 标记随租约自然过期，接管方最多延迟一个租约即可重试。
+      if (dispatchAt) await clearAutoFixDispatch(token, dispatchAt).catch(() => {});
       releaseStart("fix", reservation);
     }
   }
@@ -5848,6 +6229,11 @@ function createEngine(api, options = {}) {
     const snapshot = store.get();
     const pending = snapshot.pendingAutoFix;
     if (!pending) return false;
+    // 开关已关闭或轮次已过期：入口不应再可执行，直接收起。
+    if (!resolveAutoFixRound(snapshot.state, snapshot).enabled) {
+      store.set({ pendingAutoFix: null });
+      return false;
+    }
     if (snapshot.dialog) return false;
     // 复审仍在进行时先不打开无法执行的确认框，保留入口等待其结束。
     if (isSessionUnsettled(snapshot.state.sessions.verify, snapshot.activity)) {
@@ -5869,6 +6255,326 @@ function createEngine(api, options = {}) {
     );
     if (!stillFixable) store.set({ pendingAutoFix: null });
     return false;
+  }
+
+  // 本轮自动派发是否已被用户在确认框中放弃：取消 / 关闭确认框都会写入该时刻。
+  // 只阻止自动派发，不清空 autoFixIds —— 列表入口仍可重新打开确认框手动确认。
+  function isAutoFixRoundDeclined(review) {
+    return Number(review?.autoFixDeclinedAt) > 0;
+  }
+
+  // 写拒绝标记：0 表示撤销（用户重新确认本轮，或新一轮审查覆盖了范围）。
+  // 先更新内存再落盘，保证同一渲染周期内不会再自动派发。
+  async function writeAutoFixDeclinedAt(guard, at) {
+    const snapshot = store.get();
+    const review = snapshot.state.sessions.review;
+    if (!review) return;
+    const nextAt = Math.max(0, Number(at) || 0);
+    if ((Number(review.autoFixDeclinedAt) || 0) === nextAt) return;
+    const projectGuard = guard || captureProject();
+    if (!projectGuard || !isProjectCurrent(projectGuard)) return;
+    const nextState = {
+      ...snapshot.state,
+      sessions: {
+        ...snapshot.state.sessions,
+        review: { ...review, autoFixDeclinedAt: nextAt },
+      },
+    };
+    store.set({ state: nextState });
+    await saveState({
+      projectId: projectGuard.directoryId,
+      state: nextState,
+      lifecycle: projectGuard.stopEpoch,
+    });
+  }
+
+  // 本轮审查在启动时冻结的自动修复开关：true / false 为冻结值，null 表示旧数据未记录。
+  function readRoundAutoFixFlag(review) {
+    if (!review) return false;
+    return typeof review.autoFixEnabled === "boolean" ? review.autoFixEnabled : null;
+  }
+
+  // 收尾派发：冻结值优先；旧数据没有标记时回退当前设置，保持升级前的派发口径。
+  function shouldAutoFixRound(review, settings) {
+    const flag = readRoundAutoFixFlag(review);
+    return flag === null ? Boolean(settings?.autoFixAfterReview) : flag;
+  }
+
+  // 本轮修复在启动时冻结的自动复审开关：true / false 为冻结值，null 表示旧数据未记录。
+  function readRoundVerifyFlag(fixSession) {
+    return typeof fixSession?.verifyEnabled === "boolean" ? fixSession.verifyEnabled : null;
+  }
+
+  // 修复收尾与后台补做共用同一口径：冻结值优先，旧数据没有标记时回退当前设置。
+  function shouldVerifyRound(fixSession, settings) {
+    const flag = readRoundVerifyFlag(fixSession);
+    return flag === null ? Boolean(settings?.verifyAfterFix) : flag;
+  }
+
+  // 恢复入口 / 后台补做：关闭开关立即生效；旧数据还要求当前设置可信且开启。
+  function canRecoverAutoFixRound(review, snapshot) {
+    if (!review || review.status !== "done") return false;
+    if (readRoundAutoFixFlag(review) === false) return false;
+    if (snapshot?.settingsLoadFailed === true) return false;
+    return snapshot?.settings?.autoFixAfterReview === true;
+  }
+
+  // 时效基准：新数据用审查收尾时刻；旧数据回退最后更新 / 启动时间。
+  function resolveAutoFixRoundAt(review) {
+    return (
+      Number(review?.autoFixReadyAt) ||
+      Number(review?.lastUpdateAt) ||
+      Number(review?.startedAt) ||
+      0
+    );
+  }
+
+  function isAutoFixRoundExpired(review, now = nowMs()) {
+    const at = resolveAutoFixRoundAt(review);
+    return !at || now - at > REVIEW_AUTOFIX_RECOVER_MS;
+  }
+
+  // 列表入口与后台补做的唯一判定：开关（冻结值优先）+ 当前开关 + 24 小时窗口。
+  function resolveAutoFixRound(state, snapshot) {
+    const review = state?.sessions?.review;
+    if (!canRecoverAutoFixRound(review, snapshot)) return { enabled: false, targets: [] };
+    if (isAutoFixRoundExpired(review)) return { enabled: false, targets: [] };
+    return { enabled: true, targets: resolvePendingAutoFixTargets(state) };
+  }
+
+  // 本轮待自动修复目标：优先使用审查收尾时记录的范围；旧数据没有记录（null）时，
+  // 按本轮审查来源反推从未启动过修复的 open 条目，用于升级后补做与恢复列表入口。
+  function resolvePendingAutoFixTargets(state) {
+    const review = state?.sessions?.review;
+    if (!review || review.status !== "done") return [];
+    const issues = Array.isArray(state.issues) ? state.issues : [];
+    const openIds = new Set(
+      issues.filter((issue) => issue.status === ISSUE_STATUS.open).map((issue) => issue.id),
+    );
+    const recorded = Array.isArray(review.autoFixIds) ? review.autoFixIds : null;
+    if (recorded) return recorded.filter((id) => openIds.has(id));
+    return issues
+      .filter(
+        (issue) =>
+          openIds.has(issue.id) &&
+          !issue.fix?.conversationId &&
+          String(issue.source?.conversationId || "") === String(review.conversationId || ""),
+      )
+      .map((issue) => issue.id);
+  }
+
+  // 切回项目时恢复列表入口：自动修复已派发、或手动修复已消费本轮范围时会被清空，
+  // 未被派发（未确认 / 互斥 / 设置读取失败）的轮次仍可从 issue 列表手动开始。
+  // 恢复入口与后台补做共用 resolveAutoFixRound：关闭开关或超出 24 小时窗口都不再出现。
+  // snapshot 默认读当前 store；调用方在 store.set 之前求值，settings 已是本次加载后的值。
+  function restorePendingAutoFix(state, snapshot = store.get()) {
+    const round = resolveAutoFixRound(state, snapshot);
+    if (!round.targets.length) return null;
+    return { issueIds: round.targets, notice: t("fx.toast.autoFixConfirm") };
+  }
+
+  // 自动派发在途：会话已创建但 sessions.fix 尚未落盘的窗口由共享标记覆盖。
+  // 超过租约按陈旧标记处理：崩溃 / 被项目切换 fence 的引擎不会让接管方永久 busy。
+  function isAutoFixDispatchInFlight(review, now = nowMs()) {
+    const at = Number(review?.autoFixDispatchingAt) || 0;
+    return at > 0 && Math.abs(now - at) < AUTO_FIX_DISPATCH_LEASE_MS;
+  }
+
+  // 创建修复会话前落盘派发意图：接管该项目的引擎读盘后据此按 busy 延后重试。
+  // 返回时间戳；0 表示本轮不是自动派发 / 范围已不匹配；null 表示标记未能落盘。
+  async function beginAutoFixDispatch(guard, reviewId, targetIds) {
+    const snapshot = store.get();
+    const review = snapshot.state.sessions.review;
+    if (!review || review.status !== "done") return 0;
+    if (String(review.conversationId || "") !== String(reviewId || "")) return 0;
+    const pending = new Set(Array.isArray(review.autoFixIds) ? review.autoFixIds.map(String) : []);
+    if (!pending.size || !targetIds.some((id) => pending.has(String(id)))) return 0;
+    const at = nowMs();
+    const nextState = {
+      ...snapshot.state,
+      sessions: {
+        ...snapshot.state.sessions,
+        review: { ...review, autoFixDispatchingAt: at },
+      },
+    };
+    store.set({ state: nextState });
+    const saved = await saveState({
+      projectId: guard.directoryId,
+      state: nextState,
+      lifecycle: guard.stopEpoch,
+    });
+    if (saved?.ok === true) return at;
+    // 落盘失败 / 已被接管：磁盘上没有标记，接管方无法识别，不能再创建会话。
+    // 只回滚本次写入的内存标记，不覆盖等待期间可能发生的其它更新。
+    const latest = store.get();
+    const latestReview = latest.state.sessions.review;
+    if (latestReview && Number(latestReview.autoFixDispatchingAt) === at) {
+      store.set({
+        state: {
+          ...latest.state,
+          sessions: {
+            ...latest.state.sessions,
+            review: { ...latestReview, autoFixDispatchingAt: 0 },
+          },
+        },
+      });
+    }
+    return null;
+  }
+
+  // 清除派发中标记：只在仍是同一轮、同一时间戳时写入，避免旧引擎的收尾
+  // 清掉接管方刚写入的新标记。项目已切换时不动盘：标记随租约自然过期。
+  async function clearAutoFixDispatch(guard, at) {
+    if (!guard || !isProjectCurrent(guard)) return;
+    const snapshot = store.get();
+    const review = snapshot.state.sessions.review;
+    if (!review || Number(review.autoFixDispatchingAt) !== Number(at)) return;
+    const nextState = {
+      ...snapshot.state,
+      sessions: {
+        ...snapshot.state.sessions,
+        review: { ...review, autoFixDispatchingAt: 0 },
+      },
+    };
+    store.set({ state: nextState });
+    await saveState({
+      projectId: guard.directoryId,
+      state: nextState,
+      lifecycle: guard.stopEpoch,
+    });
+  }
+
+  // 本轮待自动修复范围已派发或目标已失效：清空记录，重载 / 切回项目后不会重复启动。
+  // expectedReviewId 用于确认仍是发起派发的那一轮审查：等待期间用户可能开始了新审查，
+  // 不能把新一轮的范围当成已处理清空。
+  async function clearReviewAutoFixIds(guard, expectedReviewId) {
+    const snapshot = store.get();
+    const review = snapshot.state.sessions.review;
+    if (!review || !Array.isArray(review.autoFixIds) || !review.autoFixIds.length) return;
+    if (expectedReviewId && String(review.conversationId) !== String(expectedReviewId)) return;
+    const projectGuard = guard || captureProject();
+    if (!projectGuard || !isProjectCurrent(projectGuard)) return;
+    const nextState = {
+      ...snapshot.state,
+      sessions: {
+        ...snapshot.state.sessions,
+        review: { ...review, autoFixIds: [], autoFixReadyAt: 0, autoFixDeclinedAt: 0, autoFixDispatchingAt: 0 },
+      },
+    };
+    store.set({ state: nextState });
+    await saveState({
+      projectId: projectGuard.directoryId,
+      state: nextState,
+      lifecycle: projectGuard.stopEpoch,
+    });
+  }
+
+  // 审查完成后的自动修复补做：后台引擎接管 / 重开工作台时，审查收尾可能因项目切换、
+  // 设置未就绪或互斥没有启动修复。只有用户已确认自动修复（autoFixOptIn）才继续自动执行；
+  // 未确认时范围保留，由前台 setProject 恢复列表入口，等待用户明确确认。
+  async function resumePendingAutoFix() {
+    if (pendingAutoFixRunning) return "running";
+    pendingAutoFixRunning = true;
+    const seq = ++pendingAutoFixSeq;
+    let guard = null;
+    let review = null;
+    let targets = [];
+    let started = false;
+    try {
+      const snapshot = store.get();
+      if (
+        snapshot.status !== "ready" ||
+        snapshot.stateUnavailable === true ||
+        snapshot.settingsLoadFailed === true
+      ) {
+        return "deferred";
+      }
+      if (!hasConfirmedAutoFix(snapshot.settings)) return "empty";
+      // 开关（冻结值 + 当前设置）、范围与时效由同一判定给出，口径与列表入口一致。
+      // 旧数据（没有 autoFixIds 记录）同样受 24 小时窗口限制，不再把历史 open 条目当成待自动修复。
+      const round = resolveAutoFixRound(snapshot.state, snapshot);
+      if (!round.enabled) return "empty";
+      review = snapshot.state.sessions.review;
+      // 用户在确认框中取消 / 关闭过本轮自动派发：保留范围与列表入口，但不再自动启动。
+      if (isAutoFixRoundDeclined(review)) return "empty";
+      // 另一引擎已落盘派发意图、会话尚未创建完成：此时读到的 sessions.fix 仍是
+      // 上一轮，必须按 busy 延后重试，否则会为同一批 issue 再建一条修复会话。
+      if (isAutoFixDispatchInFlight(review)) {
+        scheduleResumePendingAutoFix(AUTO_FIX_DISPATCH_RETRY_MS);
+        return "busy";
+      }
+      // 修复 / 复审仍在进行时不能插入新一轮修复；启动窗口内同样等待下一次接管。
+      if (isSessionUnsettled(snapshot.state.sessions.fix, snapshot.activity)) return "busy";
+      if (isSessionUnsettled(snapshot.state.sessions.verify, snapshot.activity)) return "busy";
+      // 复审已占位、会话尚未写入：此窗口内启动修复会与复审启动并发，
+      // 复审判据可能建立在半成品代码上。
+      if (starting.has("fix") || starting.has("verify") || tracking.has("fix")) return "busy";
+      guard = captureProject();
+      if (!guard || !isProjectCurrent(guard)) return "deferred";
+      targets = round.targets;
+      if (!targets.length) {
+        await clearReviewAutoFixIds(guard, review.conversationId);
+        return "empty";
+      }
+      started = await startFix(targets, { auto: true });
+      if (started) {
+        await clearReviewAutoFixIds(guard, review.conversationId);
+        return "started";
+      }
+      // 启动被互斥拒绝：保留范围并恢复列表入口，冲突解除后可再试。
+      if (!isProjectCurrent(guard)) return "deferred";
+      holdPendingAutoFix(targets, t("fx.toast.autoFixConfirm"));
+      return "deferred";
+    } catch (error) {
+      // resume 由 void 调用（setProject / mount）：startFix 会在目标失效、项目切换、
+      // 会话创建失败时抛出，这里必须收口，否则会形成未处理的 Promise 拒绝，
+      // 自动修复既不启动，面板也拿不到任何失败原因。
+      if (started) return "started";
+      if (!guard || !isProjectCurrent(guard)) return "deferred";
+      const message = String(error?.message || error);
+      const latest = store.get();
+      const stillFixable = targets.filter((id) =>
+        latest.state.issues.some((issue) => issue.id === id && isFixSelectable(issue)),
+      );
+      if (targets.length && !stillFixable.length) {
+        // 目标在启动前已全部失效（归档 / 删除 / 已修复）：清掉本轮记录，避免每次接管重复失败。
+        store.set({ pendingAutoFix: null });
+        await clearReviewAutoFixIds(guard, review?.conversationId);
+        return "empty";
+      }
+      if (stillFixable.length) holdPendingAutoFix(stillFixable, message);
+      setToast("error", message);
+      return "error";
+    } finally {
+      if (seq === pendingAutoFixSeq) pendingAutoFixRunning = false;
+    }
+  }
+
+  // 修复 / 复审结束事件：本轮审查的自动修复范围可能因互斥没有派发，这里补一次。
+  // 0ms 定时器把补做推到当前 async 任务之后（track 的 finally 会先移除 token），
+  // 避免 resume 命中 tracking.has("fix") 把自己判成 busy。
+  function scheduleResumePendingAutoFix(delayMs = 0) {
+    if (mounted === 0 || pendingAutoFixKicker) return;
+    const guard = captureProject();
+    if (!guard) return;
+    const seq = pendingAutoFixKickSeq;
+    pendingAutoFixKicker = setTimeout(() => {
+      pendingAutoFixKicker = 0;
+      if (seq !== pendingAutoFixKickSeq) return;
+      if (mounted === 0 || !isProjectCurrent(guard)) return;
+      // startFix 可能因目标全部失效 / 创建会话失败抛错：resume 内部已收口，
+      // 这里再兜一层，避免任何实现回退产生未处理的 Promise 拒绝。
+      void resumePendingAutoFix().catch(() => {});
+    }, Math.max(0, Number(delayMs) || 0));
+  }
+
+  // 切项目 / 卸载时作废旧项目安排的补做：新项目只处理自己的范围。
+  function cancelResumePendingAutoFix() {
+    if (pendingAutoFixKicker) {
+      clearTimeout(pendingAutoFixKicker);
+      pendingAutoFixKicker = 0;
+    }
+    pendingAutoFixKickSeq += 1;
   }
 
   function openCleanupDialog() {
@@ -6122,9 +6828,17 @@ function createEngine(api, options = {}) {
         if (dialog.autoFixOptIn) {
           // 用户在自动修复确认框中点了开始：记住这次确认，后续不再重复询问。
           await setSettings({ autoFixOptIn: true });
+          // 撤销此前取消留下的拒绝标记：用户已明确同意本轮派发。
+          await writeAutoFixDeclinedAt(null, 0);
         }
         const started = await startFix(dialog.issueIds);
-        if (!started && dialog.autoFixOptIn) {
+        if (started) {
+          // 本轮待自动修复范围已从确认框派发：清空记录，重载后不会再次自动启动。
+          if (dialog.autoFixOptIn) {
+            const reviewId = store.get().state.sessions.review?.conversationId || "";
+            void clearReviewAutoFixIds(captureProject(), reviewId);
+          }
+        } else if (dialog.autoFixOptIn) {
           // 复审 / 修复互斥导致启动失败：关闭弹窗后仍可从列表恢复本轮范围。
           holdPendingAutoFix(dialog.issueIds, dialog.notice || t("fx.toast.autoFixConfirm"));
         }
@@ -6204,8 +6918,10 @@ function createEngine(api, options = {}) {
     detachTracking,
     retryParse,
     resumeActivityTracking,
+    resumePendingAutoFix,
     stageRunManually,
     cleanupRunManually,
+    resumePendingFinish,
     loadCommitsViaCommand,
     canRunCommitCommand,
     buildReviewRequest,

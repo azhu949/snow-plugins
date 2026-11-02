@@ -25,6 +25,10 @@ const MONITOR_MAX_ENTRIES = 20;
 // 读取侧按失败收敛，面板给出「重试暂存」，避免按钮永久停在禁用的「暂存中」。
 // 阈值需明显大于分批 git add 的实际耗时（单次调用上限 60 秒，文件多时会分多片）。
 const STAGE_RUN_STALE_MS = 10 * 60 * 1000;
+// 自动补做收尾（暂存 / 复审）的时效窗口：超过该时长仍未落盘的轮次不再由后台自动执行，
+// 改为在监控面板由用户显式「重试暂存」。否则升级 / 重新打开项目会把历史轮次的
+// 无关改动按整文件一并推进索引，或为历史结论新建一次复审会话。
+const STAGE_RUN_RECOVER_MS = 24 * 60 * 60 * 1000;
 
 // 会话跟踪超时：不再使用固定总时长，而按“是否还有新进展”判定。
 // 代码审查在大型项目上可能跑过 15 分钟：只要会话仍在流式输出、执行工具或排队下一轮，
@@ -366,6 +370,7 @@ const FALLBACK = {
   "fx.toast.autoFixConfirm": "自动修复等待确认：请先核对本次修复范围，确认后再开始修复。",
   "fx.toast.autoFixPending": "审查完成：检测到 {{count}} 条待修复 issue，但当前有未关闭的弹窗；已保留本次范围，可从 issue 列表点「开始自动修复」。",
   "fx.toast.autoFixDeferred": "审查完成：本次 {{count}} 条待修复 issue 暂不能自动修复（复审或修复仍在进行）；已保留本次范围，可从 issue 列表点「开始自动修复」。",
+  "fx.toast.autoFixDeferredHeadless": "审查完成：检测到 {{count}} 条待修复 issue。该项目不在当前窗口，自动修复尚未确认，已保留本次范围；回到该项目后可从 issue 列表点「开始自动修复」。",
   "fx.toast.fixBatchStarted": "第 {{batch}}/{{total}} 批修复已启动（{{count}} 条）。",
   "fx.toast.fixAllDone": "全部 {{batches}} 批修复完成。",
   "fx.toast.stagedFiles": "已自动暂存 {{count}} 个文件：{{files}}。{{skipped}}",
@@ -588,7 +593,7 @@ const FALLBACK = {
   "fx.settings.severityScopeHint":
     "勾选的严重程度会在审查后写入 issue 清单并纳入修复；建议默认不勾选，全部取消时恢复默认（严重 + 一般）。",
   "fx.settings.autoFix": "审查完成后自动开始修复",
-  "fx.settings.autoFixHint": "默认开启。首次自动修复前会先请求确认；确认后仅自动修复本次审查新增或重开的 issue。设置读取失败时同样先等待确认。",
+  "fx.settings.autoFixHint": "默认开启。首次自动修复前会先请求确认；确认后仅自动修复本次审查新增或重开的 issue，其它项目在后台审查完成时也会继续自动修复。设置读取失败或尚未确认时先等待确认，范围会保留在列表中。",
   "fx.settings.stageAfterFix": "全部修复完成后自动暂存改动",
   "fx.settings.stageAfterFixHint":
     "默认关闭。整条自动化链收尾时（开启复审则等复审结束；复审报错、停止跟踪、关闭复审卡片或超时同样在该轮中断收尾时暂存；否则全部批次修复完成）对修复结果里声明的文件执行 git add。不保存修复启动时的内容基线，启动阶段不做任何 Git 采集；这些文件因此按整文件暂存，文件里修复前已有的改动也会一并进入暂存区。候选先按修复结论收窄：「不存在」条目声明的文件不参与自动暂存；只被「待处理」条目声明、仍有改动的文件会继续作为候选，并在提示中单独计数。读不到 Git 状态或候选无法确认时不执行 git add，只提示候选文件。暂存失败不影响清理，原因会以提示说明。",
@@ -646,6 +651,7 @@ export {
   MONITOR_FINISHED_KEEP_MS,
   MONITOR_MAX_ENTRIES,
   STAGE_RUN_STALE_MS,
+  STAGE_RUN_RECOVER_MS,
   REVIEW_IDLE_TIMEOUT_MS,
   REVIEW_MAX_TIMEOUT_MS,
   FIX_IDLE_TIMEOUT_MS,

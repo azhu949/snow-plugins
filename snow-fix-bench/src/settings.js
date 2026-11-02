@@ -98,7 +98,8 @@ function normalizeSettings(raw) {
     parallelLimit: normalizeParallelLimit(raw?.parallelLimit),
     apiProfile: normalizeApiProfile(raw?.apiProfile),
     autoFixAfterReview,
-    // 旧记录里显式开启视为已确认；没有记录或字段缺失时需要首次确认。
+    // 旧记录里显式开启视为已确认（仅作为历史偏好保留）；真正的自动执行凭据是
+    // autoFixOptInConfirmedAt，旧配置没有该字段时仍需在本版本内首次确认。
     autoFixOptIn:
       typeof raw?.autoFixOptIn === "boolean"
         ? raw.autoFixOptIn
@@ -120,6 +121,12 @@ function normalizeSettings(raw) {
   // 与 reviewMode 同理，避免给旧存储补默认键、改写既有配置结构。
   if (raw && raw.autoStageAfterFix === true) {
     settings.autoStageAfterFix = true;
+  }
+  // 自动修复的显式确认凭据：只有确认过 opt-in 且记录了确认时间才保留。
+  // 旧记录的 autoFixOptIn 推断只代表历史偏好，不构成本版本的确认凭据；
+  // 无值时不补键，避免无意义地改写旧配置结构。
+  if (settings.autoFixOptIn === true && Number(raw?.autoFixOptInConfirmedAt) > 0) {
+    settings.autoFixOptInConfirmedAt = Number(raw.autoFixOptInConfirmedAt);
   }
   return settings;
 }

@@ -10,7 +10,7 @@ import {
 } from "./constants.js";
 import { createHeadlessEngine, planCleanupRun } from "./engine.js";
 import { createT } from "./i18n.js";
-import { resolveStageRunState } from "./issues.js";
+import { isStageRecoverable, resolveStageRunState } from "./issues.js";
 import { createStore } from "./store.js";
 import { nowMs } from "./util.js";
 
@@ -114,6 +114,8 @@ const ENTRY_COMPARE_FIELDS = [
   "cleanupState",
   // 清理确认态展示的动作与范围：由引擎的清理计划推导，与自动清理同源。
   "cleanupAction",
+  // 本轮清理实际作用的修复会话：批量确认时冻结它，执行前核对是否已换成新一轮。
+  "cleanupFixConversationId",
   "cleanupIssueCount",
   "cleanupSessionCount",
   "cleanupBaselineCount",
@@ -161,6 +163,7 @@ function bulkCleanupTargets(entries) {
       entry.status === "done" &&
       entry.autoCleanup === true &&
       entry.cleanupState !== "done" &&
+      entry.cleanupState !== "running" &&
       entry.cleanupReady !== false &&
       (entry.cleanupAction === "archive" || entry.cleanupAction === "delete"),
   );
@@ -183,6 +186,38 @@ function cleanupPlanSummaryOf(entries) {
     summary.baseline += Math.max(0, Math.floor(numberOr(entry.cleanupBaselineCount)));
   }
   return summary;
+}
+
+// done 条目在切项目 / 卸载后仍可能需要后台接管：冻结了自动暂存但尚未完成，
+// 或冻结了自动清理但尚未写入幂等标记。running / error 原本就需要后台接管；
+// detached 是用户显式停止跟踪，不能自动重建引擎撤销该选择。
+function needsHeadlessTakeover(entry) {
+  if (!entry || entry.status === "detached") return false;
+  if (entry.status !== "done") return true;
+  // 与 engine 的补做时效同源：超出窗口的历史轮次不再接管自动收尾（暂存 / 复审 / 清理），
+  // 只保留面板的显式「重试暂存 / 清理」入口，也避免为空转的后台引擎保活。
+  const recoverable = isStageRecoverable(entry);
+  // 自动清理正在执行时一律不接管：cleanupRun 只在本轮的宿主归档 / 删除全部完成后才落盘，
+  // 新引擎读到的仍是「待清理」，会与仍在运行的引擎重复处理同一轮并报错。
+  // 与 bulkCleanupTargets 同口径排除 running；在途清理结束后由主引擎快照重新判定接管
+  // （同一轮即使还有暂存待补，也要等原引擎把清理收尾，避免两个引擎并发写宿主）。
+  if (entry.cleanupState === "running") return false;
+  if (recoverable && entry.autoCleanup && entry.cleanupState !== "done") return true;
+  if (entry.stageEnabled && entry.stageSupported !== false) {
+    // 与 engine 的 stagePending 同口径：原文为空表示尚未执行，原文 staging 表示可能
+    // 被切项目 / 卸载 / 关页打断（读取侧超时后收敛为 error），两者都交给后台引擎补做。
+    // 原文 error 是 git add 真实失败，resumePendingFinish 不会重试，只由用户显式「重试暂存」。
+    const interrupted = String(entry.stageState || "") === "staging";
+    const state = resolveStageRunState(
+      { stageRunState: entry.stageState, stageRunAt: entry.stageRunAt },
+      nowMs(),
+    );
+    // staging 未超时也可能已被切项目中断：后台引擎会等超时口径后再补做，避免并发写索引。
+    const pending =
+      state === "" || state === "staging" || (state === "error" && interrupted);
+    if (pending && recoverable) return true;
+  }
+  return false;
 }
 
 export function monitorStatusOfPhase(phase) {
@@ -223,10 +258,15 @@ export function buildMonitorEntry(snapshot) {
     kind === "verify"
       ? String(session?.fixConversationId || "")
       : String(session?.conversationId || "");
+  // 清理在途与已清理分开：自动清理执行期间面板要显示「清理中」并禁用按钮。
+  const cleanupRunning =
+    fixConversationId && String(snapshot?.cleanupInFlight?.fixConversationId || "") === fixConversationId;
   const cleanupState =
     fixConversationId && String(snapshot?.state?.cleanupRun?.fixConversationId || "") === fixConversationId
       ? "done"
-      : "";
+      : cleanupRunning
+        ? "running"
+        : "";
   // 面板入口的可用性：SSH 项目无法暂存；本轮修复会话已不在台账时清理入口必然空转。
   const stageSupported = !isSshProjectPath(project.path);
   const cleanupReady = cleanupReadyOf(snapshot, kind, session);
@@ -271,6 +311,8 @@ export function buildMonitorEntry(snapshot) {
     stageState: String(session?.stageRunState || ""),
     stageRunAt: numberOr(session?.stageRunAt),
     cleanupState,
+    // 冻结本轮清理实际作用的修复会话：批量确认后即使条目被新一轮替换，也不会误清。
+    cleanupFixConversationId: fixConversationId,
     cleanupAction: cleanupPlan ? cleanupPlan.action : "",
     cleanupIssueCount: cleanupPlan ? cleanupPlan.issueCount : 0,
     cleanupSessionCount: cleanupPlan ? cleanupPlan.sessionIds.length : 0,
@@ -319,10 +361,15 @@ export function buildRecoveredMonitorEntry(snapshot) {
     kind === "verify"
       ? String(session.fixConversationId || "")
       : String(session.conversationId || "");
+  // 与活动条目同源：恢复后仍能识别自动清理是否正在执行。
+  const cleanupRunning =
+    fixConversationId && String(snapshot?.cleanupInFlight?.fixConversationId || "") === fixConversationId;
   const cleanupState =
     fixConversationId && String(snapshot?.state?.cleanupRun?.fixConversationId || "") === fixConversationId
       ? "done"
-      : "";
+      : cleanupRunning
+        ? "running"
+        : "";
   // 与活动快照同源：恢复条目同样要按项目类型与本轮修复会话判断入口可用性。
   const stageSupported = !isSshProjectPath(project.path);
   const cleanupReady = cleanupReadyOf(snapshot, kind, session);
@@ -364,6 +411,8 @@ export function buildRecoveredMonitorEntry(snapshot) {
     stageState: String(session?.stageRunState || ""),
     stageRunAt: numberOr(session?.stageRunAt),
     cleanupState,
+    // 与活动条目同源：恢复后批量确认仍能核对清理目标是否还是同一轮修复。
+    cleanupFixConversationId: fixConversationId,
     cleanupAction: cleanupPlan ? cleanupPlan.action : "",
     cleanupIssueCount: cleanupPlan ? cleanupPlan.issueCount : 0,
     cleanupSessionCount: cleanupPlan ? cleanupPlan.sessionIds.length : 0,
@@ -512,6 +561,8 @@ export function normalizeMonitorEntry(raw) {
     // 旧条目没有该字段：按 0 处理，面板会把它视为已超时并给出「重试暂存」。
     stageRunAt: numberOr(raw.stageRunAt),
     cleanupState: raw.cleanupState === "done" ? "done" : "",
+    // 旧登记没有该字段：按空处理，批量确认时仍按会话 id 核对。
+    cleanupFixConversationId: String(raw.cleanupFixConversationId || ""),
     // 旧登记没有清理计划：动作留空表示「范围未知」，面板不在这种条目上做不可逆操作。
     cleanupAction:
       raw.cleanupAction === "delete" || raw.cleanupAction === "archive" ? raw.cleanupAction : "",
@@ -615,7 +666,8 @@ export function createMonitor(api, options = {}) {
     notices: {},
     // 批量收尾的内存状态：stage / cleanup 表示正在执行的动作，notice 是面板级结果提示。
     // 不写入持久化条目：页面重载后不会残留一个未经确认的批量操作。
-    bulk: { stage: "", cleanup: "", notice: null },
+    // cleanupTargets 是点「全部清理」时冻结的轮次快照，确认与执行都以它为准。
+    bulk: { stage: "", cleanup: "", cleanupTargets: [], notice: null },
     // 登记读取失败：内存里只有本次会话的条目，写回会整表覆盖其它项目的记录。
     registryUnavailable: false,
   });
@@ -670,8 +722,9 @@ export function createMonitor(api, options = {}) {
       headlessRetryTimers.delete(projectId);
       if (disposed) return;
       const entry = findEntry(projectId);
-      // 已停止跟踪的条目不再自动重建引擎，否则用户的「停止跟踪」会被立刻撤销。
-      if (!entry || entry.status === "done" || entry.status === "detached") return;
+      // 已停止跟踪的条目不再自动重建引擎，否则用户的「停止跟踪」会被立刻撤销；
+      // done 条目只在仍有待完成的自动收尾时才重建。
+      if (!needsHeadlessTakeover(entry)) return;
       const mainProject = mainEngine?.store?.get()?.project?.directoryId;
       if (mainProject === projectId) return;
       void ensureHeadless(projectId);
@@ -884,6 +937,8 @@ export function createMonitor(api, options = {}) {
     });
     // 挂载期间可能已因错误快照被停止：不要把已销毁的引擎交回调用方。
     if (headlessEngines.get(projectId) !== engine) return null;
+    // 后台引擎挂载后补做因切换项目中断的自动收尾；失败原因由快照 toast 镜像到条目。
+    void engine.resumePendingFinish?.();
     return engine;
   }
 
@@ -967,13 +1022,23 @@ export function createMonitor(api, options = {}) {
         const previous = mainProjectId;
         mainProjectId = nextProjectId;
         store.set({ currentProjectId: nextProjectId });
-        // 主引擎切走后旧项目仍保留未完成记录：交给后台引擎继续跟踪或提供恢复入口。
+        // 主引擎切走后旧项目仍保留未完成记录：交给后台引擎继续跟踪或补做自动收尾。
         if (previous && previous !== nextProjectId) {
           const previousEntry = findEntry(previous);
-          if (previousEntry && previousEntry.status !== "done") void ensureHeadless(previous);
+          if (previousEntry && needsHeadlessTakeover(previousEntry)) void ensureHeadless(previous);
         }
         // 主引擎接管当前项目后，同项目的后台引擎必须停止，避免两个引擎同时写状态。
         if (nextProjectId) stopHeadless(nextProjectId);
+      }
+      // 主引擎的清理在途锁已释放：交接时冻结在条目上的「清理中」已经没有引擎负责，
+      // 必须重新交给接管判定，否则面板会一直禁用清理入口，旧引擎被打断的清理也无人补做。
+      if (!snapshot?.cleanupInFlight) {
+        for (const entry of currentEntries()) {
+          if (entry.cleanupState !== "running") continue;
+          if (!entry.projectId || entry.projectId === nextProjectId) continue;
+          if (headlessEngines.has(entry.projectId)) continue;
+          upsertEntry({ ...entry, cleanupState: "" });
+        }
       }
     }
     if (snapshot?.status === "error" && !isMain) {
@@ -1006,13 +1071,10 @@ export function createMonitor(api, options = {}) {
     if (isMain && (snapshot?.status === "ready" || snapshot?.status === "no-project")) {
       // 页面重载 / 宿主没有打开项目时恢复非当前项目的未完成条目：
       // 主引擎就绪后再创建后台引擎，避免与主引擎正在载入的项目重复跟踪；
-      // 已完成条目只保留面板展示。
+      // done 条目只有在仍冻结了未完成的自动收尾时才接管，其余只保留面板展示。
       for (const entry of currentEntries()) {
-        // 只恢复运行中 / 跟踪中断的条目：用户显式停止跟踪（detached）后不自动重建引擎。
-        if (
-          (entry.status === "running" || entry.status === "error") &&
-          entry.projectId !== mainProjectId
-        ) {
+        // 用户显式停止跟踪（detached）后不自动重建引擎。
+        if (needsHeadlessTakeover(entry) && entry.projectId !== mainProjectId) {
           void ensureHeadless(entry.projectId);
         }
       }
@@ -1345,6 +1407,19 @@ export function createMonitor(api, options = {}) {
       setAction(projectId, { cleanup: undefined, cleanupConversationId: undefined });
       return { status: "empty" };
     }
+    const expected = options.expected || null;
+    // 确认后条目可能已被新一轮替换：只要轮次身份有一项不一致就不执行，
+    // 由批量入口计入 skipped，避免清理用户没在确认页看到的轮次。
+    if (
+      expected &&
+      (String(expected.conversationId || "") !== String(entry.conversationId || "") ||
+        String(expected.cleanupFixConversationId || "") !==
+          String(entry.cleanupFixConversationId || "") ||
+        (expected.cleanupAction && expected.cleanupAction !== entry.cleanupAction))
+    ) {
+      setAction(projectId, { cleanup: undefined, cleanupConversationId: undefined });
+      return { status: "stale" };
+    }
     setAction(projectId, { cleanup: "running", cleanupConversationId: entry.conversationId });
     try {
       const engine = engineFor(projectId) || (await ensureHeadless(projectId, { force: true }));
@@ -1352,9 +1427,12 @@ export function createMonitor(api, options = {}) {
         setNotice(projectId, "error", t("fx.toast.cleanupManualUnavailable"));
         return { status: "error" };
       }
+      const expectedFixConversationId = String(expected?.cleanupFixConversationId || "");
       const result =
         typeof engine.cleanupRunManually === "function"
-          ? await engine.cleanupRunManually()
+          ? await engine.cleanupRunManually(
+              expectedFixConversationId ? { fixConversationId: expectedFixConversationId } : undefined,
+            )
           : { status: "empty" };
       const status = String(result?.status || "empty");
       if (status === "done") {
@@ -1414,6 +1492,8 @@ export function createMonitor(api, options = {}) {
         setNotice(projectId, "info", t("fx.toast.cleanupManualDeferred"));
         return { status: "deferred" };
       }
+      // 引擎在真正执行前发现当前修复轮次已变化：本次没有产生任何宿主副作用。
+      if (status === "stale") return { status: "stale" };
       setNotice(projectId, "info", t("fx.toast.cleanupManualEmpty"));
       return { status: "empty" };
     } catch {
@@ -1433,38 +1513,55 @@ export function createMonitor(api, options = {}) {
       setAction(projectId, { cleanup: undefined, cleanupConversationId: undefined });
       return;
     }
-    return await executeCleanup(projectId);
+    // 与批量入口同一口径：确认时的条目会话与引擎当前修复轮次必须一致。
+    return await executeCleanup(projectId, {
+      expected: {
+        conversationId: entry.conversationId,
+        cleanupFixConversationId: entry.cleanupFixConversationId,
+        cleanupAction: entry.cleanupAction,
+      },
+    });
   }
 
   // 批量清理：先进入一次汇总确认态，确认后逐个项目执行。
-  // 汇总在渲染时按当前条目实时计算，执行时重新取候选：期间被新一轮顶掉的项目会自动排除。
+  // 点「全部清理」时冻结每条的目标轮次；确认页与执行集合都只认这份快照，
+  // 期间完成的新一轮不会因为条目仍满足候选条件而被一并清理。
   function beginCleanupAll() {
     const bulk = store.get().bulk || {};
     if (bulk.stage === "running" || bulk.cleanup === "running") return;
-    if (!bulkCleanupTargets(currentEntries()).length) {
+    const targets = bulkCleanupTargets(currentEntries()).map((entry) => ({
+      projectId: entry.projectId,
+      conversationId: String(entry.conversationId || ""),
+      cleanupFixConversationId: String(entry.cleanupFixConversationId || ""),
+      cleanupAction: entry.cleanupAction,
+    }));
+    if (!targets.length) {
       setBulkNotice("info", t("fx.monitor.bulkCleanupEmpty"));
       return;
     }
-    setBulk({ cleanup: "confirm", notice: null });
+    setBulk({ cleanup: "confirm", cleanupTargets: targets, notice: null });
   }
 
   function cancelCleanupAll() {
     if ((store.get().bulk || {}).cleanup === "running") return;
-    setBulk({ cleanup: "" });
+    setBulk({ cleanup: "", cleanupTargets: [] });
   }
 
   async function confirmCleanupAll() {
-    if ((store.get().bulk || {}).cleanup !== "confirm") return;
-    const targets = bulkCleanupTargets(currentEntries()).map((entry) => entry.projectId);
+    const bulk = store.get().bulk || {};
+    if (bulk.cleanup !== "confirm") return;
+    const targets = Array.isArray(bulk.cleanupTargets) ? bulk.cleanupTargets : [];
     if (!targets.length) {
-      setBulk({ cleanup: "" });
+      setBulk({ cleanup: "", cleanupTargets: [] });
       setBulkNotice("info", t("fx.monitor.bulkCleanupEmpty"));
       return;
     }
     // 先占位再执行：确认后立即锁住每个条目的单条入口，避免同一轮被并发处理两次。
-    for (const projectId of targets) {
-      const entry = findEntry(projectId);
-      setAction(projectId, { cleanup: "running", cleanupConversationId: entry?.conversationId });
+    for (const target of targets) {
+      setAction(target.projectId, {
+        cleanup: "running",
+        cleanupConversationId: target.conversationId,
+      });
     }
     setBulk({ cleanup: "running", notice: null });
     let done = 0;
@@ -1472,9 +1569,21 @@ export function createMonitor(api, options = {}) {
     let skipped = 0;
     let issues = 0;
     let sessions = 0;
-    for (const projectId of targets) {
+    for (const target of targets) {
       if (disposed) break;
-      const result = await executeCleanup(projectId, { claimed: true });
+      const entry = findEntry(target.projectId);
+      const sameRound =
+        entry &&
+        String(entry.conversationId || "") === target.conversationId &&
+        String(entry.cleanupFixConversationId || "") === target.cleanupFixConversationId &&
+        entry.cleanupAction === target.cleanupAction;
+      if (!sameRound) {
+        // 条目已消失或被新一轮替换：不计入执行，也不产生任何宿主副作用。
+        setAction(target.projectId, { cleanup: undefined, cleanupConversationId: undefined });
+        skipped += 1;
+        continue;
+      }
+      const result = await executeCleanup(target.projectId, { claimed: true, expected: target });
       if (result.status === "done") {
         if (result.failed) failed += 1;
         else done += 1;
@@ -1486,7 +1595,7 @@ export function createMonitor(api, options = {}) {
         skipped += 1;
       }
     }
-    setBulk({ cleanup: "", notice: null });
+    setBulk({ cleanup: "", cleanupTargets: [], notice: null });
     const values = { done, failed, skipped, issues, sessions, total: targets.length };
     if (failed) showBulkResult("error", t("fx.monitor.bulkCleanupFailed", values));
     else if (skipped) showBulkResult("info", t("fx.monitor.bulkCleanupSkipped", values));
@@ -1521,10 +1630,27 @@ export function createMonitor(api, options = {}) {
   }
 
   // 面板渲染用的批量计划：候选与条目按钮共用同一套判定，汇总与时序无关。
+  // 确认态必须展示点击「全部清理」时冻结的目标，换届的条目不参与汇总，
+  // 否则用户看到的动作与条数仍会随快照漂移。
   function bulkPlan() {
     const entries = currentEntries();
     const stage = bulkStageTargets(entries);
-    const cleanup = bulkCleanupTargets(entries);
+    const bulk = store.get().bulk || {};
+    const frozen =
+      bulk.cleanup === "confirm" && Array.isArray(bulk.cleanupTargets)
+        ? bulk.cleanupTargets
+            .map((target) =>
+              entries.find(
+                (entry) =>
+                  entry.projectId === target.projectId &&
+                  String(entry.conversationId || "") === target.conversationId &&
+                  String(entry.cleanupFixConversationId || "") === target.cleanupFixConversationId &&
+                  entry.cleanupAction === target.cleanupAction,
+              ),
+            )
+            .filter(Boolean)
+        : null;
+    const cleanup = frozen === null ? bulkCleanupTargets(entries) : frozen;
     return { stage, cleanup, summary: cleanupPlanSummaryOf(cleanup) };
   }
 

@@ -770,7 +770,8 @@ function mount() {
       engine.refresh();
     } else {
       // 审查弹窗通过 Portal 挂在 body 上，浮层隐藏时必须一并关闭，避免残留遮罩。
-      engine.closeDialog();
+      // 收起界面不等于放弃本轮自动修复：这里不写拒绝标记，后台补做与列表入口都保留。
+      engine.closeDialog({ decline: false });
       // toast 也已 Portal 到 body，隐藏浮层时一并清掉，避免下次打开看到过期提示。
       engine.clearToast();
     }
