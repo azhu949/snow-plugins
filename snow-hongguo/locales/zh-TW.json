@@ -66,7 +66,6 @@
   "player.unmute": "取消靜音",
   "player.volume": "音量",
   "player.speed": "播放速度",
-  "player.speedUnsupported": "本機解碼播放暫不支援倍速",
   "player.decodeFailed": "本機解碼失敗",
   "player.fallbackCompatible": "已回退到相容播放",
   "player.quality": "清晰度",

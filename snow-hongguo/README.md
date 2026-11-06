@@ -7,7 +7,7 @@ Snow App 右侧面板插件，用来看红果短剧的推荐、搜索、详情�
 > **免责声明**：请以学习与研究为目的使用本插件。本插件仅供个人学习、技术研究与交流，禁止用于商业用途，也不得用于大规模数据采集或其他侵犯他人合法权益的行为。使用本插件即表示你已阅读并同意[文末的完整免责声明](#免责声明)的全部条款。
 
 - 插件 id：`com.snow.hongguo`
-- 当前版本：`0.1.0`
+- 当前版本：`0.1.3`
 - 技术报告：`docs/spike-report.md`
 
 ## 功能
@@ -145,7 +145,7 @@ Start-Process -FilePath "node" -ArgumentList "server.mjs" -WorkingDirectory $ins
 | 时间 | 当前时间 / 总时长 |
 | 下一集 | 最后一集时禁用；键盘 `N` 也可切下一集 |
 | 音量 | 滑杆与静音按钮；音量拉到 0 自动静音 |
-| 倍速 | 0.75x 到 3x，共 8 档 |
+| 倍速 | 0.75x 到 3x，共 8 档；本机解码和兼容播放均支持，同一播放器会话内切集、连播、切清晰度、回退及重播保留所选速度 |
 | 清晰度 | 1080p / 720p / 540p / 480p / 360p，切换后写入偏好 |
 | 画中画 | 浏览器不支持时隐藏按钮 |
 | 铺满侧栏 | 把播放器临时移到页面顶层并铺满视口；再次点击、双击画面或 Esc 退出 |
@@ -229,6 +229,7 @@ Start-Process -FilePath "node" -ArgumentList "server.mjs" -WorkingDirectory $ins
 9. **铺满区域依赖 `:has()`。** 不支持 `:has()` 的渲染层会退回 16:9 占位框，画面较小但不影响播放。
 10. **端口区间固定。** 后台在 `127.0.0.1:37191-37200` 中找第一个可用端口；区间被其他程序占满时后台启动失败，面板会提示找不到后台服务。
 11. **后台模块随宿主启动（需 0.5.12+）。** 0.5.12 起由宿主在主进程内加载 `background.mjs`；更早的版本不加载，只能按「后台服务」手动执行 `node server.mjs`。后台起不来时面板会提示「未发现后台服务」，处理见故障排查。
+12. **倍速保留音调，但首次切档需要处理音频。** 本机解码使用 SoundTouchJS 的 WSOLA 时间拉伸处理整集音频，只改变语速、不直接提高音频采样播放速度；1x 使用原音频。处理在独立 Worker 中完成，准备期间冻结音画，完成后从原位置继续，缓存只保留一个非 1x 档位。画面仍按音频输出时钟选帧，解码跟不上时暂停音频并冻结进度，待画面追上后继续。高倍速仍可能有时间拉伸带来的音色细节变化；倍速仅在当前播放器会话内保留，不写入持久设置。
 
 ## 故障排查
 
@@ -266,7 +267,7 @@ node --test       # 单元测试；真实网络用例（test/live.test.js、test
 | `docs/spike-report.md` | SDK、通道、HEVC/WebCodecs 与 wasm 的验证报告 |
 | `test/` | 单元测试与媒体夹具 |
 
-发布产物只需要 `plugin.json`、`package.json`、`index.js`、`background.mjs`、`style.css`、`locales/`、`dist/`，以及可选的 `README.md` 与 `server.mjs`（仅旧宿主/调试用）；`src/`、`test/`、`docs/`、`node_modules/` 不需要打进 zip。
+发布产物需要 `plugin.json`、`index.js`、`background.mjs`、`style.css`、`locales/`、`dist/` 和 `third-party/`，以及可选的 `README.md` 与 `server.mjs`（仅旧宿主/调试用）。`third-party/` 中的 SoundTouch 源码与许可必须随包保留；`src/`、`test/`、`node_modules/`、构建脚本与根目录依赖清单由打包脚本排除。
 
 ## 免责声明
 

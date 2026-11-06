@@ -8,10 +8,9 @@ import { describeError } from "../ui/common.js";
 import { DEFAULT_QUALITY, QUALITY_OPTIONS, normalizeMiniWindow } from "../storage.js";
 import { MSE_STATE, createMseEngine } from "./engine.js";
 import { icon } from "./icons.js";
-import { createWebCodecsPlayer } from "./webcodecs-play.js";
+import { PLAYBACK_RATES, createWebCodecsPlayer } from "./webcodecs-play.js";
 import { clamp, copyText, decodeBase64, formatClock, safeFileName } from "./util.js";
 
-const SPEEDS = [0.75, 1, 1.25, 1.5, 1.75, 2, 2.5, 3];
 const HIDE_DELAY_MS = 2600;
 const SEEK_STEP_SECONDS = 5;
 const VOLUME_STEP = 0.05;
@@ -61,6 +60,8 @@ export function createPlayer(slot, initialProps) {
   let userPaused = false;
   // 目标档位取已保存的清晰度偏好；旧数据里的非法值退回默认档，避免下拉出现空值。
   let desiredQuality = QUALITY_OPTIONS.includes(props.quality) ? props.quality : DEFAULT_QUALITY;
+  // 倍速只在当前播放器会话内保持，切集、切清晰度与引擎回退都沿用最新选择。
+  let desiredPlaybackRate = 1;
   let overlayKind = "";
   let dragging = false;
   let fill = false;
@@ -278,23 +279,14 @@ export function createPlayer(slot, initialProps) {
 
   const speedSelect = document.createElement("select");
   speedSelect.className = "hg-player-select hg-player-speed";
-  for (const speed of SPEEDS) {
+  for (const speed of PLAYBACK_RATES) {
     const option = document.createElement("option");
     option.value = String(speed);
     option.textContent = `${speed}x`;
     speedSelect.append(option);
   }
-  speedSelect.value = "1";
-  speedSelect.addEventListener("change", () => {
-    // 本机解码期间倍速不生效，控件此时是禁用的，这里再兜一层防止程序化触发。
-    if (wvc) {
-      syncSpeed();
-      return;
-    }
-    video.playbackRate = Number(speedSelect.value) || 1;
-    syncSpeed();
-    showControls();
-  });
+  speedSelect.value = String(desiredPlaybackRate);
+  speedSelect.addEventListener("change", () => setSpeed(speedSelect.value));
   speedSelect.addEventListener("click", (event) => event.stopPropagation());
 
   const pipBtn = button("pip", () => void togglePip());
@@ -350,6 +342,9 @@ export function createPlayer(slot, initialProps) {
   // 当前生效的清晰度：本机解码看实际拉到的档位，兼容路径看引擎快照。
   const currentQuality = () => (wvc ? wvcQuality : state.quality || props.quality || DEFAULT_QUALITY);
 
+  // 隐藏的媒体元素不代表本机解码速度，显示与快捷键都从当前引擎读取。
+  const currentPlaybackRate = () => Number(wvc ? wvc.getState().playbackRate : video.playbackRate) || 1;
+
   const hasNext = () => {
     const list = Array.isArray(props.episodes) ? props.episodes : [];
     const next = list[props.episodeIndex + 1];
@@ -371,7 +366,7 @@ export function createPlayer(slot, initialProps) {
     volume.setAttribute("aria-label", t("player.volume"));
     qualitySelect.title = t("player.quality");
     qualitySelect.setAttribute("aria-label", t("player.quality"));
-    // 倍速按钮的文案与禁用状态由 syncSpeed 按当前播放通道统一处理。
+    // 倍速文案与实际档位由 syncSpeed 按当前播放通道统一处理。
     syncSpeed();
     pipBtn.title = t("player.pip");
     pipBtn.setAttribute("aria-label", t("player.pip"));
@@ -472,7 +467,7 @@ export function createPlayer(slot, initialProps) {
     userPaused = false;
     if (wvc) {
       wvc.play();
-      playing = true;
+      playing = wvc.getState().phase === "playing";
       syncPlayButton();
       updateBigPlay();
       return;
@@ -587,25 +582,42 @@ export function createPlayer(slot, initialProps) {
     syncVolume();
   };
 
-  const cycleSpeed = (direction) => {
-    // 本机解码期间倍速不可用，快捷键同样不生效，避免界面与真实播放速度不一致。
-    if (wvc) {
+  const applyVideoPlaybackRate = () => {
+    // 兼容播放也显式保留原音调，不能让两条播放路径的听感相反。
+    video.preservesPitch = true;
+    // load() 会把当前速度恢复成默认速度；两者同步才能跨兼容路径重载保持倍速。
+    if (video.defaultPlaybackRate !== desiredPlaybackRate) video.defaultPlaybackRate = desiredPlaybackRate;
+    if (video.playbackRate !== desiredPlaybackRate) video.playbackRate = desiredPlaybackRate;
+  };
+
+  const setSpeed = (value) => {
+    if (disposed) return;
+    const next = Number(value);
+    if (!PLAYBACK_RATES.includes(next)) {
       syncSpeed();
       return;
     }
-    const current = Number(video.playbackRate) || 1;
+    desiredPlaybackRate = next;
+    if (wvc) desiredPlaybackRate = wvc.setPlaybackRate(next);
+    // 本机解码期间也同步兼容路径，回退时无需读取隐藏 video 的旧速度。
+    applyVideoPlaybackRate();
+    syncSpeed();
+    showControls();
+  };
+
+  const cycleSpeed = (direction) => {
+    const current = currentPlaybackRate();
     let index = 0;
     let best = Number.POSITIVE_INFINITY;
-    SPEEDS.forEach((speed, position) => {
+    PLAYBACK_RATES.forEach((speed, position) => {
       const distance = Math.abs(speed - current);
       if (distance < best) {
         best = distance;
         index = position;
       }
     });
-    const next = SPEEDS[clamp(index + direction, 0, SPEEDS.length - 1)];
-    video.playbackRate = next;
-    syncSpeed();
+    const next = PLAYBACK_RATES[clamp(index + direction, 0, PLAYBACK_RATES.length - 1)];
+    setSpeed(next);
   };
 
   const setQuality = (quality, persist) => {
@@ -1052,12 +1064,10 @@ export function createPlayer(slot, initialProps) {
   };
 
   const syncSpeed = () => {
-    // 本机解码播放时 <video> 是停的，改 playbackRate 不会影响解码时钟，所以诚实置灰。
-    const unsupported = Boolean(wvc);
-    speedSelect.disabled = unsupported;
-    speedSelect.title = unsupported ? t("player.speedUnsupported") : t("player.speed");
+    speedSelect.disabled = false;
+    speedSelect.title = t("player.speed");
     speedSelect.setAttribute("aria-label", speedSelect.title);
-    speedSelect.value = unsupported ? "1" : String(Number(video.playbackRate) || 1);
+    speedSelect.value = String(currentPlaybackRate());
   };
 
   const syncQualitySelect = () => {
@@ -1084,7 +1094,8 @@ export function createPlayer(slot, initialProps) {
       const phase = snapshot.phase;
       const fetching = phase === "idle" || phase === "loading";
       const firstFramePending = phase === "ready" || (phase === "playing" && !(Number(snapshot.output) > 0));
-      busy = fetching || firstFramePending;
+      const buffering = phase === "playing" && snapshot.buffering;
+      busy = fetching || firstFramePending || buffering;
       textKey = fetching ? "player.loading" : "player.buffering";
     } else {
       const phase = state.state;
@@ -1582,7 +1593,12 @@ export function createPlayer(slot, initialProps) {
     updateBigPlay();
   });
   video.addEventListener("volumechange", () => syncVolume());
-  video.addEventListener("ratechange", () => syncSpeed());
+  video.addEventListener("ratechange", () => {
+    if (disposed || wvc) return;
+    // 兼容路径重载造成的速度变化不能覆盖会话选择，也不能改写本机解码速度。
+    applyVideoPlaybackRate();
+    syncSpeed();
+  });
 
   const handleEnded = () => {
     if (disposed) return;
@@ -1629,9 +1645,10 @@ export function createPlayer(slot, initialProps) {
       canvas.style.display = "";
     }
     video.style.visibility = "";
-    // 离开本机解码后倍速控件恢复可用，播放图标回到未播放状态。
+    // 离开本机解码后兼容路径沿用会话倍速，播放图标回到未播放状态。
     if (hadPlayer) {
       playing = false;
+      applyVideoPlaybackRate();
       syncPlayButton();
       syncSpeed();
     }
@@ -1740,7 +1757,10 @@ export function createPlayer(slot, initialProps) {
           }
           // <video> 此刻是停的，播放状态只能从引擎同步过来。
           const active = snapshot.phase === "playing";
-          if (active) autoPlayPending = false;
+          if (active) {
+            autoPlayPending = false;
+            endedReported = false;
+          }
           if (playing !== active) {
             playing = active;
             syncPlayButton();
@@ -1749,12 +1769,15 @@ export function createPlayer(slot, initialProps) {
             endedReported = true;
             handleEnded();
           }
+          syncSpeed();
           updateBigPlay();
           updateLoading();
         },
       });
       wvc = player;
-      syncSpeed();
+      // 取流信息等待期间可能改过速度或音量，新实例立即使用最新会话值。
+      player.setVolume(video.muted ? 0 : video.volume);
+      setSpeed(desiredPlaybackRate);
       syncQualitySelect();
       updateBigPlay();
       updateLoading();
@@ -1765,6 +1788,8 @@ export function createPlayer(slot, initialProps) {
         resumeMs,
       });
       if (seq !== wvcSeq || wvc !== player) return;
+      // 不捕获载入前的倍速，避免异步拉流期间的新选择被旧值覆盖。
+      setSpeed(desiredPlaybackRate);
       if (miniHidden || userPaused) {
         player.pause();
         return;

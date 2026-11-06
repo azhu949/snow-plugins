@@ -86,14 +86,61 @@ const buildOne = async ({ entry, outfile, platform, target, banner, extra = {} }
 };
 
 try {
+  // 宿主通过 Blob 加载面板，Worker 不能依赖运行时相对路径；先打包成自包含字符串。
+  const tempoWorkerEntry = join(root, "src", "panel", "player", "tempo-worker.js");
+  await requireReadable(tempoWorkerEntry);
+  const soundtouchSource = await readFile(join(root, "node_modules", "@soundtouchjs", "core", ".dist", "Stretch.js"), "utf8");
+  // 上游使用普通版权注释，esbuild 不把它识别为 @license；原样提取到 banner 避免被裁掉。
+  const soundtouchNotice = soundtouchSource.match(/^\/\*[\s\S]*?\*\//)?.[0];
+  if (!soundtouchNotice) throw new Error("SoundTouch 源码缺少版权声明");
+  const tempoWorker = await build({
+    absWorkingDir: root,
+    entryPoints: [tempoWorkerEntry],
+    bundle: true,
+    write: false,
+    format: "iife",
+    platform: "browser",
+    target: "es2020",
+    splitting: false,
+    sourcemap: false,
+    minify: false,
+    charset: "utf8",
+    legalComments: "inline",
+    banner: { js: soundtouchNotice },
+    metafile: true,
+    logLevel: "info",
+  });
+  if (tempoWorker.outputFiles.length !== 1 || !tempoWorker.outputFiles[0].text.trim()) {
+    throw new Error("保调 Worker 必须构建为一个非空脚本");
+  }
+  // 对真正进入 Worker 的第三方模块核对原样副本；新增依赖不得绕过随包源码归属。
+  for (const output of Object.values(tempoWorker.metafile.outputs)) {
+    for (const [sourcePath, input] of Object.entries(output.inputs)) {
+      const normalized = sourcePath.replaceAll("\\", "/");
+      if (!input.bytesInOutput || !normalized.startsWith("node_modules/")) continue;
+      const prefix = "node_modules/@soundtouchjs/core/.dist/";
+      if (!normalized.startsWith(prefix)) throw new Error(`保调 Worker 引入未登记的第三方源码：${sourcePath}`);
+      const [original, preserved] = await Promise.all([
+        readFile(join(root, sourcePath)),
+        readFile(join(root, "third-party", "soundtouch", normalized.slice(prefix.length))),
+      ]);
+      if (!original.equals(preserved)) throw new Error(`第三方源码副本与依赖不一致：${sourcePath}`);
+    }
+  }
+  await requireReadable(join(root, "third-party", "soundtouch", "LICENSE"));
+  await requireReadable(join(root, "third-party", "README.md"));
+
   const panelBuilt = await buildOne({
     entry: panelEntry,
     outfile: panelOut,
     platform: "browser",
     target: "es2020",
     banner: PANEL_BANNER,
-    // React 由宿主 window.SnowAppPlugin 注入；即使源码误写 import React 也不能把副本打进包。
-    extra: { external: ["react", "react-dom"] },
+    // React 由宿主注入；Worker 字符串仅注入面板，不带进 background 入口。
+    extra: {
+      external: ["react", "react-dom"],
+      define: { __HONGGUO_TEMPO_WORKER__: JSON.stringify(tempoWorker.outputFiles[0].text) },
+    },
   });
   const hasDefaultExport =
     /export\s+default\b/.test(panelBuilt) || /export\s*\{[^}]*\bas\s+default\b[^}]*\}/.test(panelBuilt);

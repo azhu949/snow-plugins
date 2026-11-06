@@ -1,6 +1,6 @@
 {
   "name": "snow-hongguo",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "private": true,
   "type": "module",
   "license": "MIT",
@@ -10,6 +10,7 @@
     "check": "node --check index.js && node --check background.mjs"
   },
   "dependencies": {
+    "@soundtouchjs/core": "2.1.1",
     "openhongguo": "0.2.0"
   },
   "devDependencies": {

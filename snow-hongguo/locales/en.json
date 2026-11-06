@@ -66,7 +66,6 @@
   "player.unmute": "Unmute",
   "player.volume": "Volume",
   "player.speed": "Playback speed",
-  "player.speedUnsupported": "Speed control is unavailable while decoding locally",
   "player.decodeFailed": "Local decoding failed",
   "player.fallbackCompatible": "Switched to compatible playback",
   "player.quality": "Quality",
