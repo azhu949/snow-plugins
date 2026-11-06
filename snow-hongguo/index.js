@@ -1364,6 +1364,8 @@ function DiscoverPage({ ctx, active }) {
   const busyRef = React.useRef(false);
   const seqRef = React.useRef(0);
   const loadedRef = React.useRef(false);
+  const scheduleNearEndCheckRef = React.useRef(null);
+  const autoMorePausedRef = React.useRef(false);
   const suppressUntilRef = React.useRef(0);
   const pullRef = React.useRef({ active: false, startY: 0, moved: false, value: 0 });
   React.useEffect(() => {
@@ -1376,13 +1378,16 @@ function DiscoverPage({ ctx, active }) {
       busyRef.current = true;
       setStatus(refresh ? "refreshing" : "loading");
       setError(null);
+      let succeeded = false;
       try {
         const page = await rpc.discover();
         if (seq !== seqRef.current) return;
         const list = dedupeById(Array.isArray(page?.items) ? page.items : []);
+        itemsRef.current = list;
         setItems(list);
         cursorRef.current = page?.cursor ?? null;
         hasMoreRef.current = page?.hasMore === true;
+        autoMorePausedRef.current = false;
         setHasMore(hasMoreRef.current);
         setStatus("idle");
         setLoaded(true);
@@ -1390,12 +1395,16 @@ function DiscoverPage({ ctx, active }) {
         if (refresh && scrollRef.current && typeof scrollRef.current.scrollTo === "function") {
           scrollRef.current.scrollTo({ top: 0 });
         }
+        succeeded = true;
       } catch (loadError) {
         if (seq !== seqRef.current) return;
         setError(loadError);
         setStatus("error");
       } finally {
-        if (seq === seqRef.current) busyRef.current = false;
+        if (seq === seqRef.current) {
+          busyRef.current = false;
+          if (succeeded && hasMoreRef.current) scheduleNearEndCheckRef.current?.();
+        }
       }
     },
     [rpc]
@@ -1403,25 +1412,36 @@ function DiscoverPage({ ctx, active }) {
   const loadMore = React.useCallback(async () => {
     if (busyRef.current || !hasMoreRef.current || !cursorRef.current) return;
     const seq = seqRef.current;
+    const requestCursor = cursorRef.current;
     busyRef.current = true;
     setStatus("more");
     setError(null);
+    let succeeded = false;
     try {
-      const page = await rpc.discover(cursorRef.current);
+      const page = await rpc.discover(requestCursor);
       if (seq !== seqRef.current) return;
       const incoming = dedupeById(Array.isArray(page?.items) ? page.items : []);
       const merged = dedupeById([...itemsRef.current, ...incoming]);
+      const nextCursor = page?.cursor ?? null;
+      const nextHasMore = page?.hasMore === true && Boolean(nextCursor) && nextCursor !== requestCursor;
+      itemsRef.current = merged;
       setItems(merged);
-      cursorRef.current = page?.cursor ?? null;
-      hasMoreRef.current = page?.hasMore === true;
-      setHasMore(hasMoreRef.current);
+      cursorRef.current = nextCursor;
+      hasMoreRef.current = nextHasMore;
+      autoMorePausedRef.current = false;
+      setHasMore(nextHasMore);
       setStatus("idle");
+      succeeded = true;
     } catch (loadError) {
       if (seq !== seqRef.current) return;
+      autoMorePausedRef.current = true;
       setError(loadError);
       setStatus("idle");
     } finally {
-      if (seq === seqRef.current) busyRef.current = false;
+      if (seq === seqRef.current) {
+        busyRef.current = false;
+        if (succeeded && hasMoreRef.current) scheduleNearEndCheckRef.current?.();
+      }
     }
   }, [rpc]);
   React.useEffect(() => {
@@ -1433,23 +1453,48 @@ function DiscoverPage({ ctx, active }) {
     if (!active) return void 0;
     const sentinel = sentinelRef.current;
     const root = scrollRef.current;
-    if (!sentinel || !root) return void 0;
-    if (typeof IntersectionObserver === "function") {
-      const observer = new IntersectionObserver(
-        (entries) => {
-          if (entries.some((entry) => entry.isIntersecting)) void loadMore();
-        },
-        { root, rootMargin: "240px 0px" }
-      );
-      observer.observe(sentinel);
-      return () => observer.disconnect();
-    }
-    const onScroll = () => {
-      if (root.scrollHeight - root.scrollTop - root.clientHeight < 240) void loadMore();
+    if (!root) return void 0;
+    let disposed = false;
+    let frame = null;
+    const checkNearEnd = () => {
+      if (disposed) return;
+      const nearEnd = root.scrollHeight - root.scrollTop - root.clientHeight < 240;
+      if (!nearEnd) {
+        autoMorePausedRef.current = false;
+        return;
+      }
+      if (!autoMorePausedRef.current) void loadMore();
     };
-    root.addEventListener("scroll", onScroll, { passive: true });
-    return () => root.removeEventListener("scroll", onScroll);
-  }, [active, loadMore]);
+    const scheduleNearEndCheck = () => {
+      if (disposed || frame !== null) return;
+      frame = window.requestAnimationFrame(() => {
+        frame = null;
+        checkNearEnd();
+      });
+    };
+    scheduleNearEndCheckRef.current = scheduleNearEndCheck;
+    const intersectionObserver = typeof IntersectionObserver === "function" ? new IntersectionObserver(
+      () => {
+        checkNearEnd();
+      },
+      { root, rootMargin: "240px 0px" }
+    ) : null;
+    const resizeObserver = typeof ResizeObserver === "function" ? new ResizeObserver(checkNearEnd) : null;
+    if (sentinel) intersectionObserver?.observe(sentinel);
+    resizeObserver?.observe(root);
+    root.addEventListener("scroll", checkNearEnd, { passive: true });
+    window.addEventListener("resize", checkNearEnd);
+    checkNearEnd();
+    return () => {
+      disposed = true;
+      if (frame !== null) window.cancelAnimationFrame(frame);
+      if (scheduleNearEndCheckRef.current === scheduleNearEndCheck) scheduleNearEndCheckRef.current = null;
+      intersectionObserver?.disconnect();
+      resizeObserver?.disconnect();
+      root.removeEventListener("scroll", checkNearEnd);
+      window.removeEventListener("resize", checkNearEnd);
+    };
+  }, [active, hasMore, items.length, loadMore]);
   const endPull = () => {
     const state = pullRef.current;
     if (!state.active) return;
@@ -4491,7 +4536,7 @@ function createPlayer(slot, initialProps) {
       miniHideTimer = 0;
       if (!mini || miniInteraction || dragging) return;
       hideMiniWindow();
-    }, 500);
+    }, 0);
   };
   const adoptMiniWindow = (value) => {
     const next = normalizeMiniWindow(value);

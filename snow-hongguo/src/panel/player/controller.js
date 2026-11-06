@@ -800,7 +800,7 @@ export function createPlayer(slot, initialProps) {
       miniHideTimer = 0;
       if (!mini || miniInteraction || dragging) return;
       hideMiniWindow();
-    }, 500);
+    }, 0);
   };
 
   const adoptMiniWindow = (value) => {
