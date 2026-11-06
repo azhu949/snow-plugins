@@ -372,6 +372,7 @@ export function DetailPage({ ctx, seed, onBack }) {
                   onEnded: handleEnded,
                   onSelectEpisode: (index) => selectEpisode(index, 0),
                   onError: handlePlayerError,
+                  onMiniChange: ctx.onMiniChange,
                 })
               : null,
             h(

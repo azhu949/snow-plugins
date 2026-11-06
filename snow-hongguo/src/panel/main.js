@@ -3,7 +3,7 @@ import { bindReact, h } from "./ui/runtime.js";
 import { createTranslator } from "./i18n.js";
 import { createRpc } from "./rpc.js";
 import { createCoverStore } from "./cover.js";
-import { readPrefs, writePrefs } from "./storage.js";
+import { DEFAULT_MINI_WINDOW, readPrefs, writePrefs } from "./storage.js";
 import { Icon, Spinner, describeError } from "./ui/common.js";
 import { DiscoverPage } from "./pages/discover.js";
 import { SearchPage } from "./pages/search.js";
@@ -48,14 +48,17 @@ function PanelApp({ api, React, locale }) {
   const [boot, setBoot] = React.useState({ status: "loading", error: null, health: null });
   const [activeTab, setActiveTab] = React.useState("discover");
   const [route, setRoute] = React.useState(null);
+  const [detailVisible, setDetailVisible] = React.useState(false);
+  const [miniActive, setMiniActive] = React.useState(false);
   const [visited, setVisited] = React.useState(() => ({ discover: true }));
-  const [prefs, setPrefs] = React.useState({ quality: "720p" });
+  const [prefs, setPrefs] = React.useState({ quality: "720p", miniWindow: { ...DEFAULT_MINI_WINDOW } });
   const [historyVersion, setHistoryVersion] = React.useState(0);
   const [notices, setNotices] = React.useState([]);
 
   const prefsRef = React.useRef(prefs);
   const aliveRef = React.useRef(true);
   const bootSeqRef = React.useRef(0);
+  const routeSeqRef = React.useRef(0);
   const noticeTimersRef = React.useRef(new Map());
 
   // 清单若已声明 styles，宿主会在挂载前注入 style[data-snow-plugin]；这里只在缺失时
@@ -177,17 +180,32 @@ function PanelApp({ api, React, locale }) {
       notify,
       log,
       bumpHistory: () => setHistoryVersion((value) => value + 1),
+      onMiniChange: (active) => {
+        setMiniActive(active);
+        // 小窗按钮的语义是“返回详情页”：即使从其它底部菜单退出，也重新露出原详情层。
+        if (!active) setDetailVisible(true);
+      },
       openSeries: (seed) => {
         if (!seed || !seed.id) return;
-        setRoute({ id: String(seed.id), seed });
+        // 小窗中重新选剧必须换一个新实例，显式结束旧播放器，不能复用到另一部剧。
+        routeSeqRef.current += 1;
+        setRoute({ id: String(seed.id), seed, instance: routeSeqRef.current });
+        setMiniActive(false);
+        setDetailVisible(true);
       },
       openTab: (id) => {
         setActiveTab(id);
         setVisited((prev) => (prev[id] ? prev : { ...prev, [id]: true }));
+        if (miniActive) {
+          // 只隐藏详情层，保留 PlayerMount；否则切页卸载详情会连同小窗一起销毁。
+          setDetailVisible(false);
+          return;
+        }
         setRoute(null);
+        setDetailVisible(false);
       },
     }),
-    [api, rpc, t, resolvedLocale, cover, prefs, updatePrefs, notify, log]
+    [api, rpc, t, resolvedLocale, cover, prefs, updatePrefs, notify, log, miniActive]
   );
 
   // 渲染期异常兜底：保留页签与底部导航，只替换出错区域。
@@ -270,7 +288,7 @@ function PanelApp({ api, React, locale }) {
     );
   }
 
-  const covered = Boolean(route);
+  const covered = Boolean(route && detailVisible);
   const tabPanes = h(
     "div",
     {
@@ -307,12 +325,25 @@ function PanelApp({ api, React, locale }) {
       : null
   );
 
-  // 详情层覆盖在常驻页签之上：返回时列表不卸载，滚动位置与分页状态保持不变。
+  // 详情层覆盖在常驻页签之上：返回时列表不卸载；小窗切页时仅隐藏详情层，播放器继续运行。
   const detailLayer = route
     ? h(
         "div",
-        { className: "hg-detail-layer" },
-        h(DetailPage, { key: route.id, ctx, seed: route.seed, onBack: () => setRoute(null) })
+        {
+          className: "hg-detail-layer",
+          hidden: !detailVisible,
+          "aria-hidden": !detailVisible ? "true" : undefined,
+        },
+        h(DetailPage, {
+          key: `${route.id}:${route.instance || 0}`,
+          ctx,
+          seed: route.seed,
+          onBack: () => {
+            setRoute(null);
+            setDetailVisible(false);
+            setMiniActive(false);
+          },
+        })
       )
     : null;
 

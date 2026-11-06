@@ -101,6 +101,13 @@ var zh_CN_default = {
   "player.pipFailed": "画中画不可用",
   "player.fill": "铺满侧栏",
   "player.exitFill": "退出铺满",
+  "player.mini": "小窗播放",
+  "player.exitMini": "返回详情页",
+  "player.miniActive": "正在小窗播放",
+  "player.opacity": "小窗不透明度",
+  "player.opacityWheelTip": "Alt + 滚轮调整不透明度",
+  "player.showMini": "显示小窗",
+  "player.autoHide": "移出隐藏",
   "player.seek": "播放进度",
   "player.ended": "已播放完毕",
   "player.endedNext": "可播放下一集，或重新播放本集",
@@ -148,6 +155,10 @@ var zh_CN_default = {
   "settings.playback": "播放偏好",
   "settings.quality": "默认清晰度",
   "settings.qualityHint": "播放器默认按此清晰度取流，播放中也可随时切换",
+  "settings.miniOpacity": "小窗不透明度",
+  "settings.miniOpacityHint": "调整范围 5%～100%，正在播放的小窗会同步生效",
+  "settings.miniAutoHide": "鼠标移出后隐藏",
+  "settings.miniAutoHideHint": "移出 500ms 后隐藏并暂停，移回恢复按钮后自动显示并继续播放；原本暂停的不自动恢复",
   "settings.cache": "缓存",
   "settings.cacheHint": "清理后台的视频分片与封面缓存",
   "settings.clearCache": "清理缓存",
@@ -268,6 +279,13 @@ var zh_TW_default = {
   "player.pipFailed": "子母畫面無法使用",
   "player.fill": "填滿側欄",
   "player.exitFill": "退出填滿",
+  "player.mini": "小窗播放",
+  "player.exitMini": "返回詳情頁",
+  "player.miniActive": "正在小窗播放",
+  "player.opacity": "小窗不透明度",
+  "player.opacityWheelTip": "Alt + 滾輪調整不透明度",
+  "player.showMini": "顯示小窗",
+  "player.autoHide": "移出隱藏",
   "player.seek": "播放進度",
   "player.ended": "已播放完畢",
   "player.endedNext": "可播放下一集，或重新播放本集",
@@ -315,6 +333,10 @@ var zh_TW_default = {
   "settings.playback": "播放偏好",
   "settings.quality": "預設清晰度",
   "settings.qualityHint": "播放器預設依此清晰度取流，播放中也可隨時切換",
+  "settings.miniOpacity": "小窗不透明度",
+  "settings.miniOpacityHint": "調整範圍 5%～100%，正在播放的小窗會同步生效",
+  "settings.miniAutoHide": "滑鼠移出後隱藏",
+  "settings.miniAutoHideHint": "移出 500ms 後隱藏並暫停，移回恢復按鈕後自動顯示並繼續播放；原本暫停的不自動恢復",
   "settings.cache": "快取",
   "settings.cacheHint": "清理後台的影片分片與封面快取",
   "settings.clearCache": "清理快取",
@@ -435,6 +457,13 @@ var en_default = {
   "player.pipFailed": "Picture in picture is unavailable",
   "player.fill": "Fill sidebar",
   "player.exitFill": "Exit fill",
+  "player.mini": "Floating mini player",
+  "player.exitMini": "Return to details",
+  "player.miniActive": "Playing in the floating window",
+  "player.opacity": "Mini player opacity",
+  "player.opacityWheelTip": "Alt + mouse wheel adjusts opacity",
+  "player.showMini": "Show mini player",
+  "player.autoHide": "Auto-hide",
   "player.seek": "Playback position",
   "player.ended": "Finished",
   "player.endedNext": "Play the next episode or replay this one",
@@ -482,6 +511,10 @@ var en_default = {
   "settings.playback": "Playback",
   "settings.quality": "Preferred quality",
   "settings.qualityHint": "The player starts with this quality; you can switch at any time",
+  "settings.miniOpacity": "Mini player opacity",
+  "settings.miniOpacityHint": "Adjust from 5% to 100%; changes apply to an active mini player immediately",
+  "settings.miniAutoHide": "Hide when the pointer leaves",
+  "settings.miniAutoHideHint": "Hides and pauses after 500ms; hovering the restore button shows and resumes playback, unless it was already paused",
   "settings.cache": "Cache",
   "settings.cacheHint": "Clear cached video segments and covers in the background",
   "settings.clearCache": "Clear cache",
@@ -989,6 +1022,27 @@ var HISTORY_LIMIT = 100;
 var RECENT_SEARCH_LIMIT = 10;
 var QUALITY_OPTIONS = ["1080p", "720p", "540p", "480p", "360p"];
 var DEFAULT_QUALITY = "720p";
+var DEFAULT_MINI_WINDOW = Object.freeze({
+  x: null,
+  y: null,
+  width: 320,
+  height: 540,
+  opacity: 0.92,
+  autoHide: false
+});
+var normalizeNumber = (value, fallback, min, max) => {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return fallback;
+  return Math.min(max, Math.max(min, number));
+};
+var normalizeMiniWindow = (raw) => ({
+  x: raw?.x == null || !Number.isFinite(Number(raw.x)) ? null : Math.round(Number(raw.x)),
+  y: raw?.y == null || !Number.isFinite(Number(raw.y)) ? null : Math.round(Number(raw.y)),
+  width: Math.round(normalizeNumber(raw?.width, DEFAULT_MINI_WINDOW.width, 240, 900)),
+  height: Math.round(normalizeNumber(raw?.height, DEFAULT_MINI_WINDOW.height, 360, 1200)),
+  opacity: normalizeNumber(raw?.opacity, DEFAULT_MINI_WINDOW.opacity, 0.05, 1),
+  autoHide: raw?.autoHide === true
+});
 var normalizeHistoryEntry = (raw) => {
   if (!raw || typeof raw !== "object") return null;
   const seriesId = String(raw.seriesId ?? "").trim();
@@ -1038,12 +1092,14 @@ var clearHistory = async (api) => {
 var readPrefs = async (api) => {
   const raw = await api.storage.getJson(PREFS_KEY, null);
   const quality = raw && QUALITY_OPTIONS.includes(raw.quality) ? raw.quality : DEFAULT_QUALITY;
-  return { quality };
+  const miniWindow = normalizeMiniWindow(raw?.miniWindow);
+  return { quality, miniWindow };
 };
 var writePrefs = async (api, prefs) => {
   const quality = prefs && QUALITY_OPTIONS.includes(prefs.quality) ? prefs.quality : DEFAULT_QUALITY;
-  await api.storage.setJson(PREFS_KEY, { quality });
-  return { quality };
+  const miniWindow = normalizeMiniWindow(prefs?.miniWindow);
+  await api.storage.setJson(PREFS_KEY, { quality, miniWindow });
+  return { quality, miniWindow };
 };
 var readRecentSearches = async (api) => {
   const raw = await api.storage.getJson(RECENT_SEARCH_KEY, []);
@@ -2782,6 +2838,8 @@ var PATHS = {
   volume: '<path d="M4 9.2h3.4L12 5.4v13.2L7.4 14.8H4z" fill="currentColor" stroke="none"/><path d="M15 9.2a4 4 0 0 1 0 5.6" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><path d="M17.6 6.8a7.4 7.4 0 0 1 0 10.4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>',
   mute: '<path d="M4 9.2h3.4L12 5.4v13.2L7.4 14.8H4z" fill="currentColor" stroke="none"/><path d="M16 9.6l5 5m0-5l-5 5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>',
   pip: '<rect x="3" y="5" width="18" height="14" rx="2" fill="none" stroke="currentColor" stroke-width="1.6"/><rect x="12" y="11" width="7" height="6" rx="1" fill="currentColor" stroke="none"/>',
+  mini: '<rect x="3" y="4" width="18" height="16" rx="2" fill="none" stroke="currentColor" stroke-width="1.6"/><rect x="12" y="11" width="7" height="6" rx="1" fill="currentColor" stroke="none"/>',
+  restore: '<rect x="4" y="4" width="16" height="16" rx="2" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M9 12h6m-2.5-2.5L15 12l-2.5 2.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>',
   expand: '<path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>',
   collapse: '<path d="M9 4v5H4M15 4v5h5M9 20v-5H4M15 20v-5h5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>'
 };
@@ -3800,6 +3858,14 @@ function createPlayer(slot, initialProps) {
   let dragging = false;
   let fill = false;
   let fillMarker = null;
+  let mini = false;
+  let miniMarker = null;
+  let miniWindow = normalizeMiniWindow(props.miniWindow);
+  let miniInteraction = null;
+  let miniSaveTimer = 0;
+  let miniHideTimer = 0;
+  let miniHidden = false;
+  let miniResumePlayback = false;
   let idleTimer = 0;
   let lastReportAt = 0;
   let lastReportedMs = Math.max(0, Number(props.positionMs) || 0);
@@ -3822,6 +3888,36 @@ function createPlayer(slot, initialProps) {
   const root = make("div", "hg-player");
   root.tabIndex = 0;
   root.setAttribute("role", "region");
+  const miniBar = make("div", "hg-mini-bar");
+  const miniTitle = make("span", "hg-mini-title");
+  const miniAutoHide = make("label", "hg-mini-autohide");
+  const miniAutoHideInput = document.createElement("input");
+  miniAutoHideInput.type = "checkbox";
+  miniAutoHideInput.className = "hg-toggle";
+  miniAutoHideInput.setAttribute("role", "switch");
+  miniAutoHideInput.checked = miniWindow.autoHide;
+  miniAutoHideInput.addEventListener("change", () => {
+    adoptMiniWindow({ ...miniWindow, autoHide: miniAutoHideInput.checked });
+    props.onMiniWindowChange?.({ ...miniWindow });
+  });
+  const miniAutoHideText = make("span", "hg-mini-autohide-text");
+  miniAutoHide.append(miniAutoHideInput, miniAutoHideText);
+  const miniOpacityInput = document.createElement("input");
+  miniOpacityInput.type = "range";
+  miniOpacityInput.className = "hg-mini-opacity";
+  miniOpacityInput.min = "0.05";
+  miniOpacityInput.max = "1";
+  miniOpacityInput.step = "0.01";
+  miniOpacityInput.value = String(miniWindow.opacity);
+  miniOpacityInput.addEventListener("input", () => setMiniOpacity(Number(miniOpacityInput.value)));
+  const miniOpacityValue = make("span", "hg-mini-opacity-value");
+  miniBar.append(miniTitle, miniAutoHide, miniOpacityInput, miniOpacityValue);
+  const miniResize = make("div", "hg-mini-resize");
+  miniResize.setAttribute("aria-hidden", "true");
+  const miniRestore = make("button", "hg-mini-restore");
+  miniRestore.type = "button";
+  miniRestore.hidden = true;
+  miniRestore.append(icon("mini", 16));
   const view = make("div", "hg-player-view");
   const video = document.createElement("video");
   video.className = "hg-player-video";
@@ -3844,10 +3940,12 @@ function createPlayer(slot, initialProps) {
     if (!wvc) return;
     wvc.resumeAudio?.();
     if (wvc.getState().phase === "playing") {
+      userPaused = true;
+      autoPlayPending = false;
       wvc.pause();
       playing = false;
       report(true);
-    } else wvc.play();
+    } else safePlay();
   });
   const loading = make("div", "hg-player-loading");
   loading.hidden = true;
@@ -3950,10 +4048,14 @@ function createPlayer(slot, initialProps) {
   speedSelect.addEventListener("click", (event) => event.stopPropagation());
   const pipBtn = button("pip", () => void togglePip());
   pipBtn.classList.add("hg-player-pip");
+  const miniBtn = button("mini", () => toggleMini());
+  miniBtn.classList.add("hg-player-mini-toggle");
   const fillBtn = button("expand", () => toggleFill());
-  bar.append(playBtn, nextBtn, timeLabel, spacer, muteBtn, volume, qualitySelect, speedSelect, pipBtn, fillBtn);
+  const miniExitBtn = button("restore", () => exitMini(), "hg-player-btn hg-mini-exit");
+  miniBar.append(miniExitBtn);
+  bar.append(playBtn, nextBtn, timeLabel, spacer, muteBtn, volume, qualitySelect, speedSelect, pipBtn, miniBtn, fillBtn);
   controls.append(progress, bar);
-  root.append(view, controls);
+  root.append(miniBar, view, controls, miniResize);
   if (slot) slot.replaceChildren(root);
   const engine = createMseEngine({
     video,
@@ -4007,6 +4109,8 @@ function createPlayer(slot, initialProps) {
     pipBtn.setAttribute("aria-label", t("player.pip"));
     fillBtn.title = fill ? t("player.exitFill") : t("player.fill");
     fillBtn.setAttribute("aria-label", fillBtn.title);
+    syncMiniButton();
+    syncMiniAppearance();
     progress.setAttribute("aria-label", t("player.seek"));
     bigPlay.title = t("player.play");
     bigPlay.setAttribute("aria-label", t("player.play"));
@@ -4115,6 +4219,7 @@ function createPlayer(slot, initialProps) {
     if (wvc) {
       if (wvc.getState().phase === "playing") {
         userPaused = true;
+        autoPlayPending = false;
         wvc.pause();
         playing = false;
         report(true);
@@ -4130,6 +4235,7 @@ function createPlayer(slot, initialProps) {
       safePlay();
     } else {
       userPaused = true;
+      autoPlayPending = false;
       video.pause();
     }
   };
@@ -4258,15 +4364,274 @@ function createPlayer(slot, initialProps) {
       log("[player] 画中画失败", String(error?.message || error));
     }
   };
+  const miniStage = () => slot?.closest?.(".hg-player-stage") || null;
+  const saveMiniWindowSoon = () => {
+    if (miniSaveTimer) clearTimeout(miniSaveTimer);
+    miniSaveTimer = setTimeout(() => {
+      miniSaveTimer = 0;
+      if (disposed) return;
+      try {
+        props.onMiniWindowChange?.({ ...miniWindow });
+      } catch (error) {
+        log("[player] 小窗偏好保存失败", String(error?.message || error));
+      }
+    }, 180);
+  };
+  const applyMiniGeometry = () => {
+    if (!mini) return;
+    const viewportWidth = window.innerWidth || 1200;
+    const viewportHeight = window.innerHeight || 800;
+    const width = clamp(miniWindow.width, 240, Math.max(240, viewportWidth - 16));
+    const height = clamp(miniWindow.height, 360, Math.max(360, viewportHeight - 16));
+    const fallbackX = Math.max(8, viewportWidth - width - 24);
+    const fallbackY = 52;
+    const x = clamp(Number.isFinite(miniWindow.x) ? miniWindow.x : fallbackX, 8, Math.max(8, viewportWidth - width - 8));
+    const y = clamp(Number.isFinite(miniWindow.y) ? miniWindow.y : fallbackY, 8, Math.max(8, viewportHeight - height - 8));
+    miniWindow = { ...miniWindow, x: Math.round(x), y: Math.round(y), width: Math.round(width), height: Math.round(height) };
+    root.style.left = `${Math.round(x)}px`;
+    root.style.top = `${Math.round(y)}px`;
+    root.style.width = `${Math.round(width)}px`;
+    root.style.height = `${Math.round(height)}px`;
+    root.style.right = "auto";
+    root.style.bottom = "auto";
+    miniRestore.style.left = `${Math.round(x)}px`;
+    miniRestore.style.top = `${Math.round(y)}px`;
+  };
+  const syncMiniButton = () => {
+    setButtonIcon(miniBtn, mini ? "restore" : "mini");
+    miniBtn.classList.toggle("is-active", mini);
+    miniBtn.title = mini ? t("player.exitMini") : t("player.mini");
+    miniBtn.setAttribute("aria-label", miniBtn.title);
+  };
+  const syncMiniAppearance = () => {
+    root.style.setProperty("--hg-mini-opacity", String(miniWindow.opacity));
+    miniAutoHideInput.checked = miniWindow.autoHide;
+    miniAutoHide.title = t("settings.miniAutoHide");
+    miniAutoHideInput.setAttribute("aria-label", t("settings.miniAutoHide"));
+    miniAutoHideText.textContent = t("player.autoHide");
+    miniOpacityInput.value = String(miniWindow.opacity);
+    miniOpacityValue.textContent = `${Math.round(miniWindow.opacity * 100)}%`;
+    miniOpacityInput.title = `${t("player.opacity")} · ${t("player.opacityWheelTip")}`;
+    miniOpacityInput.setAttribute("aria-label", t("player.opacity"));
+    miniExitBtn.title = t("player.exitMini");
+    miniExitBtn.setAttribute("aria-label", miniExitBtn.title);
+    miniRestore.title = t("player.showMini");
+    miniRestore.setAttribute("aria-label", miniRestore.title);
+    const title = props.series?.title || t("player.mini");
+    const number = props.episode?.number;
+    miniTitle.textContent = number == null ? title : `${title} · ${t("unit.episodeShort", { number })}`;
+    miniTitle.title = miniTitle.textContent;
+    const stage = miniStage();
+    if (mini && stage) stage.setAttribute("data-mini-label", t("player.miniActive"));
+    applyMiniGeometry();
+  };
+  const setMiniOpacity = (value) => {
+    const next = normalizeMiniWindow({ ...miniWindow, opacity: value });
+    const changed = next.opacity !== miniWindow.opacity;
+    miniWindow = next;
+    syncMiniAppearance();
+    if (changed) saveMiniWindowSoon();
+  };
+  const cancelMiniHide = () => {
+    if (!miniHideTimer) return;
+    clearTimeout(miniHideTimer);
+    miniHideTimer = 0;
+  };
+  const showMiniWindow = () => {
+    const shouldResume = miniResumePlayback && !userPaused && !disposed;
+    const shouldRestoreFocus = miniHidden && document.activeElement === miniRestore;
+    miniResumePlayback = false;
+    cancelMiniHide();
+    miniHidden = false;
+    root.inert = false;
+    root.classList.remove("is-mini-hidden");
+    miniRestore.hidden = true;
+    if (shouldRestoreFocus) {
+      try {
+        root.focus({ preventScroll: true });
+      } catch {
+      }
+    }
+    if (shouldResume) safePlay();
+  };
+  const hideMiniWindow = () => {
+    if (!mini || miniHidden || !miniWindow.autoHide) return;
+    cancelMiniHide();
+    const shouldMoveFocus = root.contains(document.activeElement);
+    miniHidden = true;
+    const phase = wvc?.getState().phase || "";
+    const activePlayback = wvc ? phase === "playing" : !video.paused && !video.ended;
+    const pendingPlayback = autoPlayPending && (!wvc || phase === "idle" || phase === "loading" || phase === "ready");
+    miniResumePlayback = Boolean(!userPaused && (activePlayback || pendingPlayback));
+    root.classList.add("is-mini-hidden");
+    root.inert = true;
+    if (miniResumePlayback && wvc) {
+      wvc.pause();
+      playing = false;
+      syncPlayButton();
+      updateBigPlay();
+      report(true);
+    } else if (miniResumePlayback && !video.paused) {
+      video.pause();
+    }
+    if (miniRestore.parentNode !== document.body) document.body.appendChild(miniRestore);
+    applyMiniGeometry();
+    miniRestore.hidden = false;
+    if (shouldMoveFocus) {
+      try {
+        miniRestore.focus({ preventScroll: true });
+      } catch {
+      }
+    }
+  };
+  const scheduleMiniHide = () => {
+    cancelMiniHide();
+    if (!mini || miniHidden || !miniWindow.autoHide) return;
+    miniHideTimer = setTimeout(() => {
+      miniHideTimer = 0;
+      if (!mini || miniInteraction || dragging) return;
+      hideMiniWindow();
+    }, 500);
+  };
+  const adoptMiniWindow = (value) => {
+    const next = normalizeMiniWindow(value);
+    if (JSON.stringify(next) === JSON.stringify(miniWindow)) return;
+    miniWindow = next;
+    syncMiniAppearance();
+    if (!next.autoHide) showMiniWindow();
+  };
+  const onMiniViewportResize = () => applyMiniGeometry();
+  root.addEventListener("mouseenter", cancelMiniHide);
+  root.addEventListener("mouseleave", scheduleMiniHide);
+  miniRestore.addEventListener("mouseenter", showMiniWindow);
+  miniRestore.addEventListener("click", () => {
+    showMiniWindow();
+    try {
+      root.focus({ preventScroll: true });
+    } catch {
+    }
+  });
+  const startMiniInteraction = (kind, event) => {
+    if (!mini || event.button !== 0) return;
+    if (kind === "move" && event.target?.closest?.("button, input, select, label")) return;
+    const rect = root.getBoundingClientRect();
+    miniInteraction = {
+      kind,
+      pointerId: event.pointerId,
+      target: event.currentTarget,
+      startX: event.clientX,
+      startY: event.clientY,
+      x: rect.left,
+      y: rect.top,
+      width: rect.width,
+      height: rect.height
+    };
+    try {
+      event.currentTarget.setPointerCapture(event.pointerId);
+    } catch {
+    }
+    event.preventDefault();
+    event.stopPropagation();
+  };
+  const moveMiniInteraction = (event) => {
+    const interaction = miniInteraction;
+    if (!interaction || event.pointerId !== interaction.pointerId) return;
+    const deltaX = event.clientX - interaction.startX;
+    const deltaY = event.clientY - interaction.startY;
+    if (interaction.kind === "move") {
+      miniWindow = { ...miniWindow, x: interaction.x + deltaX, y: interaction.y + deltaY };
+    } else {
+      miniWindow = { ...miniWindow, width: interaction.width + deltaX, height: interaction.height + deltaY };
+    }
+    applyMiniGeometry();
+    event.preventDefault();
+  };
+  const finishMiniInteraction = (event) => {
+    const interaction = miniInteraction;
+    if (!interaction || event.pointerId !== interaction.pointerId) return;
+    miniInteraction = null;
+    try {
+      interaction.target.releasePointerCapture(event.pointerId);
+    } catch {
+    }
+    saveMiniWindowSoon();
+  };
+  miniBar.addEventListener("pointerdown", (event) => startMiniInteraction("move", event));
+  miniResize.addEventListener("pointerdown", (event) => startMiniInteraction("resize", event));
+  for (const target of [miniBar, miniResize]) {
+    target.addEventListener("pointermove", moveMiniInteraction);
+    target.addEventListener("pointerup", finishMiniInteraction);
+    target.addEventListener("pointercancel", finishMiniInteraction);
+  }
+  root.addEventListener(
+    "wheel",
+    (event) => {
+      if (!mini || !event.altKey) return;
+      event.preventDefault();
+      event.stopPropagation();
+      setMiniOpacity(miniWindow.opacity + (event.deltaY < 0 ? 0.05 : -0.05));
+    },
+    { passive: false }
+  );
   const onDocumentKey = (event) => {
-    if (!fill) return;
+    if (!fill && !mini) return;
     if (event.key === "Escape") {
       event.preventDefault();
-      exitFill();
+      if (fill) exitFill();
+      else exitMini();
     }
+  };
+  const enterMini = () => {
+    if (mini || !root.parentNode) return;
+    if (fill) exitFill();
+    if (!root.parentNode) return;
+    mini = true;
+    showMiniWindow();
+    miniMarker = document.createComment("hg-player-mini");
+    root.parentNode.insertBefore(miniMarker, root);
+    document.body.appendChild(root);
+    document.body.appendChild(miniRestore);
+    root.classList.add("is-mini");
+    miniStage()?.classList.add("is-mini-active");
+    document.addEventListener("keydown", onDocumentKey);
+    window.addEventListener("resize", onMiniViewportResize);
+    syncMiniButton();
+    syncMiniAppearance();
+    try {
+      root.focus({ preventScroll: true });
+    } catch {
+    }
+    props.onMiniChange?.(true);
+  };
+  const exitMini = () => {
+    if (!mini) return;
+    mini = false;
+    showMiniWindow();
+    miniRestore.remove();
+    miniInteraction = null;
+    document.removeEventListener("keydown", onDocumentKey);
+    window.removeEventListener("resize", onMiniViewportResize);
+    root.classList.remove("is-mini");
+    for (const property of ["left", "top", "width", "height", "right", "bottom"]) root.style.removeProperty(property);
+    const stage = miniStage();
+    stage?.classList.remove("is-mini-active");
+    stage?.removeAttribute("data-mini-label");
+    if (miniMarker?.parentNode) miniMarker.parentNode.insertBefore(root, miniMarker);
+    else if (slot && !slot.contains(root)) slot.appendChild(root);
+    miniMarker?.remove();
+    miniMarker = null;
+    syncMiniButton();
+    syncMiniAppearance();
+    props.onMiniChange?.(false);
+  };
+  const toggleMini = () => {
+    if (mini) exitMini();
+    else enterMini();
   };
   const enterFill = () => {
     if (fill || !root.parentNode) return;
+    if (mini) exitMini();
+    if (!root.parentNode) return;
     fill = true;
     fillMarker = document.createComment("hg-player-fill");
     root.parentNode.insertBefore(fillMarker, root);
@@ -4710,10 +5075,14 @@ function createPlayer(slot, initialProps) {
   });
   const onKeyDown = (event) => {
     if (event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey) return;
+    const key = event.key;
+    if (miniHidden) {
+      if (key === " " || key === "Spacebar" || key === "Enter" || key === "k" || key === "K") event.preventDefault();
+      return;
+    }
     const target = event.target;
     const tagName = target && target.tagName ? String(target.tagName).toLowerCase() : "";
     if (tagName === "select" || tagName === "input" || tagName === "textarea") return;
-    const key = event.key;
     const onButton = target && typeof target.closest === "function" && target.closest("button");
     if (onButton && (key === " " || key === "Spacebar" || key === "Enter")) return;
     if (key === " " || key === "Spacebar" || key === "k" || key === "K") {
@@ -4738,9 +5107,10 @@ function createPlayer(slot, initialProps) {
       event.preventDefault();
       toggleFill();
     } else if (key === "Escape") {
-      if (fill) {
+      if (fill || mini) {
         event.preventDefault();
-        exitFill();
+        if (fill) exitFill();
+        else exitMini();
       }
     } else if (key === "n" || key === "N") {
       event.preventDefault();
@@ -4932,6 +5302,7 @@ function createPlayer(slot, initialProps) {
             return;
           }
           const active = snapshot.phase === "playing";
+          if (active) autoPlayPending = false;
           if (playing !== active) {
             playing = active;
             syncPlayButton();
@@ -4956,6 +5327,10 @@ function createPlayer(slot, initialProps) {
         resumeMs
       });
       if (seq !== wvcSeq || wvc !== player) return;
+      if (miniHidden || userPaused) {
+        player.pause();
+        return;
+      }
       player.play();
     } catch (error) {
       if (seq !== wvcSeq || wvc !== player) return;
@@ -5010,6 +5385,7 @@ function createPlayer(slot, initialProps) {
     const prev = {
       episodeId: props.episode?.id || "",
       episodeIndex: props.episodeIndex,
+      seriesTitle: props.series?.title || "",
       quality: props.quality || "",
       locale: props.locale || "",
       positionMs: Number(props.positionMs) || 0
@@ -5022,7 +5398,9 @@ function createPlayer(slot, initialProps) {
       }, 1e3);
     }
     Object.assign(props, next);
+    if (next.miniWindow) adoptMiniWindow(next.miniWindow);
     if ((next.locale || "") !== prev.locale) applyLabels();
+    else if (episodeChanged || (props.series?.title || "") !== prev.seriesTitle) syncMiniAppearance();
     const nextEpisodeId = props.episode?.id || "";
     if (nextEpisodeId !== prev.episodeId) {
       loadEpisode();
@@ -5076,10 +5454,21 @@ function createPlayer(slot, initialProps) {
       report(true);
       disposed = true;
       try {
+        exitMini();
+      } catch {
+      }
+      try {
         exitFill();
       } catch {
       }
       document.removeEventListener("keydown", onDocumentKey);
+      window.removeEventListener("resize", onMiniViewportResize);
+      if (miniSaveTimer) {
+        clearTimeout(miniSaveTimer);
+        miniSaveTimer = 0;
+      }
+      cancelMiniHide();
+      miniRestore.remove();
       clearInterval(watchdog);
       clearInterval(progressTimer);
       if (idleTimer) {
@@ -5145,7 +5534,8 @@ function PlayerMount(props) {
     onProgress: props.onProgress,
     onEnded: props.onEnded,
     onSelectEpisode: props.onSelectEpisode,
-    onError: props.onError
+    onError: props.onError,
+    onMiniChange: props.onMiniChange
   };
   const buildProps = () => ({
     api: props.ctx.api,
@@ -5155,16 +5545,19 @@ function PlayerMount(props) {
     notify: props.ctx.notify,
     log: props.ctx.log,
     quality: props.ctx.prefs?.quality || "720p",
+    miniWindow: props.ctx.prefs?.miniWindow,
     series: props.series,
     episodes: props.episodes,
     episodeIndex: props.episodeIndex,
     episode: props.episodes?.[props.episodeIndex] || null,
     positionMs: props.positionMs,
     onQualityChange: (quality) => props.ctx.updatePrefs?.({ quality }),
+    onMiniWindowChange: (miniWindow) => props.ctx.updatePrefs?.({ miniWindow }),
     onProgress: (state) => handlersRef.current.onProgress?.(state),
     onEnded: (state) => handlersRef.current.onEnded?.(state),
     onSelectEpisode: (index) => handlersRef.current.onSelectEpisode?.(index),
-    onError: (error) => handlersRef.current.onError?.(error)
+    onError: (error) => handlersRef.current.onError?.(error),
+    onMiniChange: (active) => handlersRef.current.onMiniChange?.(active)
   });
   React.useEffect(() => {
     const slot = slotRef.current;
@@ -5506,7 +5899,8 @@ function DetailPage({ ctx, seed, onBack }) {
           onProgress: handleProgress,
           onEnded: handleEnded,
           onSelectEpisode: (index) => selectEpisode(index, 0),
-          onError: handlePlayerError
+          onError: handlePlayerError,
+          onMiniChange: ctx.onMiniChange
         }) : null,
         h(
           "div",
@@ -5893,6 +6287,9 @@ function SettingsPage({ ctx, active }) {
   };
   const health = healthState.data;
   const quality = ctx.prefs?.quality || "720p";
+  const miniWindow = ctx.prefs?.miniWindow || {};
+  const miniOpacity = Math.round((Number(miniWindow.opacity) || 0.92) * 100);
+  const patchMiniWindow = (patch) => ctx.updatePrefs({ miniWindow: { ...miniWindow, ...patch } });
   return h(
     "div",
     { className: "hg-page hg-settings" },
@@ -5926,7 +6323,42 @@ function SettingsPage({ ctx, active }) {
             )
           )
         ),
-        h("div", { className: "hg-hint" }, t("settings.qualityHint"))
+        h("div", { className: "hg-hint" }, t("settings.qualityHint")),
+        h(
+          "div",
+          { className: "hg-field hg-range-field" },
+          h("label", { className: "hg-field-label", htmlFor: "hg-mini-opacity" }, t("settings.miniOpacity")),
+          h(
+            "div",
+            { className: "hg-range-control" },
+            h("input", {
+              id: "hg-mini-opacity",
+              className: "hg-range",
+              type: "range",
+              min: 5,
+              max: 100,
+              step: 1,
+              value: miniOpacity,
+              onChange: (event) => patchMiniWindow({ opacity: Number(event.target.value) / 100 })
+            }),
+            h("span", { className: "hg-range-value" }, `${miniOpacity}%`)
+          )
+        ),
+        h("div", { className: "hg-hint" }, t("settings.miniOpacityHint")),
+        h(
+          "div",
+          { className: "hg-field" },
+          h("label", { className: "hg-field-label", htmlFor: "hg-mini-autohide" }, t("settings.miniAutoHide")),
+          h("input", {
+            id: "hg-mini-autohide",
+            className: "hg-toggle",
+            type: "checkbox",
+            role: "switch",
+            checked: miniWindow.autoHide === true,
+            onChange: (event) => patchMiniWindow({ autoHide: event.target.checked })
+          })
+        ),
+        h("div", { className: "hg-hint" }, t("settings.miniAutoHideHint"))
       ),
       h(
         "section",
@@ -6060,13 +6492,16 @@ function PanelApp({ api, React, locale }) {
   const [boot, setBoot] = React.useState({ status: "loading", error: null, health: null });
   const [activeTab, setActiveTab] = React.useState("discover");
   const [route, setRoute] = React.useState(null);
+  const [detailVisible, setDetailVisible] = React.useState(false);
+  const [miniActive, setMiniActive] = React.useState(false);
   const [visited, setVisited] = React.useState(() => ({ discover: true }));
-  const [prefs, setPrefs] = React.useState({ quality: "720p" });
+  const [prefs, setPrefs] = React.useState({ quality: "720p", miniWindow: { ...DEFAULT_MINI_WINDOW } });
   const [historyVersion, setHistoryVersion] = React.useState(0);
   const [notices, setNotices] = React.useState([]);
   const prefsRef = React.useRef(prefs);
   const aliveRef = React.useRef(true);
   const bootSeqRef = React.useRef(0);
+  const routeSeqRef = React.useRef(0);
   const noticeTimersRef = React.useRef(/* @__PURE__ */ new Map());
   React.useEffect(() => {
     if (typeof document === "undefined") return void 0;
@@ -6173,17 +6608,29 @@ function PanelApp({ api, React, locale }) {
       notify,
       log,
       bumpHistory: () => setHistoryVersion((value) => value + 1),
+      onMiniChange: (active) => {
+        setMiniActive(active);
+        if (!active) setDetailVisible(true);
+      },
       openSeries: (seed) => {
         if (!seed || !seed.id) return;
-        setRoute({ id: String(seed.id), seed });
+        routeSeqRef.current += 1;
+        setRoute({ id: String(seed.id), seed, instance: routeSeqRef.current });
+        setMiniActive(false);
+        setDetailVisible(true);
       },
       openTab: (id) => {
         setActiveTab(id);
         setVisited((prev) => prev[id] ? prev : { ...prev, [id]: true });
+        if (miniActive) {
+          setDetailVisible(false);
+          return;
+        }
         setRoute(null);
+        setDetailVisible(false);
       }
     }),
-    [api, rpc, t, resolvedLocale, cover, prefs, updatePrefs, notify, log]
+    [api, rpc, t, resolvedLocale, cover, prefs, updatePrefs, notify, log, miniActive]
   );
   const ErrorBoundary = React.useMemo(() => {
     class Boundary extends React.Component {
@@ -6255,7 +6702,7 @@ function PanelApp({ api, React, locale }) {
       )
     );
   }
-  const covered = Boolean(route);
+  const covered = Boolean(route && detailVisible);
   const tabPanes = h(
     "div",
     {
@@ -6285,8 +6732,21 @@ function PanelApp({ api, React, locale }) {
   );
   const detailLayer = route ? h(
     "div",
-    { className: "hg-detail-layer" },
-    h(DetailPage, { key: route.id, ctx, seed: route.seed, onBack: () => setRoute(null) })
+    {
+      className: "hg-detail-layer",
+      hidden: !detailVisible,
+      "aria-hidden": !detailVisible ? "true" : void 0
+    },
+    h(DetailPage, {
+      key: `${route.id}:${route.instance || 0}`,
+      ctx,
+      seed: route.seed,
+      onBack: () => {
+        setRoute(null);
+        setDetailVisible(false);
+        setMiniActive(false);
+      }
+    })
   ) : null;
   return h(
     "div",

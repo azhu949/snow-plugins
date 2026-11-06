@@ -63,6 +63,7 @@ export function PlayerMount(props) {
     onEnded: props.onEnded,
     onSelectEpisode: props.onSelectEpisode,
     onError: props.onError,
+    onMiniChange: props.onMiniChange,
   };
 
   const buildProps = () => ({
@@ -73,16 +74,19 @@ export function PlayerMount(props) {
     notify: props.ctx.notify,
     log: props.ctx.log,
     quality: props.ctx.prefs?.quality || "720p",
+    miniWindow: props.ctx.prefs?.miniWindow,
     series: props.series,
     episodes: props.episodes,
     episodeIndex: props.episodeIndex,
     episode: props.episodes?.[props.episodeIndex] || null,
     positionMs: props.positionMs,
     onQualityChange: (quality) => props.ctx.updatePrefs?.({ quality }),
+    onMiniWindowChange: (miniWindow) => props.ctx.updatePrefs?.({ miniWindow }),
     onProgress: (state) => handlersRef.current.onProgress?.(state),
     onEnded: (state) => handlersRef.current.onEnded?.(state),
     onSelectEpisode: (index) => handlersRef.current.onSelectEpisode?.(index),
     onError: (error) => handlersRef.current.onError?.(error),
+    onMiniChange: (active) => handlersRef.current.onMiniChange?.(active),
   });
 
   React.useEffect(() => {

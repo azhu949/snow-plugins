@@ -89,6 +89,9 @@ export function SettingsPage({ ctx, active }) {
 
   const health = healthState.data;
   const quality = ctx.prefs?.quality || "720p";
+  const miniWindow = ctx.prefs?.miniWindow || {};
+  const miniOpacity = Math.round((Number(miniWindow.opacity) || 0.92) * 100);
+  const patchMiniWindow = (patch) => ctx.updatePrefs({ miniWindow: { ...miniWindow, ...patch } });
 
   return h(
     "div",
@@ -123,7 +126,42 @@ export function SettingsPage({ ctx, active }) {
             )
           )
         ),
-        h("div", { className: "hg-hint" }, t("settings.qualityHint"))
+        h("div", { className: "hg-hint" }, t("settings.qualityHint")),
+        h(
+          "div",
+          { className: "hg-field hg-range-field" },
+          h("label", { className: "hg-field-label", htmlFor: "hg-mini-opacity" }, t("settings.miniOpacity")),
+          h(
+            "div",
+            { className: "hg-range-control" },
+            h("input", {
+              id: "hg-mini-opacity",
+              className: "hg-range",
+              type: "range",
+              min: 5,
+              max: 100,
+              step: 1,
+              value: miniOpacity,
+              onChange: (event) => patchMiniWindow({ opacity: Number(event.target.value) / 100 }),
+            }),
+            h("span", { className: "hg-range-value" }, `${miniOpacity}%`)
+          )
+        ),
+        h("div", { className: "hg-hint" }, t("settings.miniOpacityHint")),
+        h(
+          "div",
+          { className: "hg-field" },
+          h("label", { className: "hg-field-label", htmlFor: "hg-mini-autohide" }, t("settings.miniAutoHide")),
+          h("input", {
+            id: "hg-mini-autohide",
+            className: "hg-toggle",
+            type: "checkbox",
+            role: "switch",
+            checked: miniWindow.autoHide === true,
+            onChange: (event) => patchMiniWindow({ autoHide: event.target.checked }),
+          })
+        ),
+        h("div", { className: "hg-hint" }, t("settings.miniAutoHideHint"))
       ),
       h(
         "section",

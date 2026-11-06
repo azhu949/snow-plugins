@@ -20,6 +20,12 @@ const PATHS = {
   pip:
     '<rect x="3" y="5" width="18" height="14" rx="2" fill="none" stroke="currentColor" stroke-width="1.6"/>' +
     '<rect x="12" y="11" width="7" height="6" rx="1" fill="currentColor" stroke="none"/>',
+  mini:
+    '<rect x="3" y="4" width="18" height="16" rx="2" fill="none" stroke="currentColor" stroke-width="1.6"/>' +
+    '<rect x="12" y="11" width="7" height="6" rx="1" fill="currentColor" stroke="none"/>',
+  restore:
+    '<rect x="4" y="4" width="16" height="16" rx="2" fill="none" stroke="currentColor" stroke-width="1.6"/>' +
+    '<path d="M9 12h6m-2.5-2.5L15 12l-2.5 2.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>',
   expand:
     '<path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>',
   collapse:

@@ -5,7 +5,7 @@
 // - engine.js 负责取流 / 建 MediaSource / 串行 append / 状态机，只在本机解码不可用时兜底；
 // - 本文件负责 DOM、交互、快捷键、覆盖层、进度上报（detail 页负责落盘 history）。
 import { describeError } from "../ui/common.js";
-import { DEFAULT_QUALITY, QUALITY_OPTIONS } from "../storage.js";
+import { DEFAULT_QUALITY, QUALITY_OPTIONS, normalizeMiniWindow } from "../storage.js";
 import { MSE_STATE, createMseEngine } from "./engine.js";
 import { icon } from "./icons.js";
 import { createWebCodecsPlayer } from "./webcodecs-play.js";
@@ -65,6 +65,14 @@ export function createPlayer(slot, initialProps) {
   let dragging = false;
   let fill = false;
   let fillMarker = null;
+  let mini = false;
+  let miniMarker = null;
+  let miniWindow = normalizeMiniWindow(props.miniWindow);
+  let miniInteraction = null;
+  let miniSaveTimer = 0;
+  let miniHideTimer = 0;
+  let miniHidden = false;
+  let miniResumePlayback = false;
   let idleTimer = 0;
   let lastReportAt = 0;
   let lastReportedMs = Math.max(0, Number(props.positionMs) || 0);
@@ -94,6 +102,39 @@ export function createPlayer(slot, initialProps) {
   const root = make("div", "hg-player");
   root.tabIndex = 0;
   root.setAttribute("role", "region");
+
+  const miniBar = make("div", "hg-mini-bar");
+  const miniTitle = make("span", "hg-mini-title");
+  const miniAutoHide = make("label", "hg-mini-autohide");
+  const miniAutoHideInput = document.createElement("input");
+  miniAutoHideInput.type = "checkbox";
+  miniAutoHideInput.className = "hg-toggle";
+  miniAutoHideInput.setAttribute("role", "switch");
+  miniAutoHideInput.checked = miniWindow.autoHide;
+  miniAutoHideInput.addEventListener("change", () => {
+    adoptMiniWindow({ ...miniWindow, autoHide: miniAutoHideInput.checked });
+    props.onMiniWindowChange?.({ ...miniWindow });
+  });
+  const miniAutoHideText = make("span", "hg-mini-autohide-text");
+  miniAutoHide.append(miniAutoHideInput, miniAutoHideText);
+  const miniOpacityInput = document.createElement("input");
+  miniOpacityInput.type = "range";
+  miniOpacityInput.className = "hg-mini-opacity";
+  miniOpacityInput.min = "0.05";
+  miniOpacityInput.max = "1";
+  miniOpacityInput.step = "0.01";
+  miniOpacityInput.value = String(miniWindow.opacity);
+  miniOpacityInput.addEventListener("input", () => setMiniOpacity(Number(miniOpacityInput.value)));
+  const miniOpacityValue = make("span", "hg-mini-opacity-value");
+  miniBar.append(miniTitle, miniAutoHide, miniOpacityInput, miniOpacityValue);
+
+  const miniResize = make("div", "hg-mini-resize");
+  miniResize.setAttribute("aria-hidden", "true");
+
+  const miniRestore = make("button", "hg-mini-restore");
+  miniRestore.type = "button";
+  miniRestore.hidden = true;
+  miniRestore.append(icon("mini", 16));
 
   const view = make("div", "hg-player-view");
 
@@ -130,10 +171,12 @@ export function createPlayer(slot, initialProps) {
     // 用户手势是恢复被自动播放策略挂起的 AudioContext 的唯一时机。
     wvc.resumeAudio?.();
     if (wvc.getState().phase === "playing") {
+      userPaused = true;
+      autoPlayPending = false;
       wvc.pause();
       playing = false;
       report(true);
-    } else wvc.play();
+    } else safePlay();
   });
 
   const loading = make("div", "hg-player-loading");
@@ -256,11 +299,15 @@ export function createPlayer(slot, initialProps) {
 
   const pipBtn = button("pip", () => void togglePip());
   pipBtn.classList.add("hg-player-pip");
+  const miniBtn = button("mini", () => toggleMini());
+  miniBtn.classList.add("hg-player-mini-toggle");
   const fillBtn = button("expand", () => toggleFill());
+  const miniExitBtn = button("restore", () => exitMini(), "hg-player-btn hg-mini-exit");
+  miniBar.append(miniExitBtn);
 
-  bar.append(playBtn, nextBtn, timeLabel, spacer, muteBtn, volume, qualitySelect, speedSelect, pipBtn, fillBtn);
+  bar.append(playBtn, nextBtn, timeLabel, spacer, muteBtn, volume, qualitySelect, speedSelect, pipBtn, miniBtn, fillBtn);
   controls.append(progress, bar);
-  root.append(view, controls);
+  root.append(miniBar, view, controls, miniResize);
 
   if (slot) slot.replaceChildren(root);
 
@@ -330,6 +377,8 @@ export function createPlayer(slot, initialProps) {
     pipBtn.setAttribute("aria-label", t("player.pip"));
     fillBtn.title = fill ? t("player.exitFill") : t("player.fill");
     fillBtn.setAttribute("aria-label", fillBtn.title);
+    syncMiniButton();
+    syncMiniAppearance();
     progress.setAttribute("aria-label", t("player.seek"));
     bigPlay.title = t("player.play");
     bigPlay.setAttribute("aria-label", t("player.play"));
@@ -448,6 +497,7 @@ export function createPlayer(slot, initialProps) {
     if (wvc) {
       if (wvc.getState().phase === "playing") {
         userPaused = true;
+        autoPlayPending = false;
         wvc.pause();
         playing = false;
         report(true);
@@ -463,6 +513,7 @@ export function createPlayer(slot, initialProps) {
       safePlay();
     } else {
       userPaused = true;
+      autoPlayPending = false;
       video.pause();
     }
   };
@@ -608,18 +659,304 @@ export function createPlayer(slot, initialProps) {
     }
   };
 
-  // ------------------------------------------------------------------ 铺满侧栏
+  // ------------------------------------------------------------------ 悬浮小窗与铺满侧栏
+
+  const miniStage = () => slot?.closest?.(".hg-player-stage") || null;
+
+  const saveMiniWindowSoon = () => {
+    if (miniSaveTimer) clearTimeout(miniSaveTimer);
+    miniSaveTimer = setTimeout(() => {
+      miniSaveTimer = 0;
+      if (disposed) return;
+      try {
+        props.onMiniWindowChange?.({ ...miniWindow });
+      } catch (error) {
+        log("[player] 小窗偏好保存失败", String(error?.message || error));
+      }
+    }, 180);
+  };
+
+  const applyMiniGeometry = () => {
+    if (!mini) return;
+    const viewportWidth = window.innerWidth || 1200;
+    const viewportHeight = window.innerHeight || 800;
+    const width = clamp(miniWindow.width, 240, Math.max(240, viewportWidth - 16));
+    const height = clamp(miniWindow.height, 360, Math.max(360, viewportHeight - 16));
+    const fallbackX = Math.max(8, viewportWidth - width - 24);
+    const fallbackY = 52;
+    const x = clamp(Number.isFinite(miniWindow.x) ? miniWindow.x : fallbackX, 8, Math.max(8, viewportWidth - width - 8));
+    const y = clamp(Number.isFinite(miniWindow.y) ? miniWindow.y : fallbackY, 8, Math.max(8, viewportHeight - height - 8));
+    miniWindow = { ...miniWindow, x: Math.round(x), y: Math.round(y), width: Math.round(width), height: Math.round(height) };
+    root.style.left = `${Math.round(x)}px`;
+    root.style.top = `${Math.round(y)}px`;
+    root.style.width = `${Math.round(width)}px`;
+    root.style.height = `${Math.round(height)}px`;
+    root.style.right = "auto";
+    root.style.bottom = "auto";
+    miniRestore.style.left = `${Math.round(x)}px`;
+    miniRestore.style.top = `${Math.round(y)}px`;
+  };
+
+  const syncMiniButton = () => {
+    setButtonIcon(miniBtn, mini ? "restore" : "mini");
+    miniBtn.classList.toggle("is-active", mini);
+    miniBtn.title = mini ? t("player.exitMini") : t("player.mini");
+    miniBtn.setAttribute("aria-label", miniBtn.title);
+  };
+
+  const syncMiniAppearance = () => {
+    root.style.setProperty("--hg-mini-opacity", String(miniWindow.opacity));
+    miniAutoHideInput.checked = miniWindow.autoHide;
+    miniAutoHide.title = t("settings.miniAutoHide");
+    miniAutoHideInput.setAttribute("aria-label", t("settings.miniAutoHide"));
+    miniAutoHideText.textContent = t("player.autoHide");
+    miniOpacityInput.value = String(miniWindow.opacity);
+    miniOpacityValue.textContent = `${Math.round(miniWindow.opacity * 100)}%`;
+    miniOpacityInput.title = `${t("player.opacity")} · ${t("player.opacityWheelTip")}`;
+    miniOpacityInput.setAttribute("aria-label", t("player.opacity"));
+    miniExitBtn.title = t("player.exitMini");
+    miniExitBtn.setAttribute("aria-label", miniExitBtn.title);
+    miniRestore.title = t("player.showMini");
+    miniRestore.setAttribute("aria-label", miniRestore.title);
+    const title = props.series?.title || t("player.mini");
+    const number = props.episode?.number;
+    miniTitle.textContent = number == null ? title : `${title} · ${t("unit.episodeShort", { number })}`;
+    miniTitle.title = miniTitle.textContent;
+    const stage = miniStage();
+    if (mini && stage) stage.setAttribute("data-mini-label", t("player.miniActive"));
+    applyMiniGeometry();
+  };
+
+  const setMiniOpacity = (value) => {
+    const next = normalizeMiniWindow({ ...miniWindow, opacity: value });
+    const changed = next.opacity !== miniWindow.opacity;
+    miniWindow = next;
+    syncMiniAppearance();
+    if (changed) saveMiniWindowSoon();
+  };
+
+  const cancelMiniHide = () => {
+    if (!miniHideTimer) return;
+    clearTimeout(miniHideTimer);
+    miniHideTimer = 0;
+  };
+
+  const showMiniWindow = () => {
+    const shouldResume = miniResumePlayback && !userPaused && !disposed;
+    const shouldRestoreFocus = miniHidden && document.activeElement === miniRestore;
+    miniResumePlayback = false;
+    cancelMiniHide();
+    miniHidden = false;
+    root.inert = false;
+    root.classList.remove("is-mini-hidden");
+    miniRestore.hidden = true;
+    if (shouldRestoreFocus) {
+      try {
+        root.focus({ preventScroll: true });
+      } catch {
+        // 忽略。
+      }
+    }
+    if (shouldResume) safePlay();
+  };
+
+  const hideMiniWindow = () => {
+    if (!mini || miniHidden || !miniWindow.autoHide) return;
+    cancelMiniHide();
+    const shouldMoveFocus = root.contains(document.activeElement);
+    miniHidden = true;
+    const phase = wvc?.getState().phase || "";
+    const activePlayback = wvc ? phase === "playing" : !video.paused && !video.ended;
+    const pendingPlayback = autoPlayPending && (!wvc || phase === "idle" || phase === "loading" || phase === "ready");
+    miniResumePlayback = Boolean(!userPaused && (activePlayback || pendingPlayback));
+    // 保持播放器节点与 Canvas 尺寸不变，只暂停并透明；恢复时继续上一次的播放位置。
+    root.classList.add("is-mini-hidden");
+    root.inert = true;
+    if (miniResumePlayback && wvc) {
+      wvc.pause();
+      playing = false;
+      syncPlayButton();
+      updateBigPlay();
+      report(true);
+    } else if (miniResumePlayback && !video.paused) {
+      video.pause();
+    }
+    if (miniRestore.parentNode !== document.body) document.body.appendChild(miniRestore);
+    applyMiniGeometry();
+    miniRestore.hidden = false;
+    if (shouldMoveFocus) {
+      try {
+        miniRestore.focus({ preventScroll: true });
+      } catch {
+        // 忽略。
+      }
+    }
+  };
+
+  const scheduleMiniHide = () => {
+    cancelMiniHide();
+    if (!mini || miniHidden || !miniWindow.autoHide) return;
+    miniHideTimer = setTimeout(() => {
+      miniHideTimer = 0;
+      if (!mini || miniInteraction || dragging) return;
+      hideMiniWindow();
+    }, 500);
+  };
+
+  const adoptMiniWindow = (value) => {
+    const next = normalizeMiniWindow(value);
+    if (JSON.stringify(next) === JSON.stringify(miniWindow)) return;
+    miniWindow = next;
+    syncMiniAppearance();
+    if (!next.autoHide) showMiniWindow();
+  };
+
+  const onMiniViewportResize = () => applyMiniGeometry();
+
+  root.addEventListener("mouseenter", cancelMiniHide);
+  root.addEventListener("mouseleave", scheduleMiniHide);
+  miniRestore.addEventListener("mouseenter", showMiniWindow);
+  miniRestore.addEventListener("click", () => {
+    showMiniWindow();
+    try {
+      root.focus({ preventScroll: true });
+    } catch {
+      // 忽略。
+    }
+  });
+
+  const startMiniInteraction = (kind, event) => {
+    if (!mini || event.button !== 0) return;
+    if (kind === "move" && event.target?.closest?.("button, input, select, label")) return;
+    const rect = root.getBoundingClientRect();
+    miniInteraction = {
+      kind,
+      pointerId: event.pointerId,
+      target: event.currentTarget,
+      startX: event.clientX,
+      startY: event.clientY,
+      x: rect.left,
+      y: rect.top,
+      width: rect.width,
+      height: rect.height,
+    };
+    try {
+      event.currentTarget.setPointerCapture(event.pointerId);
+    } catch {
+      // 忽略。
+    }
+    event.preventDefault();
+    event.stopPropagation();
+  };
+
+  const moveMiniInteraction = (event) => {
+    const interaction = miniInteraction;
+    if (!interaction || event.pointerId !== interaction.pointerId) return;
+    const deltaX = event.clientX - interaction.startX;
+    const deltaY = event.clientY - interaction.startY;
+    if (interaction.kind === "move") {
+      miniWindow = { ...miniWindow, x: interaction.x + deltaX, y: interaction.y + deltaY };
+    } else {
+      miniWindow = { ...miniWindow, width: interaction.width + deltaX, height: interaction.height + deltaY };
+    }
+    applyMiniGeometry();
+    event.preventDefault();
+  };
+
+  const finishMiniInteraction = (event) => {
+    const interaction = miniInteraction;
+    if (!interaction || event.pointerId !== interaction.pointerId) return;
+    miniInteraction = null;
+    try {
+      interaction.target.releasePointerCapture(event.pointerId);
+    } catch {
+      // 忽略。
+    }
+    saveMiniWindowSoon();
+  };
+
+  miniBar.addEventListener("pointerdown", (event) => startMiniInteraction("move", event));
+  miniResize.addEventListener("pointerdown", (event) => startMiniInteraction("resize", event));
+  for (const target of [miniBar, miniResize]) {
+    target.addEventListener("pointermove", moveMiniInteraction);
+    target.addEventListener("pointerup", finishMiniInteraction);
+    target.addEventListener("pointercancel", finishMiniInteraction);
+  }
+  root.addEventListener(
+    "wheel",
+    (event) => {
+      if (!mini || !event.altKey) return;
+      event.preventDefault();
+      event.stopPropagation();
+      setMiniOpacity(miniWindow.opacity + (event.deltaY < 0 ? 0.05 : -0.05));
+    },
+    { passive: false }
+  );
 
   const onDocumentKey = (event) => {
-    if (!fill) return;
+    if (!fill && !mini) return;
     if (event.key === "Escape") {
       event.preventDefault();
-      exitFill();
+      if (fill) exitFill();
+      else exitMini();
     }
+  };
+
+  const enterMini = () => {
+    if (mini || !root.parentNode) return;
+    if (fill) exitFill();
+    if (!root.parentNode) return;
+    mini = true;
+    showMiniWindow();
+    miniMarker = document.createComment("hg-player-mini");
+    root.parentNode.insertBefore(miniMarker, root);
+    document.body.appendChild(root);
+    document.body.appendChild(miniRestore);
+    root.classList.add("is-mini");
+    miniStage()?.classList.add("is-mini-active");
+    document.addEventListener("keydown", onDocumentKey);
+    window.addEventListener("resize", onMiniViewportResize);
+    syncMiniButton();
+    syncMiniAppearance();
+    try {
+      root.focus({ preventScroll: true });
+    } catch {
+      // 忽略。
+    }
+    props.onMiniChange?.(true);
+  };
+
+  const exitMini = () => {
+    if (!mini) return;
+    mini = false;
+    showMiniWindow();
+    miniRestore.remove();
+    miniInteraction = null;
+    document.removeEventListener("keydown", onDocumentKey);
+    window.removeEventListener("resize", onMiniViewportResize);
+    root.classList.remove("is-mini");
+    for (const property of ["left", "top", "width", "height", "right", "bottom"]) root.style.removeProperty(property);
+    const stage = miniStage();
+    stage?.classList.remove("is-mini-active");
+    stage?.removeAttribute("data-mini-label");
+    if (miniMarker?.parentNode) miniMarker.parentNode.insertBefore(root, miniMarker);
+    else if (slot && !slot.contains(root)) slot.appendChild(root);
+    miniMarker?.remove();
+    miniMarker = null;
+    syncMiniButton();
+    syncMiniAppearance();
+    props.onMiniChange?.(false);
+  };
+
+  const toggleMini = () => {
+    if (mini) exitMini();
+    else enterMini();
   };
 
   const enterFill = () => {
     if (fill || !root.parentNode) return;
+    if (mini) exitMini();
+    if (!root.parentNode) return;
     fill = true;
     fillMarker = document.createComment("hg-player-fill");
     root.parentNode.insertBefore(fillMarker, root);
@@ -1126,10 +1463,14 @@ export function createPlayer(slot, initialProps) {
 
   const onKeyDown = (event) => {
     if (event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey) return;
+    const key = event.key;
+    if (miniHidden) {
+      if (key === " " || key === "Spacebar" || key === "Enter" || key === "k" || key === "K") event.preventDefault();
+      return;
+    }
     const target = event.target;
     const tagName = target && target.tagName ? String(target.tagName).toLowerCase() : "";
     if (tagName === "select" || tagName === "input" || tagName === "textarea") return;
-    const key = event.key;
     // 焦点在按钮上时，空格/回车交给按钮自身，避免一次按键触发两次。
     const onButton = target && typeof target.closest === "function" && target.closest("button");
     if (onButton && (key === " " || key === "Spacebar" || key === "Enter")) return;
@@ -1155,9 +1496,10 @@ export function createPlayer(slot, initialProps) {
       event.preventDefault();
       toggleFill();
     } else if (key === "Escape") {
-      if (fill) {
+      if (fill || mini) {
         event.preventDefault();
-        exitFill();
+        if (fill) exitFill();
+        else exitMini();
       }
     } else if (key === "n" || key === "N") {
       event.preventDefault();
@@ -1398,6 +1740,7 @@ export function createPlayer(slot, initialProps) {
           }
           // <video> 此刻是停的，播放状态只能从引擎同步过来。
           const active = snapshot.phase === "playing";
+          if (active) autoPlayPending = false;
           if (playing !== active) {
             playing = active;
             syncPlayButton();
@@ -1422,6 +1765,10 @@ export function createPlayer(slot, initialProps) {
         resumeMs,
       });
       if (seq !== wvcSeq || wvc !== player) return;
+      if (miniHidden || userPaused) {
+        player.pause();
+        return;
+      }
       player.play();
     } catch (error) {
       if (seq !== wvcSeq || wvc !== player) return;
@@ -1484,6 +1831,7 @@ export function createPlayer(slot, initialProps) {
     const prev = {
       episodeId: props.episode?.id || "",
       episodeIndex: props.episodeIndex,
+      seriesTitle: props.series?.title || "",
       quality: props.quality || "",
       locale: props.locale || "",
       positionMs: Number(props.positionMs) || 0,
@@ -1499,7 +1847,9 @@ export function createPlayer(slot, initialProps) {
 
     Object.assign(props, next);
 
+    if (next.miniWindow) adoptMiniWindow(next.miniWindow);
     if ((next.locale || "") !== prev.locale) applyLabels();
+    else if (episodeChanged || (props.series?.title || "") !== prev.seriesTitle) syncMiniAppearance();
 
     const nextEpisodeId = props.episode?.id || "";
     if (nextEpisodeId !== prev.episodeId) {
@@ -1575,11 +1925,23 @@ export function createPlayer(slot, initialProps) {
       report(true);
       disposed = true;
       try {
+        exitMini();
+      } catch {
+        // 忽略。
+      }
+      try {
         exitFill();
       } catch {
         // 忽略。
       }
       document.removeEventListener("keydown", onDocumentKey);
+      window.removeEventListener("resize", onMiniViewportResize);
+      if (miniSaveTimer) {
+        clearTimeout(miniSaveTimer);
+        miniSaveTimer = 0;
+      }
+      cancelMiniHide();
+      miniRestore.remove();
       clearInterval(watchdog);
       clearInterval(progressTimer);
       if (idleTimer) {
