@@ -1,0 +1,8 @@
+# 依赖目录（宿主安装插件时会跳过）
+node_modules/
+
+# dist/ 是发布产物而不是可再生成物：openhongguo.wasm 必须随目录一起进版本库，
+# 否则重新 clone 后安装出来的插件后台加载不到 wasm。
+# 根仓库的 .gitignore 忽略了 dist/，这里显式收回。
+!dist/
+!dist/**

@@ -1,0 +1,12 @@
+{
+  "capturedAt": "2026-11-05T12:34:03.085Z",
+  "note": "真实响应首 1MB（ftyp+moov+少量 mdat），仅作离线解析 fixture；不含密钥与直链。",
+  "seriesTitle": "公路求生：我的车床无限进化",
+  "episodeId": "7702760232069368894",
+  "definition": "360p",
+  "bitrate": 287059,
+  "codec": "bytevc1",
+  "durationSeconds": 107,
+  "totalBytes": 3899085,
+  "headBytes": 1048576
+}

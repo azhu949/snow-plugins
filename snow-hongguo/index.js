@@ -1,0 +1,6372 @@
+// 构建产物：由 build.mjs 从 src/panel 打包生成，请勿直接编辑。
+
+// src/panel/ui/runtime.js
+var bound = null;
+function bindReact(React) {
+  if (!React || typeof React.createElement !== "function") return false;
+  bound = { React, createElement: React.createElement };
+  return true;
+}
+function getReact() {
+  if (!bound) throw new Error("宿主 React 尚未注入");
+  return bound.React;
+}
+function h(type, props, ...children) {
+  if (!bound) throw new Error("宿主 React 尚未注入");
+  const flat = [];
+  for (const child of children) {
+    if (Array.isArray(child)) {
+      for (const item of child) flat.push(item);
+    } else {
+      flat.push(child);
+    }
+  }
+  return bound.createElement(type, props, ...flat);
+}
+
+// locales/zh-CN.json
+var zh_CN_default = {
+  "plugin.title": "红果短剧",
+  "app.subtitle": "短剧浏览",
+  "tab.discover": "推荐",
+  "tab.search": "搜索",
+  "tab.history": "历史",
+  "tab.settings": "设置",
+  "boot.loading": "正在连接本机后台…",
+  "boot.failedTitle": "后台未就绪",
+  "boot.failedHint": "面板依赖本插件后台模块提供数据。若刚安装或更新插件，请在插件列表点「重新读取清单」，或禁用后重新启用插件；仍无效时重启宿主。",
+  "boot.retry": "重新检测",
+  "action.retry": "重试",
+  "action.refresh": "刷新",
+  "action.back": "返回",
+  "action.loadMore": "加载更多",
+  "action.browse": "去看看",
+  "unit.episodes": "{{count}} 集",
+  "unit.episodeShort": "第{{number}}集",
+  "unit.untitled": "未命名",
+  "discover.heading": "推荐",
+  "discover.empty": "暂无推荐内容",
+  "discover.emptyHint": "稍后再试，或下拉刷新",
+  "discover.end": "已经到底了",
+  "discover.loadingMore": "正在加载更多…",
+  "discover.refreshing": "正在刷新…",
+  "discover.pull": "下拉刷新",
+  "discover.release": "松开刷新",
+  "search.placeholder": "搜索短剧",
+  "search.hint": "输入关键词，停止输入 300 毫秒后自动搜索",
+  "search.recent": "最近搜索",
+  "search.clearRecent": "清空记录",
+  "search.noRecent": "暂无搜索记录",
+  "search.empty": "没有找到相关内容",
+  "search.emptyHint": "换个关键词再试",
+  "search.searching": "正在搜索…",
+  "search.results": "共 {{count}} 个结果",
+  "search.loadMore": "加载更多结果",
+  "search.loadingMore": "正在加载更多…",
+  "search.clearInput": "清空输入",
+  "detail.episodes": "选集",
+  "detail.description": "简介",
+  "detail.noDescription": "暂无简介",
+  "detail.expand": "展开",
+  "detail.collapse": "收起",
+  "detail.continue": "继续观看",
+  "detail.continueAt": "第{{number}}集 · {{time}}",
+  "detail.start": "从第 1 集开始",
+  "detail.watched": "已看",
+  "detail.current": "当前",
+  "detail.loading": "正在加载详情…",
+  "detail.missingId": "剧集标识无效",
+  "detail.truncated": "分集过多，仅显示前 {{count}} 集",
+  "detail.unplayable": "该集暂不可播放",
+  "detail.recordFailed": "写入观看历史失败",
+  "detail.episodesFailed": "分集加载失败",
+  "player.region": "视频播放器",
+  "player.loading": "正在加载视频…",
+  "player.buffering": "缓冲中…",
+  "player.play": "播放",
+  "player.pause": "暂停",
+  "player.playPause": "播放 / 暂停",
+  "player.next": "下一集",
+  "player.nextEpisode": "播放下一集",
+  "player.lastEpisode": "已经是最后一集",
+  "player.mute": "静音",
+  "player.unmute": "取消静音",
+  "player.volume": "音量",
+  "player.speed": "播放速度",
+  "player.speedUnsupported": "本机解码播放暂不支持倍速",
+  "player.decodeFailed": "本机解码失败",
+  "player.fallbackCompatible": "已回退到兼容播放",
+  "player.quality": "清晰度",
+  "player.pip": "画中画",
+  "player.pipFailed": "画中画不可用",
+  "player.fill": "铺满侧栏",
+  "player.exitFill": "退出铺满",
+  "player.seek": "播放进度",
+  "player.ended": "已播放完毕",
+  "player.endedNext": "可播放下一集，或重新播放本集",
+  "player.endedLast": "已经是最后一集，可重新播放",
+  "player.replay": "重播",
+  "player.unsupportedTitle": "无法播放该编码",
+  "player.unsupportedHint": "面板无法直接加载该视频流（宿主页面禁止媒体元素加载外部地址）。所有清晰度都是同一编码，切换无效；点「直接播放」可在面板内用本机解码器出画面，或下载本集用外部播放器打开",
+  "player.transcode": "转码后播放",
+  "player.playDirect": "直接播放（本机解码）",
+  "player.transcodingTitle": "正在转码",
+  "player.transcodingHint": "本机没有 HEVC 解码器，正在用 ffmpeg 转成 H.264… {{percent}}%",
+  "player.actualQuality": "实际清晰度：{{quality}}",
+  "player.switchTo": "切换到 {{quality}}",
+  "player.copyAddress": "复制播放地址",
+  "player.copyDone": "播放地址已复制",
+  "player.copyFailed": "复制失败，请手动选择地址",
+  "player.addressUnavailable": "播放地址不可用",
+  "player.download": "下载本集",
+  "player.downloading": "正在下载 {{done}}/{{total}} 段",
+  "player.downloadDone": "已开始下载",
+  "player.downloadFailed": "下载失败：{{error}}",
+  "player.errorTitle": "播放失败",
+  "player.errorHint": "网络中断或后台未响应时可重试；切换清晰度会重新建立连接",
+  "player.segmentFailed": "视频分片加载失败",
+  "player.stalled": "视频加载超时，可能是网络中断",
+  "player.retry": "重试",
+  "player.resumeClamped": "目标位置超出本集时长，已从头播放",
+  "player.qualitySwitched": "已切换到 {{quality}}",
+  "player.qualityHeavy": "高清晰度由本机软件解码，若出现卡顿可切回 480p",
+  "player.resumeJump": "已跳到 {{time}}",
+  "player.noEpisode": "暂无可播放的分集",
+  "player.unplayable": "该集暂不可播放",
+  "player.autoplayBlocked": "点击画面开始播放",
+  "history.heading": "观看历史",
+  "history.empty": "还没有观看记录",
+  "history.emptyHint": "打开一部短剧并选择集数后，这里会显示进度",
+  "history.lastWatched": "第{{number}}集 · {{time}}",
+  "history.remove": "删除这条记录",
+  "history.clear": "清空历史",
+  "history.clearConfirm": "确认清空全部历史？",
+  "history.confirmRemove": "确认删除？",
+  "history.cleared": "已清空观看历史",
+  "history.removed": "已删除记录",
+  "settings.heading": "设置",
+  "settings.playback": "播放偏好",
+  "settings.quality": "默认清晰度",
+  "settings.qualityHint": "播放器默认按此清晰度取流，播放中也可随时切换",
+  "settings.cache": "缓存",
+  "settings.cacheHint": "清理后台的视频分片与封面缓存",
+  "settings.clearCache": "清理缓存",
+  "settings.clearCacheConfirm": "确认清理？",
+  "settings.cacheCleared": "缓存已清理",
+  "settings.cacheUnsupported": "后台版本过旧，暂不支持缓存清理",
+  "settings.cacheFailed": "缓存清理失败：{{error}}",
+  "settings.status": "后台状态",
+  "settings.statusHint": "面板只与本机 127.0.0.1 回环地址上的后台通信",
+  "settings.running": "运行中",
+  "settings.notRunning": "未连接",
+  "settings.port": "端口",
+  "settings.version": "版本",
+  "settings.pid": "进程",
+  "settings.uptime": "运行时长",
+  "settings.sdk": "SDK",
+  "settings.sdkReady": "已就绪",
+  "settings.sdkIdle": "未加载",
+  "settings.sdkLastError": "最近错误",
+  "settings.recheck": "重新检测",
+  "settings.unavailableHint": "后台未响应。若刚安装或更新插件，请在插件列表点「重新读取清单」或重启宿主。",
+  "settings.about": "关于",
+  "settings.aboutText": "面板通过非官方匿名 SDK 读取公开目录数据；不登录账号、不上传数据。",
+  "settings.saveFailed": "保存设置失败：{{error}}",
+  "error.title": "出错了",
+  "error.rateLimited": "请求太频繁，稍后再试",
+  "error.rateLimitedAnonymous": "匿名设备被限流，稍后再试",
+  "error.rateLimitedWait": "{{seconds}} 秒后可重试",
+  "error.backgroundUnavailable": "后台未启动或端口不可达",
+  "error.backgroundHint": "在插件列表点「重新读取清单」，或重启宿主后重试",
+  "error.transport": "网络请求失败，请检查网络",
+  "error.timeout": "请求超时，稍后重试",
+  "error.contentUnavailable": "内容暂不可用",
+  "error.notFound": "没有找到对应的内容",
+  "error.protocol": "后台响应格式不正确",
+  "error.invalidParam": "请求参数不合法",
+  "error.unknown": "未知错误",
+  "error.renderTitle": "界面渲染出错",
+  "error.retryPanel": "重新加载界面",
+  "detail.noEpisodes": "暂无分集",
+  "settings.cacheClearedCount": "缓存已清理（{{count}} 个文件）"
+};
+
+// locales/zh-TW.json
+var zh_TW_default = {
+  "plugin.title": "紅果短劇",
+  "app.subtitle": "短劇瀏覽",
+  "tab.discover": "推薦",
+  "tab.search": "搜尋",
+  "tab.history": "歷史",
+  "tab.settings": "設定",
+  "boot.loading": "正在連線本機後台…",
+  "boot.failedTitle": "後台未就緒",
+  "boot.failedHint": "面板依賴本外掛後台模組提供資料。若剛安裝或更新外掛，請在外掛清單點「重新讀取清單」，或停用後重新啟用外掛；仍無效時請重啟宿主。",
+  "boot.retry": "重新檢測",
+  "action.retry": "重試",
+  "action.refresh": "重新整理",
+  "action.back": "返回",
+  "action.loadMore": "載入更多",
+  "action.browse": "去看看",
+  "unit.episodes": "{{count}} 集",
+  "unit.episodeShort": "第{{number}}集",
+  "unit.untitled": "未命名",
+  "discover.heading": "推薦",
+  "discover.empty": "暫無推薦內容",
+  "discover.emptyHint": "稍後再試，或下拉重新整理",
+  "discover.end": "已經到底了",
+  "discover.loadingMore": "正在載入更多…",
+  "discover.refreshing": "正在重新整理…",
+  "discover.pull": "下拉重新整理",
+  "discover.release": "放開重新整理",
+  "search.placeholder": "搜尋短劇",
+  "search.hint": "輸入關鍵詞，停止輸入 300 毫秒後自動搜尋",
+  "search.recent": "最近搜尋",
+  "search.clearRecent": "清空記錄",
+  "search.noRecent": "暫無搜尋記錄",
+  "search.empty": "沒有找到相關內容",
+  "search.emptyHint": "換個關鍵詞再試",
+  "search.searching": "正在搜尋…",
+  "search.results": "共 {{count}} 個結果",
+  "search.loadMore": "載入更多結果",
+  "search.loadingMore": "正在載入更多…",
+  "search.clearInput": "清空輸入",
+  "detail.episodes": "選集",
+  "detail.description": "簡介",
+  "detail.noDescription": "暫無簡介",
+  "detail.expand": "展開",
+  "detail.collapse": "收起",
+  "detail.continue": "繼續觀看",
+  "detail.continueAt": "第{{number}}集 · {{time}}",
+  "detail.start": "從第 1 集開始",
+  "detail.watched": "已看",
+  "detail.current": "目前",
+  "detail.loading": "正在載入詳情…",
+  "detail.missingId": "劇集識別碼無效",
+  "detail.truncated": "分集過多，僅顯示前 {{count}} 集",
+  "detail.unplayable": "該集暫不可播放",
+  "detail.recordFailed": "寫入觀看歷史失敗",
+  "detail.episodesFailed": "分集載入失敗",
+  "player.region": "影片播放器",
+  "player.loading": "正在載入影片…",
+  "player.buffering": "緩衝中…",
+  "player.play": "播放",
+  "player.pause": "暫停",
+  "player.playPause": "播放 / 暫停",
+  "player.next": "下一集",
+  "player.nextEpisode": "播放下一集",
+  "player.lastEpisode": "已經是最後一集",
+  "player.mute": "靜音",
+  "player.unmute": "取消靜音",
+  "player.volume": "音量",
+  "player.speed": "播放速度",
+  "player.speedUnsupported": "本機解碼播放暫不支援倍速",
+  "player.decodeFailed": "本機解碼失敗",
+  "player.fallbackCompatible": "已回退到相容播放",
+  "player.quality": "清晰度",
+  "player.pip": "子母畫面",
+  "player.pipFailed": "子母畫面無法使用",
+  "player.fill": "填滿側欄",
+  "player.exitFill": "退出填滿",
+  "player.seek": "播放進度",
+  "player.ended": "已播放完畢",
+  "player.endedNext": "可播放下一集，或重新播放本集",
+  "player.endedLast": "已經是最後一集，可重新播放",
+  "player.replay": "重播",
+  "player.unsupportedTitle": "無法播放該編碼",
+  "player.unsupportedHint": "面板無法直接載入該視訊串流（宿主頁面禁止媒體元素載入外部位址）。所有清晰度都是同一編碼，切換無效；點「直接播放」可在面板內用本機解碼器出畫面，或下載本集用外部播放器開啟",
+  "player.transcode": "轉碼後播放",
+  "player.playDirect": "直接播放（本機解碼）",
+  "player.transcodingTitle": "正在轉碼",
+  "player.transcodingHint": "本機沒有 HEVC 解碼器，正在用 ffmpeg 轉成 H.264… {{percent}}%",
+  "player.actualQuality": "實際清晰度：{{quality}}",
+  "player.switchTo": "切換到 {{quality}}",
+  "player.copyAddress": "複製播放位址",
+  "player.copyDone": "播放位址已複製",
+  "player.copyFailed": "複製失敗，請手動選擇位址",
+  "player.addressUnavailable": "播放位址不可用",
+  "player.download": "下載本集",
+  "player.downloading": "正在下載 {{done}}/{{total}} 段",
+  "player.downloadDone": "已開始下載",
+  "player.downloadFailed": "下載失敗：{{error}}",
+  "player.errorTitle": "播放失敗",
+  "player.errorHint": "網路中斷或後台未回應時可重試；切換清晰度會重新建立連線",
+  "player.segmentFailed": "影片分片載入失敗",
+  "player.stalled": "影片載入逾時，可能是網路中斷",
+  "player.retry": "重試",
+  "player.resumeClamped": "目標位置超出本集長度，已從頭播放",
+  "player.qualitySwitched": "已切換到 {{quality}}",
+  "player.qualityHeavy": "高清晰度由本機軟體解碼，若出現卡頓可切回 480p",
+  "player.resumeJump": "已跳到 {{time}}",
+  "player.noEpisode": "暫無可播放的分集",
+  "player.unplayable": "該集暫不可播放",
+  "player.autoplayBlocked": "點擊畫面開始播放",
+  "history.heading": "觀看歷史",
+  "history.empty": "還沒有觀看記錄",
+  "history.emptyHint": "開啟一部短劇並選擇集數後，這裡會顯示進度",
+  "history.lastWatched": "第{{number}}集 · {{time}}",
+  "history.remove": "刪除這條記錄",
+  "history.clear": "清空歷史",
+  "history.clearConfirm": "確認清空全部歷史？",
+  "history.confirmRemove": "確認刪除？",
+  "history.cleared": "已清空觀看歷史",
+  "history.removed": "已刪除記錄",
+  "settings.heading": "設定",
+  "settings.playback": "播放偏好",
+  "settings.quality": "預設清晰度",
+  "settings.qualityHint": "播放器預設依此清晰度取流，播放中也可隨時切換",
+  "settings.cache": "快取",
+  "settings.cacheHint": "清理後台的影片分片與封面快取",
+  "settings.clearCache": "清理快取",
+  "settings.clearCacheConfirm": "確認清理？",
+  "settings.cacheCleared": "快取已清理",
+  "settings.cacheUnsupported": "後台版本過舊，暫不支援快取清理",
+  "settings.cacheFailed": "快取清理失敗：{{error}}",
+  "settings.status": "後台狀態",
+  "settings.statusHint": "面板只與本機 127.0.0.1 回環位址上的後台通訊",
+  "settings.running": "執行中",
+  "settings.notRunning": "未連線",
+  "settings.port": "連接埠",
+  "settings.version": "版本",
+  "settings.pid": "程序",
+  "settings.uptime": "執行時長",
+  "settings.sdk": "SDK",
+  "settings.sdkReady": "已就緒",
+  "settings.sdkIdle": "未載入",
+  "settings.sdkLastError": "最近錯誤",
+  "settings.recheck": "重新檢測",
+  "settings.unavailableHint": "後台未回應。若剛安裝或更新外掛，請在外掛清單點「重新讀取清單」或重啟宿主。",
+  "settings.about": "關於",
+  "settings.aboutText": "面板透過非官方匿名 SDK 讀取公開目錄資料；不登入帳號、不上傳資料。",
+  "settings.saveFailed": "儲存設定失敗：{{error}}",
+  "error.title": "出錯了",
+  "error.rateLimited": "請求太頻繁，稍後再試",
+  "error.rateLimitedAnonymous": "匿名裝置被限流，稍後再試",
+  "error.rateLimitedWait": "{{seconds}} 秒後可重試",
+  "error.backgroundUnavailable": "後台未啟動或連接埠不可達",
+  "error.backgroundHint": "在外掛清單點「重新讀取清單」，或重啟宿主後重試",
+  "error.transport": "網路請求失敗，請檢查網路",
+  "error.timeout": "請求逾時，稍後重試",
+  "error.contentUnavailable": "內容暫不可用",
+  "error.notFound": "沒有找到對應的內容",
+  "error.protocol": "後台回應格式不正確",
+  "error.invalidParam": "請求參數不合法",
+  "error.unknown": "未知錯誤",
+  "error.renderTitle": "介面渲染出錯",
+  "error.retryPanel": "重新載入介面",
+  "detail.noEpisodes": "暫無分集",
+  "settings.cacheClearedCount": "快取已清理（{{count}} 個檔案）"
+};
+
+// locales/en.json
+var en_default = {
+  "plugin.title": "Hongguo Shorts",
+  "app.subtitle": "Short-drama browsing",
+  "tab.discover": "Discover",
+  "tab.search": "Search",
+  "tab.history": "History",
+  "tab.settings": "Settings",
+  "boot.loading": "Connecting to the local background service…",
+  "boot.failedTitle": "Background service unavailable",
+  "boot.failedHint": "The panel reads data from this plugin's background module. If the plugin was just installed or updated, choose “Reload manifest” in the plugin list, or disable and re-enable it; if that does not help, restart the host.",
+  "boot.retry": "Check again",
+  "action.retry": "Retry",
+  "action.refresh": "Refresh",
+  "action.back": "Back",
+  "action.loadMore": "Load more",
+  "action.browse": "Browse",
+  "unit.episodes": "{{count}} episodes",
+  "unit.episodeShort": "Episode {{number}}",
+  "unit.untitled": "Untitled",
+  "discover.heading": "Discover",
+  "discover.empty": "No recommendations yet",
+  "discover.emptyHint": "Try again later, or pull down to refresh",
+  "discover.end": "You have reached the end",
+  "discover.loadingMore": "Loading more…",
+  "discover.refreshing": "Refreshing…",
+  "discover.pull": "Pull down to refresh",
+  "discover.release": "Release to refresh",
+  "search.placeholder": "Search short dramas",
+  "search.hint": "Search starts automatically 300 ms after you stop typing",
+  "search.recent": "Recent searches",
+  "search.clearRecent": "Clear history",
+  "search.noRecent": "No recent searches",
+  "search.empty": "No results found",
+  "search.emptyHint": "Try a different keyword",
+  "search.searching": "Searching…",
+  "search.results": "{{count}} results",
+  "search.loadMore": "Load more results",
+  "search.loadingMore": "Loading more…",
+  "search.clearInput": "Clear input",
+  "detail.episodes": "Episodes",
+  "detail.description": "Synopsis",
+  "detail.noDescription": "No synopsis available",
+  "detail.expand": "Expand",
+  "detail.collapse": "Collapse",
+  "detail.continue": "Continue watching",
+  "detail.continueAt": "Episode {{number}} · {{time}}",
+  "detail.start": "Start from episode 1",
+  "detail.watched": "Watched",
+  "detail.current": "Current",
+  "detail.loading": "Loading details…",
+  "detail.missingId": "Invalid series id",
+  "detail.truncated": "Too many episodes; showing the first {{count}}",
+  "detail.unplayable": "This episode is not playable",
+  "detail.recordFailed": "Failed to save watch history",
+  "detail.episodesFailed": "Failed to load episodes",
+  "player.region": "Video player",
+  "player.loading": "Loading video…",
+  "player.buffering": "Buffering…",
+  "player.play": "Play",
+  "player.pause": "Pause",
+  "player.playPause": "Play / pause",
+  "player.next": "Next episode",
+  "player.nextEpisode": "Play next episode",
+  "player.lastEpisode": "This is the last episode",
+  "player.mute": "Mute",
+  "player.unmute": "Unmute",
+  "player.volume": "Volume",
+  "player.speed": "Playback speed",
+  "player.speedUnsupported": "Speed control is unavailable while decoding locally",
+  "player.decodeFailed": "Local decoding failed",
+  "player.fallbackCompatible": "Switched to compatible playback",
+  "player.quality": "Quality",
+  "player.pip": "Picture in picture",
+  "player.pipFailed": "Picture in picture is unavailable",
+  "player.fill": "Fill sidebar",
+  "player.exitFill": "Exit fill",
+  "player.seek": "Playback position",
+  "player.ended": "Finished",
+  "player.endedNext": "Play the next episode or replay this one",
+  "player.endedLast": "This was the last episode; you can replay it",
+  "player.replay": "Replay",
+  "player.unsupportedTitle": "This codec cannot be played",
+  "player.unsupportedHint": 'The panel cannot load this stream through a media element (the host page blocks external media URLs). Every quality uses the same codec, so switching will not help. Use "Play directly" to decode it in the panel with the local decoder, or download the episode and open it in an external player',
+  "player.transcode": "Play after transcoding",
+  "player.playDirect": "Play directly (local decoder)",
+  "player.transcodingTitle": "Transcoding",
+  "player.transcodingHint": "No HEVC decoder on this system; converting to H.264 with ffmpeg… {{percent}}%",
+  "player.actualQuality": "Actual quality: {{quality}}",
+  "player.switchTo": "Switch to {{quality}}",
+  "player.copyAddress": "Copy playback address",
+  "player.copyDone": "Playback address copied",
+  "player.copyFailed": "Copy failed; select the address manually",
+  "player.addressUnavailable": "Playback address unavailable",
+  "player.download": "Download episode",
+  "player.downloading": "Downloading {{done}}/{{total}} segments",
+  "player.downloadDone": "Download started",
+  "player.downloadFailed": "Download failed: {{error}}",
+  "player.errorTitle": "Playback failed",
+  "player.errorHint": "Retry after a network interruption, or switch quality to rebuild the connection",
+  "player.segmentFailed": "Failed to load a video segment",
+  "player.stalled": "Video loading timed out; the network may be interrupted",
+  "player.retry": "Retry",
+  "player.resumeClamped": "The saved position is past the end of this episode; playing from the start",
+  "player.qualitySwitched": "Switched to {{quality}}",
+  "player.qualityHeavy": "High resolutions are decoded in software locally; switch back to 480p if playback stutters",
+  "player.resumeJump": "Jumped to {{time}}",
+  "player.noEpisode": "No playable episode",
+  "player.unplayable": "This episode cannot be played",
+  "player.autoplayBlocked": "Click the picture to start playback",
+  "history.heading": "Watch history",
+  "history.empty": "No watch history yet",
+  "history.emptyHint": "Open a series and pick an episode; your progress will appear here",
+  "history.lastWatched": "Episode {{number}} · {{time}}",
+  "history.remove": "Delete this entry",
+  "history.clear": "Clear history",
+  "history.clearConfirm": "Clear all watch history?",
+  "history.confirmRemove": "Confirm delete?",
+  "history.cleared": "Watch history cleared",
+  "history.removed": "Entry deleted",
+  "settings.heading": "Settings",
+  "settings.playback": "Playback",
+  "settings.quality": "Preferred quality",
+  "settings.qualityHint": "The player starts with this quality; you can switch at any time",
+  "settings.cache": "Cache",
+  "settings.cacheHint": "Clear cached video segments and covers in the background",
+  "settings.clearCache": "Clear cache",
+  "settings.clearCacheConfirm": "Confirm clear?",
+  "settings.cacheCleared": "Cache cleared",
+  "settings.cacheUnsupported": "The background version is too old to clear the cache",
+  "settings.cacheFailed": "Failed to clear cache: {{error}}",
+  "settings.status": "Background status",
+  "settings.statusHint": "The panel only talks to the loopback service on 127.0.0.1",
+  "settings.running": "Running",
+  "settings.notRunning": "Not connected",
+  "settings.port": "Port",
+  "settings.version": "Version",
+  "settings.pid": "PID",
+  "settings.uptime": "Uptime",
+  "settings.sdk": "SDK",
+  "settings.sdkReady": "Ready",
+  "settings.sdkIdle": "Not loaded",
+  "settings.sdkLastError": "Last error",
+  "settings.recheck": "Check again",
+  "settings.unavailableHint": "The background did not respond. If the plugin was just installed or updated, choose “Reload manifest” in the plugin list or restart the host.",
+  "settings.about": "About",
+  "settings.aboutText": "The panel reads public catalogue data through an unofficial anonymous SDK; no account login and no data upload.",
+  "settings.saveFailed": "Failed to save settings: {{error}}",
+  "error.title": "Something went wrong",
+  "error.rateLimited": "Too many requests; please try again later",
+  "error.rateLimitedAnonymous": "The anonymous device is rate limited; please try again later",
+  "error.rateLimitedWait": "Retry in {{seconds}} s",
+  "error.backgroundUnavailable": "The background service is not running or unreachable",
+  "error.backgroundHint": "Choose “Reload manifest” in the plugin list, or restart the host and retry",
+  "error.transport": "Network request failed; check your connection",
+  "error.timeout": "Request timed out; try again later",
+  "error.contentUnavailable": "Content is temporarily unavailable",
+  "error.notFound": "The requested content was not found",
+  "error.protocol": "The background returned an unexpected response",
+  "error.invalidParam": "Invalid request parameters",
+  "error.unknown": "Unknown error",
+  "error.renderTitle": "The interface failed to render",
+  "error.retryPanel": "Reload interface",
+  "detail.noEpisodes": "No episodes available",
+  "settings.cacheClearedCount": "Cache cleared ({{count}} files)"
+};
+
+// src/panel/i18n.js
+var PACKS = { "zh-CN": zh_CN_default, "zh-TW": zh_TW_default, en: en_default };
+var normalizeLocale = (locale) => {
+  const raw = String(locale || "").toLowerCase();
+  if (!raw) return "zh-CN";
+  if (raw.startsWith("zh-tw") || raw.startsWith("zh-hk") || raw === "zh-hant") return "zh-TW";
+  if (raw.startsWith("zh")) return "zh-CN";
+  if (raw.startsWith("en")) return "en";
+  return "zh-CN";
+};
+var interpolate = (template, values) => {
+  if (!values) return template;
+  return String(template).replace(
+    /\{\{\s*([\w.]+)\s*\}\}/g,
+    (match, key) => Object.prototype.hasOwnProperty.call(values, key) ? String(values[key]) : match
+  );
+};
+function createTranslator(api, locale) {
+  const resolved = normalizeLocale(locale || api?.locale);
+  const pack = PACKS[resolved] || PACKS["zh-CN"];
+  const fallbackPack = PACKS["zh-CN"];
+  const t = (key, values) => {
+    const fallback = pack[key] ?? fallbackPack[key] ?? key;
+    try {
+      if (api && typeof api.t === "function") {
+        return api.t(key, { defaultValue: fallback, values });
+      }
+    } catch {
+    }
+    return interpolate(fallback, values);
+  };
+  return { t, locale: resolved };
+}
+
+// src/shared/contract.js
+var PLUGIN_ID = "com.snow.hongguo";
+var PORT_FIRST = 37191;
+var PORT_LAST = 37200;
+var CHANNEL_HEADER = "x-snow-hongguo-channel";
+var CHANNEL_HEADER_VALUE = "panel-rpc-v1";
+var LIMITS = {
+  /** 列表项简介最多保留多少个字符（按 Unicode 码点计）。 */
+  descriptionChars: 300,
+  seriesDescriptionChars: 1e3,
+  /** /episodes 响应体的硬上限。 */
+  episodesMaxBytes: 64 * 1024,
+  /** 分集翻页保护：异常 has_more 不会把请求拖死。 */
+  episodesMaxPages: 8,
+  episodesMaxItems: 2e3,
+  /** 封面单张 3 MB（面板 5 MB 上限内，留出 base64 膨胀空间），磁盘保留 300 张。 */
+  coverMaxBytes: 3 * 1024 * 1024,
+  coverKeep: 300,
+  videoKeep: 6,
+  /** 综合搜索缺封面时并发补全 getSeries 的上限。 */
+  searchEnrichConcurrency: 4,
+  /** 同一上游接口两次调用之间的最小间隔。 */
+  upstreamMinIntervalMs: 300,
+  /** 按 retryAfterMs 退避时的单次等待上限。 */
+  upstreamMaxBackoffMs: 2e3,
+  seriesCacheTtlMs: 5 * 60 * 1e3,
+  seriesCacheMax: 200
+};
+
+// src/panel/rpc.js
+var PANEL_ROUTES = {
+  health: "/health",
+  discover: "/discover",
+  search: "/search",
+  series: "/series",
+  episodes: "/episodes",
+  playback: "/playback",
+  cover: "/cover",
+  clearCache: "/cache/clear",
+  streamInfo: "/stream/info",
+  streamInit: "/stream/init",
+  streamSegment: "/stream/segment",
+  h264Info: "/h264/info",
+  h264Start: "/h264/start",
+  h264Chunk: "/h264/chunk"
+};
+var TIMEOUTS = {
+  health: 3e3,
+  probe: 2e3,
+  list: 25e3,
+  search: 35e3,
+  detail: 25e3,
+  episodes: 35e3,
+  cover: 2e4,
+  action: 2e4,
+  media: 12e4
+};
+var PanelError = class extends Error {
+  constructor(code, message, options = {}) {
+    super(message || code);
+    this.name = "PanelError";
+    this.code = String(code || "UNKNOWN");
+    this.status = Number.isFinite(options.status) ? options.status : 0;
+    this.retryable = options.retryable === true;
+    this.retryAfterMs = Number.isFinite(options.retryAfterMs) ? options.retryAfterMs : null;
+    this.cause = options.cause;
+  }
+};
+var isConnectionError = (text) => /ECONNREFUSED|ECONNRESET|ENOTFOUND|EAI_AGAIN|EPIPE|connection refused|connection reset|failed to fetch|net::ERR|socket hang up|fetch failed|不可用/i.test(
+  text
+);
+var isTimeoutError = (text) => /timeout|timed out|ETIMEDOUT|请求超时/i.test(text);
+var toPanelError = (payload, status, fallbackMessage) => {
+  const detail = payload && typeof payload === "object" ? payload.error : null;
+  let code = typeof detail?.code === "string" && detail.code ? detail.code : "";
+  if (!code) {
+    if (status === 404) code = "NOT_FOUND";
+    else if (status === 429) code = "RATE_LIMITED";
+    else code = "HTTP_ERROR";
+  }
+  const message = typeof detail?.message === "string" && detail.message || fallbackMessage || `HTTP ${status || 0}`;
+  return new PanelError(code, message, {
+    status,
+    retryable: detail?.retryable === true,
+    // 兼容 SDK 原始字段与后台信封里的 camelCase 写法。
+    retryAfterMs: Number.isFinite(detail?.retryAfterMs) ? detail.retryAfterMs : Number.isFinite(detail?.retry_after_ms) ? detail.retry_after_ms : null
+  });
+};
+var headerValue = (headers, name) => {
+  if (!headers) return "";
+  if (typeof headers.get === "function") return String(headers.get(name) || "");
+  const target = String(name).toLowerCase();
+  for (const key of Object.keys(headers)) {
+    if (key.toLowerCase() === target) return String(headers[key] ?? "");
+  }
+  return "";
+};
+var base64ToBytes = (value) => {
+  const binary = atob(String(value));
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+  return bytes;
+};
+var buildQuery = (query) => {
+  if (!query) return "";
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(query)) {
+    if (value === void 0 || value === null || value === "") continue;
+    params.set(key, String(value));
+  }
+  const text = params.toString();
+  return text ? `?${text}` : "";
+};
+function createRpc(api, { log = () => {
+} } = {}) {
+  let port = 0;
+  let health = null;
+  let discovering = null;
+  let lastScanError = null;
+  const requestJson = async (targetPort, pathname, options = {}) => {
+    if (!api?.net || typeof api.net.fetch !== "function") {
+      throw new PanelError("NET_UNAVAILABLE", "api.net.fetch 不可用（请在 plugin.json 声明 network 隐私域）");
+    }
+    const method = options.method || "GET";
+    const queryText = buildQuery(options.query);
+    const url = `http://127.0.0.1:${targetPort}${pathname}${queryText}`;
+    let response;
+    try {
+      response = await api.net.fetch(url, {
+        method,
+        headers: {
+          [CHANNEL_HEADER]: CHANNEL_HEADER_VALUE,
+          ...options.body === void 0 ? {} : { "content-type": "application/json" }
+        },
+        body: options.body === void 0 ? void 0 : JSON.stringify(options.body),
+        responseType: "text",
+        timeoutMs: options.timeoutMs ?? TIMEOUTS.list
+      });
+    } catch (error) {
+      const text2 = String(error?.message || error);
+      throw new PanelError(isConnectionError(text2) ? "BACKGROUND_UNAVAILABLE" : "TRANSPORT", text2, {
+        cause: error
+      });
+    }
+    const failure = String(response?.error || "");
+    if (!response || response.error) {
+      if (isConnectionError(failure)) {
+        throw new PanelError("BACKGROUND_UNAVAILABLE", failure, { status: response?.status ?? 0 });
+      }
+      if (isTimeoutError(failure)) {
+        throw new PanelError("TIMEOUT", failure, { status: response?.status ?? 0, retryable: true });
+      }
+      throw new PanelError("TRANSPORT", failure || "网络请求失败", { status: response?.status ?? 0 });
+    }
+    let payload = null;
+    const text = typeof response.body === "string" ? response.body : "";
+    if (text.trim()) {
+      try {
+        payload = JSON.parse(text);
+      } catch (error) {
+        throw new PanelError("PROTOCOL", `后台响应不是 JSON：${error?.message ?? error}`, {
+          status: response.status ?? 0
+        });
+      }
+    }
+    const status = Number.isFinite(response.status) ? response.status : 0;
+    if (response.ok !== true || payload && payload.error) {
+      throw toPanelError(payload, status, response.statusText);
+    }
+    return payload;
+  };
+  const probePort = async (candidate) => {
+    try {
+      const data = await requestJson(candidate, PANEL_ROUTES.health, {
+        timeoutMs: TIMEOUTS.probe
+      });
+      if (data?.ok === true && data?.pluginId === PLUGIN_ID) return { port: candidate, health: data };
+      return null;
+    } catch (error) {
+      if (error?.code !== "BACKGROUND_UNAVAILABLE" && error?.code !== "TRANSPORT") {
+        lastScanError = error?.message || lastScanError;
+      }
+      return null;
+    }
+  };
+  const scanPorts = async () => {
+    const candidates = [];
+    for (let candidate = PORT_FIRST; candidate <= PORT_LAST; candidate += 1) candidates.push(candidate);
+    const results = await Promise.all(candidates.map((candidate) => probePort(candidate)));
+    return results.find(Boolean) || null;
+  };
+  const reset = () => {
+    port = 0;
+    health = null;
+  };
+  const ensureReady = async () => {
+    if (port && health) return health;
+    if (!discovering) {
+      discovering = (async () => {
+        lastScanError = null;
+        const found = await scanPorts();
+        if (!found) {
+          throw new PanelError(
+            "BACKGROUND_UNAVAILABLE",
+            lastScanError || `已在 127.0.0.1:${PORT_FIRST}-${PORT_LAST} 扫描，未发现本插件后台服务`
+          );
+        }
+        port = found.port;
+        health = found.health;
+        log(`[rpc] background ready on 127.0.0.1:${port}`);
+        return health;
+      })().finally(() => {
+        discovering = null;
+      });
+    }
+    return discovering;
+  };
+  const call = async (pathname, options = {}, retried = false) => {
+    await ensureReady();
+    const targetPort = port;
+    try {
+      return await requestJson(targetPort, pathname, options);
+    } catch (error) {
+      if (error?.code === "BACKGROUND_UNAVAILABLE" && !retried) {
+        reset();
+        return call(pathname, options, true);
+      }
+      if (error?.code === "BACKGROUND_UNAVAILABLE") reset();
+      throw error;
+    }
+  };
+  const fetchCover = async (coverPath) => {
+    if (typeof coverPath !== "string" || !coverPath.startsWith("/cover?")) {
+      throw new PanelError("INVALID_PARAM", "封面路径不合法");
+    }
+    if (!api?.net || typeof api.net.fetch !== "function") {
+      throw new PanelError("NET_UNAVAILABLE", "api.net.fetch 不可用");
+    }
+    await ensureReady();
+    const targetPort = port;
+    const url = `http://127.0.0.1:${targetPort}${coverPath}`;
+    let response;
+    try {
+      response = await api.net.fetch(url, {
+        method: "GET",
+        headers: { [CHANNEL_HEADER]: CHANNEL_HEADER_VALUE },
+        responseType: "arraybuffer",
+        timeoutMs: TIMEOUTS.cover
+      });
+    } catch (error) {
+      throw new PanelError("TRANSPORT", String(error?.message || error), { cause: error });
+    }
+    if (!response || response.error) {
+      throw new PanelError("TRANSPORT", String(response?.error || "封面请求失败"), {
+        status: response?.status ?? 0
+      });
+    }
+    if (response.ok !== true) {
+      throw new PanelError("TRANSPORT", `封面请求失败（HTTP ${response.status ?? 0}）`, {
+        status: response.status ?? 0
+      });
+    }
+    const base64 = typeof response.bodyBase64 === "string" && response.bodyBase64 ? response.bodyBase64 : typeof response.body === "string" ? response.body : "";
+    if (!base64) throw new PanelError("PROTOCOL", "封面响应缺少二进制内容");
+    let bytes;
+    try {
+      bytes = base64ToBytes(base64);
+    } catch (error) {
+      throw new PanelError("PROTOCOL", `封面数据解码失败：${error?.message ?? error}`);
+    }
+    const contentType = headerValue(response.headers, "content-type").split(";")[0].trim();
+    const type = contentType.startsWith("image/") ? contentType : "application/octet-stream";
+    return { blob: new Blob([bytes], { type }), contentType: type, bytes: bytes.length };
+  };
+  const clearCache = async () => {
+    try {
+      return await call(PANEL_ROUTES.clearCache, {
+        method: "POST",
+        // 后台会先等在途下载/转码收敛再删目录，按媒体级超时给足时间。
+        timeoutMs: TIMEOUTS.media
+      });
+    } catch (error) {
+      if (error?.code === "METHOD_NOT_ALLOWED") {
+        return call(PANEL_ROUTES.clearCache, { timeoutMs: TIMEOUTS.media });
+      }
+      throw error;
+    }
+  };
+  return {
+    ensureReady,
+    reset,
+    getState: () => ({ port, health }),
+    health: async () => {
+      try {
+        const data = await call(PANEL_ROUTES.health, { timeoutMs: TIMEOUTS.health });
+        if (data?.pluginId !== PLUGIN_ID) {
+          reset();
+          throw new PanelError("PROTOCOL", "端口上的服务不是本插件后台");
+        }
+        health = data;
+        return data;
+      } catch (error) {
+        if (error?.code === "BACKGROUND_UNAVAILABLE" || error?.code === "PROTOCOL") reset();
+        throw error;
+      }
+    },
+    discover: (cursor) => call(PANEL_ROUTES.discover, {
+      query: { cursor },
+      timeoutMs: TIMEOUTS.list
+    }),
+    search: (q, cursor) => call(PANEL_ROUTES.search, {
+      query: { q, cursor },
+      timeoutMs: TIMEOUTS.search
+    }),
+    getSeries: (id) => call(PANEL_ROUTES.series, {
+      query: { id },
+      timeoutMs: TIMEOUTS.detail
+    }),
+    getEpisodes: (seriesId) => call(PANEL_ROUTES.episodes, {
+      query: { seriesId },
+      timeoutMs: TIMEOUTS.episodes
+    }),
+    getPlayback: (episodeId) => call(PANEL_ROUTES.playback, {
+      query: { episodeId },
+      timeoutMs: TIMEOUTS.detail
+    }),
+    /** 媒体管道：仅供播放器使用，返回的 base64 由播放器自行转成字节。 */
+    getStreamInfo: (episodeId, quality) => call(PANEL_ROUTES.streamInfo, {
+      query: { episodeId, quality },
+      timeoutMs: TIMEOUTS.media
+    }),
+    getStreamInit: (episodeId, quality) => call(PANEL_ROUTES.streamInit, {
+      query: { episodeId, quality },
+      timeoutMs: TIMEOUTS.media
+    }),
+    getStreamSegment: (episodeId, quality, seq) => call(PANEL_ROUTES.streamSegment, {
+      query: { episodeId, quality, seq },
+      timeoutMs: TIMEOUTS.media
+    }),
+    /** 转码兜底：查询进度 / 启动 / 分块读取成品（宿主没有 HEVC 解码器时使用）。 */
+    h264Info: (episodeId, quality) => call(PANEL_ROUTES.h264Info, {
+      query: { episodeId, quality },
+      timeoutMs: TIMEOUTS.detail
+    }),
+    h264Start: (episodeId, quality) => call(PANEL_ROUTES.h264Start, {
+      method: "POST",
+      query: { episodeId, quality },
+      timeoutMs: TIMEOUTS.action
+    }),
+    h264Chunk: (episodeId, quality, offset, length) => call(PANEL_ROUTES.h264Chunk, {
+      query: { episodeId, quality, offset, length },
+      timeoutMs: TIMEOUTS.media
+    }),
+    clearCache,
+    fetchCover
+  };
+}
+
+// src/panel/cover.js
+var MAX_ENTRIES = 80;
+function createCoverStore(rpc, { max = MAX_ENTRIES, log = () => {
+} } = {}) {
+  const entries = /* @__PURE__ */ new Map();
+  const order = [];
+  const revoke = (record) => {
+    if (record?.url) {
+      try {
+        URL.revokeObjectURL(record.url);
+      } catch {
+      }
+    }
+  };
+  const trim = () => {
+    while (entries.size > max) {
+      const oldest = order.find((path) => {
+        const record2 = entries.get(path);
+        return record2 && !record2.pending;
+      });
+      if (!oldest) break;
+      const index = order.indexOf(oldest);
+      if (index >= 0) order.splice(index, 1);
+      const record = entries.get(oldest);
+      revoke(record);
+      entries.delete(oldest);
+    }
+  };
+  const load = (path) => {
+    if (!path) return Promise.resolve(null);
+    const existing = entries.get(path);
+    if (existing) {
+      if (existing.url) return Promise.resolve(existing.url);
+      if (existing.failed) return Promise.resolve(null);
+      return existing.promise;
+    }
+    const record = { url: null, failed: false, pending: true, promise: null };
+    record.promise = rpc.fetchCover(path).then(({ blob }) => {
+      if (typeof URL === "undefined" || typeof URL.createObjectURL !== "function") {
+        throw new Error("object URL 不可用");
+      }
+      record.url = URL.createObjectURL(blob);
+      return record.url;
+    }).catch((error) => {
+      record.failed = true;
+      log(`[cover] 加载失败：${error?.code || ""} ${error?.message || error}`);
+      return null;
+    }).finally(() => {
+      record.pending = false;
+      record.promise = null;
+    });
+    entries.set(path, record);
+    order.push(path);
+    trim();
+    return record.promise;
+  };
+  const dispose = () => {
+    for (const record of entries.values()) revoke(record);
+    entries.clear();
+    order.length = 0;
+  };
+  return { load, dispose };
+}
+
+// src/panel/storage.js
+var HISTORY_KEY = "history";
+var PREFS_KEY = "prefs";
+var RECENT_SEARCH_KEY = "search.recent";
+var HISTORY_LIMIT = 100;
+var RECENT_SEARCH_LIMIT = 10;
+var QUALITY_OPTIONS = ["1080p", "720p", "540p", "480p", "360p"];
+var DEFAULT_QUALITY = "720p";
+var normalizeHistoryEntry = (raw) => {
+  if (!raw || typeof raw !== "object") return null;
+  const seriesId = String(raw.seriesId ?? "").trim();
+  if (!seriesId) return null;
+  const episodeIndex = Number.isFinite(Number(raw.episodeIndex)) && Number(raw.episodeIndex) >= 0 ? Math.floor(Number(raw.episodeIndex)) : 0;
+  const positionMs = Number.isFinite(Number(raw.positionMs)) && Number(raw.positionMs) > 0 ? Math.floor(Number(raw.positionMs)) : 0;
+  const updatedAt = Number.isFinite(Number(raw.updatedAt)) ? Number(raw.updatedAt) : 0;
+  return {
+    seriesId,
+    title: typeof raw.title === "string" ? raw.title : "",
+    cover: typeof raw.cover === "string" && raw.cover ? raw.cover : null,
+    episodeIndex,
+    positionMs,
+    updatedAt
+  };
+};
+var readHistory = async (api) => {
+  const raw = await api.storage.getJson(HISTORY_KEY, []);
+  if (!Array.isArray(raw)) return [];
+  const normalized = raw.map(normalizeHistoryEntry).filter(Boolean).sort((a, b) => b.updatedAt - a.updatedAt);
+  const seen = /* @__PURE__ */ new Set();
+  const list = [];
+  for (const entry of normalized) {
+    if (seen.has(entry.seriesId)) continue;
+    seen.add(entry.seriesId);
+    list.push(entry);
+  }
+  return list;
+};
+var upsertHistory = async (api, input) => {
+  const entry = normalizeHistoryEntry({ ...input, updatedAt: Date.now() });
+  if (!entry) throw new Error("无效的观看记录");
+  const list = await readHistory(api);
+  const next = [entry, ...list.filter((item) => item.seriesId !== entry.seriesId)].slice(0, HISTORY_LIMIT);
+  await api.storage.setJson(HISTORY_KEY, next);
+  return next;
+};
+var removeHistory = async (api, seriesId) => {
+  const list = await readHistory(api);
+  const next = list.filter((item) => item.seriesId !== seriesId);
+  await api.storage.setJson(HISTORY_KEY, next);
+  return next;
+};
+var clearHistory = async (api) => {
+  await api.storage.setJson(HISTORY_KEY, []);
+};
+var readPrefs = async (api) => {
+  const raw = await api.storage.getJson(PREFS_KEY, null);
+  const quality = raw && QUALITY_OPTIONS.includes(raw.quality) ? raw.quality : DEFAULT_QUALITY;
+  return { quality };
+};
+var writePrefs = async (api, prefs) => {
+  const quality = prefs && QUALITY_OPTIONS.includes(prefs.quality) ? prefs.quality : DEFAULT_QUALITY;
+  await api.storage.setJson(PREFS_KEY, { quality });
+  return { quality };
+};
+var readRecentSearches = async (api) => {
+  const raw = await api.storage.getJson(RECENT_SEARCH_KEY, []);
+  if (!Array.isArray(raw)) return [];
+  const seen = /* @__PURE__ */ new Set();
+  const list = [];
+  for (const item of raw) {
+    const text = typeof item === "string" ? item.trim() : "";
+    if (!text || seen.has(text)) continue;
+    seen.add(text);
+    list.push(text);
+    if (list.length >= RECENT_SEARCH_LIMIT) break;
+  }
+  return list;
+};
+var pushRecentSearch = async (api, query) => {
+  const text = String(query || "").trim().slice(0, 80);
+  if (!text) return readRecentSearches(api);
+  const list = await readRecentSearches(api);
+  const next = [text, ...list.filter((item) => item !== text)].slice(0, RECENT_SEARCH_LIMIT);
+  await api.storage.setJson(RECENT_SEARCH_KEY, next);
+  return next;
+};
+var clearRecentSearches = async (api) => {
+  await api.storage.setJson(RECENT_SEARCH_KEY, []);
+};
+
+// src/panel/ui/common.js
+function Icon({ ctx, name, size = 14 }) {
+  const api = ctx?.api;
+  if (!api?.ui || typeof api.ui.icon !== "function") return null;
+  let Component = null;
+  try {
+    Component = api.ui.icon(name);
+  } catch {
+    Component = null;
+  }
+  if (!Component) return null;
+  return h(Component, { size, strokeWidth: 1.8, "aria-hidden": "true" });
+}
+function Spinner({ label }) {
+  return h("span", {
+    className: "hg-spinner",
+    role: "status",
+    "aria-label": label || "loading"
+  });
+}
+function Cover({ ctx, path, className }) {
+  const React = getReact();
+  const [src, setSrc] = React.useState(null);
+  const [failed, setFailed] = React.useState(!path);
+  React.useEffect(() => {
+    let alive = true;
+    setSrc(null);
+    setFailed(!path);
+    if (!path || !ctx?.cover) return void 0;
+    ctx.cover.load(path).then((url) => {
+      if (!alive) return;
+      if (url) setSrc(url);
+      else setFailed(true);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [path, ctx?.cover]);
+  return h(
+    "div",
+    { className: `hg-cover${className ? ` ${className}` : ""}${src && !failed ? " has-image" : ""}` },
+    src && !failed ? h("img", {
+      src,
+      alt: "",
+      loading: "lazy",
+      draggable: false,
+      onError: () => setFailed(true)
+    }) : h("div", { className: "hg-cover-fallback" }, h(Icon, { ctx, name: "Film", size: 18 }))
+  );
+}
+function describeError(t, error) {
+  const code = String(error?.code || "UNKNOWN");
+  const retrySeconds = Number.isFinite(error?.retryAfterMs) && error.retryAfterMs > 0 ? Math.ceil(error.retryAfterMs / 1e3) : 0;
+  let title = t("error.title");
+  let message = "";
+  switch (code) {
+    case "BACKGROUND_UNAVAILABLE":
+    case "NET_UNAVAILABLE":
+      message = t("error.backgroundUnavailable");
+      break;
+    case "RATE_LIMITED":
+      message = t("error.rateLimited");
+      break;
+    case "ANONYMOUS_LIMITED":
+      message = t("error.rateLimitedAnonymous");
+      break;
+    case "TIMEOUT":
+      message = t("error.timeout");
+      break;
+    case "TRANSPORT":
+      message = t("error.transport");
+      break;
+    case "CONTENT_UNAVAILABLE":
+    case "ALBUM_UNAVAILABLE":
+    case "NOT_PROTECTED":
+    case "DRM_PROTECTED":
+      message = t("error.contentUnavailable");
+      break;
+    case "NOT_FOUND":
+      message = t("error.notFound");
+      break;
+    case "PROTOCOL":
+      message = t("error.protocol");
+      break;
+    case "INVALID_PARAM":
+    case "PARAM_INVALID":
+    case "INVALID_OPTIONS":
+      message = t("error.invalidParam");
+      break;
+    default:
+      message = error?.message || t("error.unknown");
+  }
+  return {
+    code,
+    title,
+    message,
+    rateLimited: code === "RATE_LIMITED" || code === "ANONYMOUS_LIMITED",
+    retrySeconds,
+    hint: code === "BACKGROUND_UNAVAILABLE" ? t("error.backgroundHint") : "",
+    raw: error?.message || ""
+  };
+}
+function ErrorNotice({ ctx, error, onRetry, compact }) {
+  const React = getReact();
+  const t = ctx.t;
+  const info = describeError(t, error);
+  const [remaining, setRemaining] = React.useState(info.retrySeconds);
+  React.useEffect(() => {
+    setRemaining(info.retrySeconds);
+    if (!info.retrySeconds) return void 0;
+    const timer = setInterval(() => {
+      setRemaining((value) => {
+        if (value <= 1) {
+          clearInterval(timer);
+          return 0;
+        }
+        return value - 1;
+      });
+    }, 1e3);
+    return () => clearInterval(timer);
+  }, [error, info.retrySeconds]);
+  return h(
+    "div",
+    { className: `hg-state hg-state-error${compact ? " is-compact" : ""}` },
+    h("div", { className: "hg-state-icon" }, h(Icon, { ctx, name: "TriangleAlert", size: 18 })),
+    h(
+      "div",
+      { className: "hg-state-body" },
+      h("div", { className: "hg-state-title" }, info.title),
+      h("div", { className: "hg-state-text" }, info.message),
+      info.hint ? h("div", { className: "hg-state-hint" }, info.hint) : null,
+      info.rateLimited && remaining > 0 ? h("div", { className: "hg-state-wait" }, t("error.rateLimitedWait", { seconds: remaining })) : null,
+      onRetry ? h(
+        "button",
+        {
+          type: "button",
+          className: "hg-btn",
+          disabled: remaining > 0,
+          onClick: onRetry
+        },
+        t("action.retry")
+      ) : null
+    )
+  );
+}
+function EmptyState({ ctx, icon: icon2 = "Inbox", title, hint, action }) {
+  return h(
+    "div",
+    { className: "hg-state hg-state-empty" },
+    h("div", { className: "hg-state-icon" }, h(Icon, { ctx, name: icon2, size: 22 })),
+    h(
+      "div",
+      { className: "hg-state-body" },
+      h("div", { className: "hg-state-title" }, title),
+      hint ? h("div", { className: "hg-state-text" }, hint) : null,
+      action || null
+    )
+  );
+}
+function SkeletonCards({ count = 4 }) {
+  return h(
+    "div",
+    { className: "hg-grid", "aria-hidden": "true" },
+    Array.from(
+      { length: count },
+      (_, index) => h(
+        "div",
+        { key: `skeleton-${index}`, className: "hg-card hg-card-skeleton" },
+        h("div", { className: "hg-skeleton hg-skeleton-cover" }),
+        h("div", { className: "hg-skeleton hg-skeleton-line" }),
+        h("div", { className: "hg-skeleton hg-skeleton-line short" })
+      )
+    )
+  );
+}
+var pad2 = (value) => String(value).padStart(2, "0");
+function formatDuration(ms) {
+  const totalSeconds = Math.max(0, Math.floor(Number(ms) / 1e3) || 0);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor(totalSeconds % 3600 / 60);
+  const seconds = totalSeconds % 60;
+  return hours > 0 ? `${hours}:${pad2(minutes)}:${pad2(seconds)}` : `${pad2(minutes)}:${pad2(seconds)}`;
+}
+function formatUptime(ms) {
+  const totalSeconds = Math.max(0, Math.floor(Number(ms) / 1e3) || 0);
+  const days = Math.floor(totalSeconds / 86400);
+  const hours = Math.floor(totalSeconds % 86400 / 3600);
+  const minutes = Math.floor(totalSeconds % 3600 / 60);
+  const seconds = totalSeconds % 60;
+  const clock = `${pad2(hours)}:${pad2(minutes)}:${pad2(seconds)}`;
+  return days > 0 ? `${days}d ${clock}` : clock;
+}
+function formatDateTime(value, locale) {
+  const timestamp = Number(value);
+  if (!Number.isFinite(timestamp) || timestamp <= 0) return "";
+  const date = new Date(timestamp);
+  try {
+    return new Intl.DateTimeFormat(locale || void 0, {
+      month: "numeric",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit"
+    }).format(date);
+  } catch {
+    return date.toLocaleString();
+  }
+}
+
+// src/panel/pages/discover.js
+var dedupeById = (list) => {
+  const seen = /* @__PURE__ */ new Set();
+  const result = [];
+  for (const item of list) {
+    if (!item || typeof item !== "object" || !item.id || seen.has(item.id)) continue;
+    seen.add(item.id);
+    result.push(item);
+  }
+  return result;
+};
+function DiscoverPage({ ctx, active }) {
+  const React = getReact();
+  const t = ctx.t;
+  const rpc = ctx.rpc;
+  const [items, setItems] = React.useState([]);
+  const [hasMore, setHasMore] = React.useState(false);
+  const [status, setStatus] = React.useState("idle");
+  const [error, setError] = React.useState(null);
+  const [loaded, setLoaded] = React.useState(false);
+  const [pull, setPull] = React.useState(0);
+  const scrollRef = React.useRef(null);
+  const sentinelRef = React.useRef(null);
+  const itemsRef = React.useRef([]);
+  const cursorRef = React.useRef(null);
+  const hasMoreRef = React.useRef(false);
+  const busyRef = React.useRef(false);
+  const seqRef = React.useRef(0);
+  const loadedRef = React.useRef(false);
+  const suppressUntilRef = React.useRef(0);
+  const pullRef = React.useRef({ active: false, startY: 0, moved: false, value: 0 });
+  React.useEffect(() => {
+    itemsRef.current = items;
+  }, [items]);
+  const loadFirst = React.useCallback(
+    async (refresh) => {
+      const seq = seqRef.current + 1;
+      seqRef.current = seq;
+      busyRef.current = true;
+      setStatus(refresh ? "refreshing" : "loading");
+      setError(null);
+      try {
+        const page = await rpc.discover();
+        if (seq !== seqRef.current) return;
+        const list = dedupeById(Array.isArray(page?.items) ? page.items : []);
+        setItems(list);
+        cursorRef.current = page?.cursor ?? null;
+        hasMoreRef.current = page?.hasMore === true;
+        setHasMore(hasMoreRef.current);
+        setStatus("idle");
+        setLoaded(true);
+        loadedRef.current = true;
+        if (refresh && scrollRef.current && typeof scrollRef.current.scrollTo === "function") {
+          scrollRef.current.scrollTo({ top: 0 });
+        }
+      } catch (loadError) {
+        if (seq !== seqRef.current) return;
+        setError(loadError);
+        setStatus("error");
+      } finally {
+        if (seq === seqRef.current) busyRef.current = false;
+      }
+    },
+    [rpc]
+  );
+  const loadMore = React.useCallback(async () => {
+    if (busyRef.current || !hasMoreRef.current || !cursorRef.current) return;
+    const seq = seqRef.current;
+    busyRef.current = true;
+    setStatus("more");
+    setError(null);
+    try {
+      const page = await rpc.discover(cursorRef.current);
+      if (seq !== seqRef.current) return;
+      const incoming = dedupeById(Array.isArray(page?.items) ? page.items : []);
+      const merged = dedupeById([...itemsRef.current, ...incoming]);
+      setItems(merged);
+      cursorRef.current = page?.cursor ?? null;
+      hasMoreRef.current = page?.hasMore === true;
+      setHasMore(hasMoreRef.current);
+      setStatus("idle");
+    } catch (loadError) {
+      if (seq !== seqRef.current) return;
+      setError(loadError);
+      setStatus("idle");
+    } finally {
+      if (seq === seqRef.current) busyRef.current = false;
+    }
+  }, [rpc]);
+  React.useEffect(() => {
+    if (!active) return;
+    if (loadedRef.current || busyRef.current) return;
+    void loadFirst(false);
+  }, [active, loadFirst]);
+  React.useEffect(() => {
+    if (!active) return void 0;
+    const sentinel = sentinelRef.current;
+    const root = scrollRef.current;
+    if (!sentinel || !root) return void 0;
+    if (typeof IntersectionObserver === "function") {
+      const observer = new IntersectionObserver(
+        (entries) => {
+          if (entries.some((entry) => entry.isIntersecting)) void loadMore();
+        },
+        { root, rootMargin: "240px 0px" }
+      );
+      observer.observe(sentinel);
+      return () => observer.disconnect();
+    }
+    const onScroll = () => {
+      if (root.scrollHeight - root.scrollTop - root.clientHeight < 240) void loadMore();
+    };
+    root.addEventListener("scroll", onScroll, { passive: true });
+    return () => root.removeEventListener("scroll", onScroll);
+  }, [active, loadMore]);
+  const endPull = () => {
+    const state = pullRef.current;
+    if (!state.active) return;
+    state.active = false;
+    const shouldRefresh = state.value >= 48;
+    const moved = state.moved;
+    state.value = 0;
+    setPull(0);
+    if (moved) suppressUntilRef.current = Date.now() + 250;
+    if (shouldRefresh && !busyRef.current) void loadFirst(true);
+  };
+  const onPointerDown = (event) => {
+    if (busyRef.current) return;
+    const root = scrollRef.current;
+    if (!root || root.scrollTop > 0) return;
+    if (event.pointerType === "mouse" && event.button !== 0) return;
+    pullRef.current = { active: true, startY: event.clientY, moved: false, value: 0 };
+  };
+  const onPointerMove = (event) => {
+    const state = pullRef.current;
+    if (!state.active) return;
+    const root = scrollRef.current;
+    const delta = event.clientY - state.startY;
+    if (!root || root.scrollTop > 0 || delta <= 0) {
+      if (state.value !== 0) {
+        state.value = 0;
+        setPull(0);
+      }
+      if (delta < -6) state.active = false;
+      return;
+    }
+    if (delta > 8) state.moved = true;
+    const value = Math.min(72, delta * 0.55);
+    state.value = value;
+    setPull(value);
+  };
+  const openItem = (item) => {
+    if (Date.now() < suppressUntilRef.current) return;
+    ctx.openSeries(item);
+  };
+  const busy = status === "loading" || status === "refreshing" || status === "more";
+  const showEmpty = loaded && !busy && items.length === 0 && !error;
+  return h(
+    "div",
+    { className: "hg-page hg-discover" },
+    h(
+      "div",
+      { className: "hg-page-head" },
+      h("div", { className: "hg-page-title" }, t("discover.heading")),
+      h(
+        "button",
+        {
+          type: "button",
+          className: `hg-iconbtn${busy ? " is-busy" : ""}`,
+          title: t("action.refresh"),
+          "aria-label": t("action.refresh"),
+          disabled: busy,
+          onClick: () => void loadFirst(true)
+        },
+        h(Icon, { ctx, name: "RefreshCw", size: 15 })
+      )
+    ),
+    h(
+      "div",
+      {
+        className: "hg-scroll hg-pull",
+        ref: scrollRef,
+        onPointerDown,
+        onPointerMove,
+        onPointerUp: endPull,
+        onPointerCancel: endPull,
+        onPointerLeave: endPull
+      },
+      h(
+        "div",
+        { className: "hg-pull-bar", style: { height: `${pull}px` } },
+        pull > 0 ? h(
+          "span",
+          { className: "hg-pull-text" },
+          pull >= 48 ? t("discover.release") : t("discover.pull")
+        ) : null
+      ),
+      status === "refreshing" ? h(
+        "div",
+        { className: "hg-loading-line" },
+        h(Spinner, { label: t("discover.refreshing") }),
+        h("span", null, t("discover.refreshing"))
+      ) : null,
+      error && items.length > 0 ? h(ErrorNotice, { ctx, error, compact: true, onRetry: () => void loadFirst(true) }) : null,
+      items.length === 0 && (status === "loading" || status === "refreshing") ? h(SkeletonCards, { count: 4 }) : null,
+      items.length === 0 && status === "error" && error ? h(ErrorNotice, { ctx, error, onRetry: () => void loadFirst(false) }) : null,
+      showEmpty ? h(EmptyState, {
+        ctx,
+        icon: "Popcorn",
+        title: t("discover.empty"),
+        hint: t("discover.emptyHint"),
+        action: h(
+          "button",
+          { type: "button", className: "hg-btn", onClick: () => void loadFirst(true) },
+          t("action.refresh")
+        )
+      }) : null,
+      items.length > 0 ? h(
+        "div",
+        { className: "hg-grid" },
+        items.map(
+          (item) => h(
+            "button",
+            {
+              key: item.id,
+              type: "button",
+              className: "hg-card",
+              title: item.title || t("unit.untitled"),
+              onClick: () => openItem(item)
+            },
+            h(
+              "div",
+              { className: "hg-card-cover" },
+              h(Cover, { ctx, path: item.cover }),
+              item.count != null ? h("span", { className: "hg-card-badge" }, t("unit.episodes", { count: item.count })) : null
+            ),
+            h("div", { className: "hg-card-title" }, item.title || t("unit.untitled"))
+          )
+        )
+      ) : null,
+      items.length > 0 ? h(
+        "div",
+        { className: "hg-list-foot", ref: sentinelRef },
+        status === "more" ? h(Spinner, { label: t("discover.loadingMore") }) : hasMore ? h("span", null, t("action.loadMore")) : h("span", null, t("discover.end"))
+      ) : null
+    )
+  );
+}
+
+// src/panel/pages/search.js
+var DEBOUNCE_MS = 300;
+var dedupeById2 = (list) => {
+  const seen = /* @__PURE__ */ new Set();
+  const result = [];
+  for (const item of list) {
+    if (!item || typeof item !== "object" || !item.id || seen.has(item.id)) continue;
+    seen.add(item.id);
+    result.push(item);
+  }
+  return result;
+};
+function SearchPage({ ctx, active }) {
+  const React = getReact();
+  const t = ctx.t;
+  const rpc = ctx.rpc;
+  const api = ctx.api;
+  const [text, setText] = React.useState("");
+  const [submitted, setSubmitted] = React.useState("");
+  const [items, setItems] = React.useState([]);
+  const [hasMore, setHasMore] = React.useState(false);
+  const [status, setStatus] = React.useState("idle");
+  const [error, setError] = React.useState(null);
+  const [recent, setRecent] = React.useState([]);
+  const inputRef = React.useRef(null);
+  const seqRef = React.useRef(0);
+  const submittedRef = React.useRef("");
+  const cursorRef = React.useRef(null);
+  const hasMoreRef = React.useRef(false);
+  const busyRef = React.useRef(false);
+  const debounceRef = React.useRef(null);
+  React.useEffect(() => {
+    let alive = true;
+    readRecentSearches(api).then((list) => {
+      if (alive) setRecent(list);
+    }).catch(() => {
+    });
+    return () => {
+      alive = false;
+    };
+  }, [api]);
+  const runSearch = React.useCallback(
+    async (query, append) => {
+      const q = String(query || "").trim().slice(0, 80);
+      if (!q) return;
+      if (append && (!hasMoreRef.current || !cursorRef.current)) return;
+      busyRef.current = true;
+      const seq = seqRef.current + 1;
+      seqRef.current = seq;
+      if (!append) {
+        submittedRef.current = q;
+        setSubmitted(q);
+        cursorRef.current = null;
+        hasMoreRef.current = false;
+        setItems([]);
+        setHasMore(false);
+      }
+      setStatus(append ? "more" : "loading");
+      setError(null);
+      try {
+        const page = await rpc.search(q, append ? cursorRef.current : null);
+        if (seq !== seqRef.current) return;
+        const list = dedupeById2(Array.isArray(page?.items) ? page.items : []);
+        setItems((prev) => append ? dedupeById2([...prev, ...list]) : list);
+        cursorRef.current = page?.cursor ?? null;
+        hasMoreRef.current = page?.hasMore === true;
+        setHasMore(hasMoreRef.current);
+        setStatus("idle");
+        if (!append) {
+          pushRecentSearch(api, q).then((next) => setRecent(next)).catch(() => {
+          });
+        }
+      } catch (searchError) {
+        if (seq !== seqRef.current) return;
+        setError(searchError);
+        setStatus("error");
+      } finally {
+        if (seq === seqRef.current) busyRef.current = false;
+      }
+    },
+    [api, rpc]
+  );
+  React.useEffect(() => {
+    const q = text.trim();
+    if (!q) {
+      seqRef.current += 1;
+      submittedRef.current = "";
+      setSubmitted("");
+      setItems([]);
+      setHasMore(false);
+      setError(null);
+      setStatus("idle");
+      cursorRef.current = null;
+      hasMoreRef.current = false;
+      return void 0;
+    }
+    if (q === submittedRef.current) return void 0;
+    const timer = setTimeout(() => {
+      debounceRef.current = null;
+      void runSearch(q, false);
+    }, DEBOUNCE_MS);
+    debounceRef.current = timer;
+    return () => {
+      clearTimeout(timer);
+      if (debounceRef.current === timer) debounceRef.current = null;
+    };
+  }, [text, runSearch]);
+  const submitNow = () => {
+    if (debounceRef.current) {
+      clearTimeout(debounceRef.current);
+      debounceRef.current = null;
+    }
+    const q = text.trim();
+    if (q) void runSearch(q, false);
+  };
+  const applyRecent = (query) => {
+    setText(query);
+    if (debounceRef.current) {
+      clearTimeout(debounceRef.current);
+      debounceRef.current = null;
+    }
+    void runSearch(query, false);
+    inputRef.current?.focus?.();
+  };
+  const clearRecent = () => {
+    clearRecentSearches(api).then(() => setRecent([])).catch(() => setRecent([]));
+  };
+  const busy = status === "loading" || status === "more";
+  const showEmpty = status === "idle" && !error && Boolean(submitted) && items.length === 0;
+  return h(
+    "div",
+    { className: "hg-page hg-search" },
+    h("div", { className: "hg-page-head" }, h("div", { className: "hg-page-title" }, t("tab.search"))),
+    h(
+      "div",
+      { className: "hg-searchbar" },
+      h("span", { className: "hg-searchbar-icon" }, h(Icon, { ctx, name: "Search", size: 15 })),
+      h("input", {
+        ref: inputRef,
+        className: "hg-input",
+        type: "search",
+        value: text,
+        placeholder: t("search.placeholder"),
+        maxLength: 80,
+        spellCheck: false,
+        onChange: (event) => setText(event.target.value),
+        onKeyDown: (event) => {
+          if (event.key === "Enter") {
+            event.preventDefault();
+            submitNow();
+          }
+          if (event.key === "Escape") setText("");
+        }
+      }),
+      text ? h(
+        "button",
+        {
+          type: "button",
+          className: "hg-iconbtn",
+          title: t("search.clearInput"),
+          "aria-label": t("search.clearInput"),
+          onClick: () => {
+            setText("");
+            inputRef.current?.focus?.();
+          }
+        },
+        h(Icon, { ctx, name: "X", size: 14 })
+      ) : null
+    ),
+    h(
+      "div",
+      { className: "hg-scroll" },
+      !submitted ? h(
+        "div",
+        { className: "hg-recent" },
+        h(
+          "div",
+          { className: "hg-sec-head" },
+          h("span", null, t("search.recent")),
+          recent.length > 0 ? h(
+            "button",
+            { type: "button", className: "hg-linkbtn", onClick: clearRecent },
+            t("search.clearRecent")
+          ) : null
+        ),
+        recent.length > 0 ? h(
+          "div",
+          { className: "hg-chips" },
+          recent.map(
+            (query) => h(
+              "button",
+              {
+                key: query,
+                type: "button",
+                className: "hg-chip",
+                onClick: () => applyRecent(query)
+              },
+              query
+            )
+          )
+        ) : h("div", { className: "hg-muted" }, t("search.noRecent")),
+        h("div", { className: "hg-hint" }, t("search.hint"))
+      ) : null,
+      submitted && status === "loading" ? h(
+        "div",
+        { className: "hg-loading-line" },
+        h(Spinner, { label: t("search.searching") }),
+        h("span", null, t("search.searching"))
+      ) : null,
+      error && items.length > 0 ? h(ErrorNotice, { ctx, error, compact: true, onRetry: () => void runSearch(submittedRef.current, false) }) : null,
+      error && items.length === 0 ? h(ErrorNotice, { ctx, error, onRetry: () => void runSearch(submittedRef.current, false) }) : null,
+      showEmpty ? h(EmptyState, {
+        ctx,
+        icon: "SearchX",
+        title: t("search.empty"),
+        hint: t("search.emptyHint")
+      }) : null,
+      items.length > 0 ? h("div", { className: "hg-result-count" }, t("search.results", { count: items.length })) : null,
+      items.length > 0 ? h(
+        "div",
+        { className: "hg-results" },
+        items.map(
+          (item) => h(
+            "button",
+            {
+              key: item.id,
+              type: "button",
+              className: "hg-result",
+              onClick: () => ctx.openSeries(item)
+            },
+            h(Cover, { ctx, path: item.cover, className: "hg-result-cover" }),
+            h(
+              "div",
+              { className: "hg-result-main" },
+              h("div", { className: "hg-result-title" }, item.title || t("unit.untitled")),
+              h(
+                "div",
+                { className: "hg-result-meta" },
+                item.count != null ? t("unit.episodes", { count: item.count }) : ""
+              ),
+              item.description ? h("div", { className: "hg-result-desc" }, item.description) : null
+            )
+          )
+        )
+      ) : null,
+      items.length > 0 && hasMore ? h(
+        "button",
+        {
+          type: "button",
+          className: "hg-btn hg-loadmore",
+          disabled: status === "more",
+          onClick: () => void runSearch(submittedRef.current, true)
+        },
+        status === "more" ? h(Spinner, { label: t("search.loadingMore") }) : null,
+        status === "more" ? t("search.loadingMore") : t("search.loadMore")
+      ) : null
+    )
+  );
+}
+
+// src/panel/player/util.js
+var clamp = (value, min, max) => {
+  const number = Number.isFinite(Number(value)) ? Number(value) : 0;
+  if (number < min) return min;
+  if (number > max) return max;
+  return number;
+};
+var decodeBase64 = (value) => {
+  const text = typeof value === "string" ? value.replace(/\s+/g, "") : "";
+  if (!text) return new Uint8Array(0);
+  const binary = atob(text);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+  return bytes;
+};
+var formatClock = (ms) => formatDuration(Number.isFinite(Number(ms)) ? Number(ms) : 0);
+var safeFileName = (name) => {
+  const text = String(name || "").replace(/[\\/:*?"<>|\u0000-\u001f]/g, " ").replace(/\s+/g, " ").trim();
+  return (text || "video").slice(0, 80);
+};
+var copyText = async (text) => {
+  const value = String(text || "");
+  if (!value) return false;
+  try {
+    if (navigator?.clipboard?.writeText) {
+      await navigator.clipboard.writeText(value);
+      return true;
+    }
+  } catch {
+  }
+  try {
+    const area = document.createElement("textarea");
+    area.value = value;
+    area.setAttribute("readonly", "");
+    area.style.position = "fixed";
+    area.style.top = "-1000px";
+    area.style.opacity = "0";
+    document.body.appendChild(area);
+    area.select();
+    const ok = typeof document.execCommand === "function" ? document.execCommand("copy") : false;
+    area.remove();
+    return ok;
+  } catch {
+    return false;
+  }
+};
+var codecLabel = (codec) => {
+  const text = String(codec || "").toLowerCase();
+  if (/hvc1|hev1|hevc/.test(text)) return "HEVC";
+  if (/avc1|avc3|h264/.test(text)) return "H.264";
+  if (/av01|av1/.test(text)) return "AV1";
+  if (/vp09|vp9/.test(text)) return "VP9";
+  const first = String(codec || "").split(",")[0].trim();
+  return first || "unknown";
+};
+
+// src/panel/player/engine.js
+var MSE_STATE = Object.freeze({
+  IDLE: "idle",
+  PROBING: "probing",
+  OPENING: "opening",
+  BUFFERING: "buffering",
+  READY: "ready",
+  RECOVERING: "recovering",
+  DEGRADED: "degraded",
+  ERROR: "error",
+  ENDED: "ended",
+  DISPOSED: "disposed"
+});
+var PREFETCH_AHEAD = 3;
+var HIGH_WATER_SECONDS = 12;
+var MAX_FETCH_ATTEMPTS = 3;
+var MAX_REBUILDS = 1;
+var SOURCE_OPEN_TIMEOUT_MS = 1e4;
+var APPEND_TIMEOUT_MS = 2e4;
+var NON_RETRYABLE = /* @__PURE__ */ new Set(["INVALID_PARAM", "PARAM_INVALID", "NOT_FOUND"]);
+var getMediaSourceCtor = () => {
+  if (typeof window === "undefined") return null;
+  return window.ManagedMediaSource || window.MediaSource || null;
+};
+var checkSupport = (mime) => {
+  const Ctor = getMediaSourceCtor();
+  if (!Ctor || typeof Ctor.isTypeSupported !== "function") return { ok: false, reason: "no-mse" };
+  try {
+    return Ctor.isTypeSupported(mime) ? { ok: true, reason: "" } : { ok: false, reason: "codec" };
+  } catch {
+    return { ok: false, reason: "codec" };
+  }
+};
+var buildMimeCandidates = (info) => {
+  const mime = info.mime || "video/mp4";
+  const codec = String(info.codec || "").trim();
+  const list = [];
+  const push = (value) => {
+    if (value && !list.includes(value)) list.push(value);
+  };
+  if (codec) push(`${mime}; codecs="${codec}"`);
+  const parts = codec.split(",").map((item) => item.trim()).filter(Boolean);
+  const video = parts.find((item) => /^(hvc1|hev1|avc1|av01|vp0?9)/i.test(item)) || "";
+  const audio = parts.filter((item) => item !== video);
+  const audioSuffix = audio.length ? `,${audio.join(",")}` : "";
+  if (/^(hvc1|hev1)/i.test(video)) {
+    push(`${mime}; codecs="hvc1${audioSuffix}"`);
+    push(`${mime}; codecs="hvc1.1.6.L120.B0${audioSuffix}"`);
+    push(`${mime}; codecs="hvc1.1.6.L93.B0${audioSuffix}"`);
+    push(`${mime}; codecs="hev1.1.6.L93.B0${audioSuffix}"`);
+  }
+  if (video) push(`${mime}; codecs="${video}${audioSuffix}"`);
+  if (video && audioSuffix) push(`${mime}; codecs="${video}"`);
+  return list;
+};
+var pickSupportedMime = (info) => {
+  const Ctor = getMediaSourceCtor();
+  if (!Ctor || typeof Ctor.isTypeSupported !== "function") {
+    return { ok: false, reason: "no-mse", mime: "", checked: [] };
+  }
+  const candidates = buildMimeCandidates(info);
+  const checked = candidates.map((mime) => ({ mime, ok: checkSupport(mime).ok }));
+  const hit = checked.find((item) => item.ok);
+  return hit ? { ok: true, reason: "", mime: hit.mime, checked } : { ok: false, reason: "codec", mime: "", checked };
+};
+var normalizeInfo = (raw) => ({
+  codec: typeof raw?.codec === "string" ? raw.codec : "",
+  durationMs: Number.isFinite(Number(raw?.durationMs)) ? Number(raw.durationMs) : 0,
+  segmentCount: Math.max(0, Math.floor(Number(raw?.segmentCount) || 0)),
+  timescale: Number.isFinite(Number(raw?.timescale)) ? Number(raw.timescale) : 0,
+  mime: typeof raw?.mime === "string" && raw.mime ? raw.mime : "video/mp4",
+  definition: typeof raw?.definition === "string" ? raw.definition : "",
+  bytes: Number.isFinite(Number(raw?.bytes)) ? Number(raw.bytes) : 0
+});
+function createMseEngine({ video, getRpc, log = () => {
+}, onState = () => {
+}, onError = () => {
+} }) {
+  if (!video) throw new TypeError("createMseEngine 需要 video 元素");
+  let disposed = false;
+  let session = null;
+  let counter = 0;
+  const snapshotOf = (target) => {
+    if (!target) return { state: disposed ? MSE_STATE.DISPOSED : MSE_STATE.IDLE, quality: "", info: null };
+    return {
+      state: target.state,
+      reason: target.reason,
+      quality: target.quality,
+      info: target.info,
+      mime: target.mime,
+      codecLabel: target.info ? codecLabel(target.info.codec) : "",
+      appended: target.appended,
+      segmentCount: target.info?.segmentCount ?? 0,
+      appendedBytes: target.appendedBytes,
+      error: target.error || null,
+      degradedReason: target.state === MSE_STATE.DEGRADED ? target.degradeReason : "",
+      probe: target.probe || [],
+      episodeId: target.episodeId,
+      mode: target.mode || "mse",
+      transcode: target.transcode || null,
+      transcodeProgress: target.transcodeProgress ?? 0,
+      videoError: target.videoError || null,
+      canPlay: target.canPlay || "",
+      retryInfo: target.retryInfo || null,
+      resumeAppliedMs: target.resumeAppliedMs,
+      resumeClamped: target.resumeClamped,
+      rebuilds: target.rebuilds
+    };
+  };
+  const emit = (target) => {
+    try {
+      onState(snapshotOf(target));
+    } catch (error) {
+      log("[player] onState 回调异常", String(error?.message || error));
+    }
+  };
+  const isCurrent = (target) => !disposed && !!target && session === target;
+  const isLive = (target) => isCurrent(target) && target.active && !target.halted;
+  const sleep = (ms, target) => new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      target.timers.delete(timer);
+      resolve();
+    }, ms);
+    target.timers.add(timer);
+  });
+  const clearTimers = (target) => {
+    for (const timer of target.timers) {
+      clearTimeout(timer);
+      clearInterval(timer);
+    }
+    target.timers.clear();
+  };
+  const durationSeconds = () => {
+    const value = Number(video.duration);
+    if (Number.isFinite(value) && value > 0) return value;
+    const fromInfo = (session?.info?.durationMs || 0) / 1e3;
+    return Number.isFinite(fromInfo) && fromInfo > 0 ? fromInfo : 0;
+  };
+  const bufferedAheadSeconds = () => {
+    const ranges = video.buffered;
+    if (!ranges || !ranges.length) return 0;
+    const time = Number(video.currentTime) || 0;
+    for (let index = 0; index < ranges.length; index += 1) {
+      const start = ranges.start(index);
+      const end = ranges.end(index);
+      if (time >= start - 0.35 && time <= end + 0.35) return Math.max(0, end - time);
+    }
+    return 0;
+  };
+  const createSession = (options) => ({
+    token: counter += 1,
+    episodeId: options.episodeId,
+    quality: options.quality,
+    reason: options.reason || "initial",
+    resumeMs: Math.max(0, Number(options.resumeMs) || 0),
+    autoplay: options.autoplay !== false,
+    info: null,
+    mime: "",
+    state: MSE_STATE.IDLE,
+    mediaSource: null,
+    sb: null,
+    objectUrl: "",
+    nextFetch: 1,
+    nextAppend: 1,
+    fetching: false,
+    appending: false,
+    store: /* @__PURE__ */ new Map(),
+    appended: 0,
+    appendedBytes: 0,
+    initAppended: false,
+    endedStream: false,
+    active: true,
+    halted: false,
+    tearingDown: false,
+    error: null,
+    degradeReason: "",
+    retryInfo: null,
+    resumeAppliedMs: 0,
+    resumeClamped: false,
+    rebuilds: Math.max(0, Number(options.rebuilds) || 0),
+    timers: /* @__PURE__ */ new Set(),
+    cleanups: []
+  });
+  const clearSourceBuffer = (target) => {
+    const sb = target.sb;
+    target.sb = null;
+    if (!sb) return;
+    try {
+      sb.removeEventListener("updateend", target.onUpdateEnd);
+      sb.removeEventListener("error", target.onSbError);
+    } catch {
+    }
+  };
+  const teardown = (target) => {
+    if (!target) return;
+    target.tearingDown = true;
+    target.active = false;
+    target.halted = true;
+    clearTimers(target);
+    for (const cleanup of target.cleanups) {
+      try {
+        cleanup();
+      } catch {
+      }
+    }
+    target.cleanups = [];
+    clearSourceBuffer(target);
+    const ms = target.mediaSource;
+    target.mediaSource = null;
+    try {
+      video.pause();
+    } catch {
+    }
+    if (target.objectUrl) {
+      const url = target.objectUrl;
+      target.objectUrl = "";
+      try {
+        if (video.getAttribute("src") === url || video.src === url) {
+          video.removeAttribute("src");
+          if (typeof video.load === "function") video.load();
+        }
+      } catch {
+      }
+      setTimeout(() => {
+        try {
+          URL.revokeObjectURL(url);
+        } catch {
+        }
+      }, 0);
+    }
+    if (ms) {
+      try {
+        if (ms.readyState === "open") ms.endOfStream();
+      } catch {
+      }
+    }
+  };
+  const halt = (target, state, error, reason) => {
+    if (!isCurrent(target)) return;
+    target.state = state;
+    target.error = error || null;
+    if (reason) target.degradeReason = reason;
+    target.halted = true;
+    try {
+      video.pause();
+    } catch {
+    }
+    emit(target);
+    if (state === MSE_STATE.ERROR) {
+      try {
+        onError(target.error, snapshotOf(target));
+      } catch (callbackError) {
+        log("[player] onError 回调异常", String(callbackError?.message || callbackError));
+      }
+    }
+  };
+  const fail = (target, error) => {
+    const normalized = error instanceof Error ? error : new PanelError("PLAYER_ERROR", String(error || "播放失败"));
+    log(`[player] 播放失败：${normalized.code || ""} ${normalized.message || ""}`);
+    halt(target, MSE_STATE.ERROR, normalized, "");
+  };
+  const degrade = (target, reason) => {
+    log(`[player] 降级：${reason}`);
+    halt(target, MSE_STATE.DEGRADED, null, reason || "codec");
+  };
+  const appendBytes = (target, bytes) => new Promise((resolve, reject) => {
+    const sb = target.sb;
+    if (!sb) {
+      reject(new PanelError("PLAYER_ERROR", "SourceBuffer 已释放"));
+      return;
+    }
+    let settled = false;
+    let timer = 0;
+    const cleanup = () => {
+      sb.removeEventListener("updateend", onEnd);
+      sb.removeEventListener("error", onError2);
+      if (timer) {
+        clearTimeout(timer);
+        target.timers.delete(timer);
+        timer = 0;
+      }
+    };
+    const onEnd = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve();
+    };
+    const onError2 = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(new PanelError("MEDIA_APPEND_FAILED", "appendBuffer 失败"));
+    };
+    timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(new PanelError("MEDIA_APPEND_TIMEOUT", "appendBuffer 超时"));
+    }, APPEND_TIMEOUT_MS);
+    target.timers.add(timer);
+    sb.addEventListener("updateend", onEnd);
+    sb.addEventListener("error", onError2);
+    try {
+      sb.appendBuffer(bytes);
+    } catch (error) {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(error);
+    }
+  });
+  const evictOldBuffer = (target) => new Promise((resolve) => {
+    const sb = target.sb;
+    if (!sb || sb.updating) {
+      resolve();
+      return;
+    }
+    const end = Math.max(0, Math.min((Number(video.currentTime) || 0) - 1, durationSeconds() - 1));
+    if (!(end > 0)) {
+      resolve();
+      return;
+    }
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      sb.removeEventListener("updateend", finish);
+      clearTimeout(timer);
+      target.timers.delete(timer);
+      resolve();
+    };
+    const timer = setTimeout(finish, 5e3);
+    target.timers.add(timer);
+    sb.addEventListener("updateend", finish);
+    try {
+      sb.remove(0, end);
+    } catch {
+      finish();
+    }
+  });
+  const isQuotaError = (error) => String(error?.name || "").toLowerCase().includes("quota") || String(error?.code || "").toUpperCase() === "QUOTA_EXCEEDED";
+  const rebuild = async (target, reason) => {
+    if (!isCurrent(target)) return;
+    const episodeId = target.episodeId;
+    const quality = target.quality;
+    const timeMs = Math.max(0, Number(video.currentTime) * 1e3);
+    const autoplay = !video.paused && !video.ended;
+    const rebuilds = target.rebuilds + 1;
+    log(`[player] 重建 MSE（${reason}，第 ${rebuilds} 次）`);
+    await load({ episodeId, quality, resumeMs: timeMs, autoplay, rebuilds, reason: "rebuild" });
+  };
+  const finishStream = (target) => {
+    if (!isCurrent(target) || target.endedStream) return;
+    target.endedStream = true;
+    const ms = target.mediaSource;
+    try {
+      if (ms && ms.readyState === "open") ms.endOfStream();
+    } catch {
+    }
+    emit(target);
+  };
+  const appendLoop = async (target) => {
+    if (!isLive(target) || target.appending) return;
+    target.appending = true;
+    let progressed = false;
+    try {
+      const total = target.info?.segmentCount || 0;
+      while (isLive(target) && target.nextAppend <= total) {
+        const bytes = target.store.get(target.nextAppend);
+        if (!bytes) break;
+        await appendBytes(target, bytes);
+        if (!isLive(target)) return;
+        target.store.delete(target.nextAppend);
+        target.nextAppend += 1;
+        target.appended += 1;
+        target.appendedBytes += bytes.length;
+        target.retryInfo = null;
+        progressed = true;
+        if (target.state !== MSE_STATE.READY) target.state = MSE_STATE.READY;
+        emit(target);
+      }
+      if (isLive(target) && target.nextAppend > total && !target.endedStream) finishStream(target);
+    } catch (error) {
+      if (!isLive(target)) return;
+      if (isQuotaError(error)) {
+        await evictOldBuffer(target);
+        if (isLive(target)) {
+          try {
+            const bytes = target.store.get(target.nextAppend);
+            if (bytes) {
+              await appendBytes(target, bytes);
+              if (!isLive(target)) return;
+              target.store.delete(target.nextAppend);
+              target.nextAppend += 1;
+              target.appended += 1;
+              target.appendedBytes += bytes.length;
+              target.state = MSE_STATE.READY;
+              progressed = true;
+              emit(target);
+              return;
+            }
+          } catch (retryError) {
+            fail(target, retryError);
+            return;
+          }
+        }
+      }
+      if (target.rebuilds < MAX_REBUILDS) {
+        await rebuild(target, "append");
+        return;
+      }
+      fail(target, error);
+    } finally {
+      target.appending = false;
+      if (progressed && isLive(target)) pump(target);
+    }
+  };
+  const fetchSegment = async (target, seq) => {
+    let attempt = 1;
+    for (; ; ) {
+      if (!isLive(target)) throw new PanelError("ABORTED", "播放会话已结束");
+      try {
+        const payload = await getRpc().getStreamSegment(target.episodeId, target.quality, seq);
+        if (!isLive(target)) throw new PanelError("ABORTED", "播放会话已结束");
+        const bytes = decodeBase64(payload?.base64);
+        if (!bytes.length) throw new PanelError("PROTOCOL", `分段 ${seq} 内容为空`);
+        return bytes;
+      } catch (error) {
+        if (!isLive(target)) throw error;
+        const code = String(error?.code || "");
+        const retryable = !NON_RETRYABLE.has(code);
+        if (!retryable || attempt >= MAX_FETCH_ATTEMPTS) throw error;
+        target.retryInfo = { seq, attempt, code, message: String(error?.message || "") };
+        target.state = MSE_STATE.RECOVERING;
+        emit(target);
+        log(`[player] 分段 ${seq} 第 ${attempt} 次失败，${attempt === 1 ? 0.7 : 1.6}s 后重试：${code}`);
+        await sleep(attempt === 1 ? 700 : 1600, target);
+        if (!isLive(target)) throw error;
+        target.state = MSE_STATE.BUFFERING;
+        emit(target);
+        attempt += 1;
+      }
+    }
+  };
+  const pumpFetch = (target) => {
+    if (!isLive(target) || !target.sb || !target.initAppended || target.fetching) return;
+    const total = target.info?.segmentCount || 0;
+    if (target.nextFetch > total) return;
+    if (target.store.size >= PREFETCH_AHEAD) return;
+    if (target.nextAppend > 1 && bufferedAheadSeconds() >= HIGH_WATER_SECONDS) return;
+    const seq = target.nextFetch;
+    target.nextFetch += 1;
+    target.fetching = true;
+    fetchSegment(target, seq).then((bytes) => {
+      if (!isLive(target)) return;
+      target.store.set(seq, bytes);
+    }).catch((error) => {
+      if (!isLive(target)) return;
+      fail(target, error);
+    }).finally(() => {
+      if (!isLive(target)) return;
+      target.fetching = false;
+      pump(target);
+    });
+  };
+  function pump(target) {
+    if (!isLive(target)) return;
+    pumpFetch(target);
+    void appendLoop(target).catch((error) => {
+      log("[player] append 循环异常", String(error?.message || error));
+    });
+  }
+  const applyResume = (target) => {
+    const targetMs = Math.max(0, Number(target.resumeMs) || 0);
+    if (!targetMs) return;
+    const attempt = () => {
+      if (!isLive(target)) return;
+      const reported = Number(video.duration);
+      const duration = Number.isFinite(reported) && reported > 0 ? reported : 0;
+      let seconds = targetMs / 1e3;
+      let clamped = false;
+      if (duration > 0 && seconds > duration - 0.5) {
+        seconds = 0;
+        clamped = true;
+      }
+      try {
+        video.currentTime = seconds;
+      } catch {
+        return;
+      }
+      target.resumeAppliedMs = Math.round(seconds * 1e3);
+      target.resumeClamped = clamped;
+    };
+    const known = Number(video.duration);
+    if (Number.isFinite(known) && known > 0) {
+      attempt();
+      return;
+    }
+    let fallback = 0;
+    const onMeta = () => {
+      video.removeEventListener("durationchange", onMeta);
+      video.removeEventListener("loadedmetadata", onMeta);
+      if (fallback) {
+        clearTimeout(fallback);
+        target.timers.delete(fallback);
+        fallback = 0;
+      }
+      attempt();
+    };
+    video.addEventListener("durationchange", onMeta);
+    video.addEventListener("loadedmetadata", onMeta);
+    fallback = setTimeout(() => {
+      target.timers.delete(fallback);
+      fallback = 0;
+      if (!isLive(target)) return;
+      const fromInfo = (target.info?.durationMs || 0) / 1e3;
+      const tooLate = fromInfo > 0 && targetMs / 1e3 > fromInfo - 0.5;
+      const seconds = tooLate ? 0 : fromInfo > 0 ? Math.min(targetMs / 1e3, fromInfo - 0.3) : targetMs / 1e3;
+      try {
+        video.currentTime = seconds;
+      } catch {
+        return;
+      }
+      target.resumeAppliedMs = Math.round(seconds * 1e3);
+      target.resumeClamped = tooLate;
+    }, 1500);
+    target.timers.add(fallback);
+    target.cleanups.push(() => {
+      video.removeEventListener("durationchange", onMeta);
+      video.removeEventListener("loadedmetadata", onMeta);
+      if (fallback) clearTimeout(fallback);
+    });
+  };
+  const openSourceBuffer = async (target) => {
+    const ms = target.mediaSource;
+    if (!isLive(target) || !ms) return;
+    if (ms.readyState !== "open") {
+      fail(target, new PanelError("MEDIA_STATE", "媒体源未就绪（sourceopen 时状态不是 open）"));
+      return;
+    }
+    let sb;
+    try {
+      sb = ms.addSourceBuffer(target.mime);
+    } catch (error) {
+      log(`[player] addSourceBuffer 失败：${String(error?.message || error)}`);
+      degrade(target, "add-source-buffer");
+      return;
+    }
+    target.sb = sb;
+    try {
+      sb.mode = "segments";
+    } catch {
+    }
+    target.state = MSE_STATE.BUFFERING;
+    emit(target);
+    try {
+      const payload = await getRpc().getStreamInit(target.episodeId, target.quality);
+      if (!isLive(target)) return;
+      const bytes = decodeBase64(payload?.base64);
+      if (!bytes.length) throw new PanelError("PROTOCOL", "init segment 为空");
+      await appendBytes(target, bytes);
+      if (!isLive(target)) return;
+      target.initAppended = true;
+      applyResume(target);
+      emit(target);
+      pump(target);
+    } catch (error) {
+      if (!isLive(target)) return;
+      fail(target, error);
+    }
+  };
+  const openMediaSource = (target) => {
+    const Ctor = getMediaSourceCtor();
+    if (!Ctor) {
+      degrade(target, "no-mse");
+      return;
+    }
+    let ms;
+    try {
+      ms = new Ctor();
+    } catch (error) {
+      fail(target, error);
+      return;
+    }
+    target.mediaSource = ms;
+    try {
+      target.objectUrl = URL.createObjectURL(ms);
+    } catch (error) {
+      fail(target, error);
+      return;
+    }
+    const timer = setTimeout(() => {
+      target.timers.delete(timer);
+      if (isLive(target) && !target.sb) fail(target, new PanelError("MEDIA_OPEN_TIMEOUT", "媒体源打开超时"));
+    }, SOURCE_OPEN_TIMEOUT_MS);
+    target.timers.add(timer);
+    target.cleanups.push(() => clearTimeout(timer));
+    ms.addEventListener("sourceopen", () => {
+      clearTimeout(timer);
+      void openSourceBuffer(target);
+    });
+    ms.addEventListener("sourceclose", () => {
+      target.timers.delete(timer);
+      clearTimeout(timer);
+    });
+    try {
+      video.src = target.objectUrl;
+      if (typeof video.load === "function") video.load();
+    } catch (error) {
+      fail(target, error);
+    }
+  };
+  async function load(options = {}) {
+    if (disposed) return;
+    const episodeId = String(options.episodeId || "");
+    if (!episodeId) return;
+    if (session) teardown(session);
+    const target = createSession({
+      episodeId,
+      quality: String(options.quality || "720p"),
+      resumeMs: options.resumeMs,
+      autoplay: options.autoplay,
+      reason: options.reason,
+      rebuilds: options.rebuilds
+    });
+    session = target;
+    target.state = MSE_STATE.PROBING;
+    emit(target);
+    try {
+      const raw = await getRpc().getStreamInfo(target.episodeId, target.quality);
+      if (!isLive(target)) return;
+      target.info = normalizeInfo(raw);
+      if (!target.info.codec) throw new PanelError("PROTOCOL", "媒体信息缺少编码");
+      if (!target.info.segmentCount) throw new PanelError("PROTOCOL", "媒体分片数量为 0");
+      const support = pickSupportedMime(target.info);
+      target.probe = support.checked;
+      target.mime = support.mime;
+      if (!support.ok) {
+        target.state = MSE_STATE.DEGRADED;
+        target.degradeReason = support.reason;
+        target.halted = true;
+        target.active = false;
+        emit(target);
+        return;
+      }
+      target.state = MSE_STATE.OPENING;
+      emit(target);
+      openMediaSource(target);
+    } catch (error) {
+      if (!isLive(target)) return;
+      fail(target, error);
+    }
+  }
+  const TRANSCODE_TIMEOUT_MS = 10 * 60 * 1e3;
+  const H264_CHUNK_BYTES = 3 * 1024 * 1024;
+  const applyLocalResume = (target) => {
+    const ms = Number(target.resumeMs) || 0;
+    if (ms <= 0) return;
+    const apply = () => {
+      try {
+        video.currentTime = ms / 1e3;
+        target.resumeAppliedMs = ms;
+      } catch {
+      }
+    };
+    if (video.readyState >= 1) {
+      apply();
+      return;
+    }
+    const onMeta = () => {
+      video.removeEventListener("loadedmetadata", onMeta);
+      if (isLive(target)) apply();
+    };
+    video.addEventListener("loadedmetadata", onMeta);
+    target.cleanups.push(() => video.removeEventListener("loadedmetadata", onMeta));
+  };
+  const downloadTranscoded = async (target, state) => {
+    const rpc = getRpc();
+    const total = Number(state?.bytes) || 0;
+    const parts = [];
+    let offset = 0;
+    for (let guard = 0; guard < 200; guard += 1) {
+      const chunk = await rpc.h264Chunk(target.episodeId, target.quality, offset, H264_CHUNK_BYTES);
+      const bytes = decodeBase64(chunk?.base64);
+      if (!bytes.length) break;
+      parts.push(bytes);
+      offset += bytes.length;
+      target.transcodeProgress = total > 0 ? Math.min(100, Math.round(offset / total * 100)) : 0;
+      emit(target);
+      if (Number(chunk?.total) > 0 && offset >= Number(chunk.total)) break;
+      if (!(Number(chunk?.total) > 0) && bytes.length < H264_CHUNK_BYTES) break;
+    }
+    if (!parts.length) throw new PanelError("PROTOCOL", "转码结果为空");
+    return new Blob(parts, { type: "video/mp4" });
+  };
+  async function loadLocal(options = {}) {
+    if (disposed) return;
+    const episodeId = String(options.episodeId || "");
+    if (!episodeId) return;
+    if (session) teardown(session);
+    const target = createSession({
+      episodeId,
+      quality: String(options.quality || "720p"),
+      resumeMs: options.resumeMs,
+      autoplay: options.autoplay ?? true,
+      reason: options.reason || "transcode",
+      rebuilds: 0
+    });
+    target.mode = "local";
+    session = target;
+    target.state = MSE_STATE.PROBING;
+    emit(target);
+    try {
+      const rpc = getRpc();
+      let state = await rpc.h264Info(target.episodeId, target.quality);
+      if (!isLive(target)) return;
+      target.transcode = state;
+      if (state?.status === "unavailable") {
+        throw new PanelError("TRANSCODE_UNAVAILABLE", state.error || "本机没有可用的 ffmpeg");
+      }
+      if (state?.status !== "done") {
+        target.state = MSE_STATE.BUFFERING;
+        emit(target);
+        state = await rpc.h264Start(target.episodeId, target.quality);
+        const startedAt = Date.now();
+        while (state?.status !== "done") {
+          if (!isLive(target)) return;
+          if (state?.status === "unavailable") {
+            throw new PanelError("TRANSCODE_UNAVAILABLE", state.error || "本机没有可用的 ffmpeg");
+          }
+          if (state?.status === "error") {
+            throw new PanelError("TRANSCODE_FAILED", state.error || "转码失败");
+          }
+          if (Date.now() - startedAt > TRANSCODE_TIMEOUT_MS) {
+            throw new PanelError("TRANSCODE_TIMEOUT", "转码超时，请稍后重试");
+          }
+          target.transcode = state;
+          emit(target);
+          await sleep(1200, target);
+          state = await rpc.h264Info(target.episodeId, target.quality);
+        }
+      }
+      target.transcode = state;
+      if (!isLive(target)) return;
+      target.state = MSE_STATE.BUFFERING;
+      emit(target);
+      const blob = await downloadTranscoded(target, state);
+      if (!isLive(target)) return;
+      const url = URL.createObjectURL(blob);
+      target.objectUrl = url;
+      target.info = {
+        codec: state?.codec || "avc1.640028,mp4a.40.2",
+        durationMs: Number(state?.durationMs) || 0,
+        segmentCount: 1,
+        timescale: 0,
+        mime: "video/mp4",
+        definition: state?.definition || target.quality,
+        bytes: Number(state?.bytes) || 0
+      };
+      target.mime = `video/mp4; codecs="${target.info.codec}"`;
+      target.transcodeProgress = 100;
+      try {
+        video.pause();
+        video.removeAttribute("src");
+      } catch {
+      }
+      target.canPlay = (() => {
+        try {
+          return video.canPlayType('video/mp4; codecs="avc1.640028,mp4a.40.2"') || "no";
+        } catch {
+          return "?";
+        }
+      })();
+      const loaded = new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+          cleanup();
+          reject(new PanelError("MEDIA_LOAD_TIMEOUT", "视频加载超时（直链未被解码）"));
+        }, 2e4);
+        const onMeta = () => {
+          cleanup();
+          resolve();
+        };
+        const onError2 = () => {
+          cleanup();
+          reject(new PanelError("MEDIA_DECODE_FAILED", `视频加载失败（video.error ${video.error?.code ?? 0}）`));
+        };
+        const cleanup = () => {
+          clearTimeout(timer);
+          target.timers.delete(timer);
+          video.removeEventListener("loadedmetadata", onMeta);
+          video.removeEventListener("error", onError2);
+        };
+        target.timers.add(timer);
+        target.cleanups.push(cleanup);
+        video.addEventListener("loadedmetadata", onMeta);
+        video.addEventListener("error", onError2);
+      });
+      try {
+        video.src = url;
+        if (typeof video.load === "function") video.load();
+      } catch (error) {
+        fail(target, error);
+        return;
+      }
+      await loaded;
+      if (!isLive(target)) return;
+      target.state = MSE_STATE.READY;
+      applyLocalResume(target);
+      emit(target);
+      if (target.autoplay) void video.play().catch(() => {
+      });
+    } catch (error) {
+      if (!isLive(target)) return;
+      fail(target, error instanceof Error ? error : new PanelError("PLAYER_ERROR", String(error)));
+    }
+  }
+  const ownsMedia = (target) => !!target.objectUrl && video.src === target.objectUrl;
+  const onVideoError = () => {
+    const target = session;
+    if (!isCurrent(target) || !target.active || target.halted || target.tearingDown) return;
+    if (!ownsMedia(target)) return;
+    const code = video.error?.code ?? 0;
+    const message = String(video.error?.message || "");
+    target.videoError = { code, message };
+    if (target.mode === "local") return;
+    if (code === 1) return;
+    if (code === 4) {
+      degrade(target, "src-not-supported");
+      return;
+    }
+    if (code === 3) {
+      if (target.rebuilds < MAX_REBUILDS) void rebuild(target, "decode");
+      else fail(target, new PanelError("MEDIA_DECODE_FAILED", "视频解码失败"));
+      return;
+    }
+    fail(target, new PanelError("MEDIA_NETWORK", "媒体流读取失败"));
+  };
+  const onVideoEnded = () => {
+    const target = session;
+    if (!isLive(target) || !ownsMedia(target)) return;
+    target.state = MSE_STATE.ENDED;
+    emit(target);
+  };
+  const onTimeUpdate = () => {
+    const target = session;
+    if (!isLive(target)) return;
+    if (!target.fetching) pumpFetch(target);
+  };
+  video.addEventListener("error", onVideoError);
+  video.addEventListener("ended", onVideoEnded);
+  video.addEventListener("timeupdate", onTimeUpdate);
+  video.addEventListener("waiting", onTimeUpdate);
+  video.addEventListener("progress", onTimeUpdate);
+  video.addEventListener("seeked", onTimeUpdate);
+  video.addEventListener("play", onTimeUpdate);
+  const currentTimeMs = () => {
+    const value = Number(video.currentTime);
+    return Number.isFinite(value) && value > 0 ? Math.round(value * 1e3) : 0;
+  };
+  return {
+    /** 载入一集；同一 episodeId 换清晰度时由 switchQuality 调用。 */
+    load,
+    /** 转码兜底：等后台转成 H.264 后用 Blob 直接播放（宿主没有 HEVC 解码器时使用）。 */
+    loadLocal,
+    /** 换清晰度：销毁 SourceBuffer 重建，尽量保留播放位置。 */
+    async switchQuality(quality) {
+      const target = session;
+      if (!isCurrent(target)) return;
+      const next = String(quality || "");
+      if (!next || next === target.quality) return;
+      const timeMs = currentTimeMs() || target.resumeMs || 0;
+      const autoplay = !video.paused && !video.ended;
+      await load({
+        episodeId: target.episodeId,
+        quality: next,
+        resumeMs: timeMs,
+        autoplay,
+        rebuilds: target.rebuilds,
+        reason: "quality"
+      });
+    },
+    /** 错误/降级后重试：重建整条链路，位置尽量保留。 */
+    async retry() {
+      const target = session;
+      if (!isCurrent(target)) return;
+      const timeMs = currentTimeMs() || target.resumeMs || 0;
+      const autoplay = !video.paused && !video.ended;
+      await load({
+        episodeId: target.episodeId,
+        quality: target.quality,
+        resumeMs: timeMs,
+        autoplay,
+        rebuilds: target.rebuilds,
+        reason: "retry"
+      });
+    },
+    /** 媒体元素解码错误后由控制器调用。 */
+    async recover(reason) {
+      const target = session;
+      if (!isLive(target)) return;
+      if (target.rebuilds < MAX_REBUILDS) await rebuild(target, reason || "media");
+      else fail(target, new PanelError("MEDIA_DECODE_FAILED", "视频解码失败"));
+    },
+    snapshot: () => snapshotOf(session),
+    isPlaying: () => !video.paused && !video.ended,
+    destroy() {
+      if (disposed) return;
+      disposed = true;
+      if (session) teardown(session);
+      session = null;
+      try {
+        video.removeEventListener("error", onVideoError);
+        video.removeEventListener("ended", onVideoEnded);
+        video.removeEventListener("timeupdate", onTimeUpdate);
+        video.removeEventListener("waiting", onTimeUpdate);
+        video.removeEventListener("progress", onTimeUpdate);
+        video.removeEventListener("seeked", onTimeUpdate);
+        video.removeEventListener("play", onTimeUpdate);
+      } catch {
+      }
+      try {
+        onState({ state: MSE_STATE.DISPOSED });
+      } catch {
+      }
+    }
+  };
+}
+
+// src/panel/player/icons.js
+var SVG_NS = "http://www.w3.org/2000/svg";
+var PATHS = {
+  play: '<path d="M8 5.2v13.6L19.4 12z" fill="currentColor" stroke="none"/>',
+  pause: '<rect x="6.4" y="5" width="4" height="14" rx="0.8" fill="currentColor" stroke="none"/><rect x="13.6" y="5" width="4" height="14" rx="0.8" fill="currentColor" stroke="none"/>',
+  next: '<path d="M6 5.6v12.8L15.2 12z" fill="currentColor" stroke="none"/><rect x="16.6" y="5" width="2" height="14" rx="0.8" fill="currentColor" stroke="none"/>',
+  volume: '<path d="M4 9.2h3.4L12 5.4v13.2L7.4 14.8H4z" fill="currentColor" stroke="none"/><path d="M15 9.2a4 4 0 0 1 0 5.6" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><path d="M17.6 6.8a7.4 7.4 0 0 1 0 10.4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>',
+  mute: '<path d="M4 9.2h3.4L12 5.4v13.2L7.4 14.8H4z" fill="currentColor" stroke="none"/><path d="M16 9.6l5 5m0-5l-5 5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>',
+  pip: '<rect x="3" y="5" width="18" height="14" rx="2" fill="none" stroke="currentColor" stroke-width="1.6"/><rect x="12" y="11" width="7" height="6" rx="1" fill="currentColor" stroke="none"/>',
+  expand: '<path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>',
+  collapse: '<path d="M9 4v5H4M15 4v5h5M9 20v-5H4M15 20v-5h5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>'
+};
+function icon(name, size = 16) {
+  const svg = document.createElementNS(SVG_NS, "svg");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("width", String(size));
+  svg.setAttribute("height", String(size));
+  svg.setAttribute("aria-hidden", "true");
+  svg.setAttribute("focusable", "false");
+  svg.classList.add("hg-player-icon");
+  svg.innerHTML = PATHS[name] || "";
+  return svg;
+}
+
+// src/panel/player/mp4.js
+var textAt = (bytes, at) => String.fromCharCode(bytes[at] || 0, bytes[at + 1] || 0, bytes[at + 2] || 0, bytes[at + 3] || 0);
+var u16 = (bytes, at) => (bytes[at] << 8 | bytes[at + 1]) >>> 0;
+var u32 = (bytes, at) => (bytes[at] << 24 | bytes[at + 1] << 16 | bytes[at + 2] << 8 | bytes[at + 3]) >>> 0;
+var u64 = (bytes, at) => u32(bytes, at) * 2 ** 32 + u32(bytes, at + 4);
+var readBoxes = (bytes, start = 0, end = bytes.length) => {
+  const list = [];
+  let offset = start;
+  while (offset + 8 <= end) {
+    let size = u32(bytes, offset);
+    const type = textAt(bytes, offset + 4);
+    let headerSize = 8;
+    if (size === 1) {
+      if (offset + 16 > end) break;
+      size = u64(bytes, offset + 8);
+      headerSize = 16;
+    } else if (size === 0) {
+      size = end - offset;
+    }
+    if (size < headerSize || offset + size > end) break;
+    list.push({
+      type,
+      start: offset,
+      size,
+      headerSize,
+      bodyStart: offset + headerSize,
+      bodyEnd: offset + size
+    });
+    offset += size;
+  }
+  return list;
+};
+var childOf = (list, type) => list.find((box) => box.type === type) || null;
+var childrenOf = (list, type) => list.filter((box) => box.type === type);
+var ENTRY_PREFIX = { avc1: 78, avc3: 78, hvc1: 78, hev1: 78, encv: 78, mp4a: 28, enca: 28 };
+var readEntryCodec = (bytes, entry) => {
+  const prefix = ENTRY_PREFIX[entry.type] ?? 0;
+  const inner = readBoxes(bytes, entry.bodyStart + prefix, entry.bodyEnd);
+  const config = childOf(inner, "hvcC") || childOf(inner, "avcC") || childOf(inner, "esds");
+  if (!config) return { configType: "", description: null };
+  return {
+    configType: config.type,
+    // WebCodecs 的 description 要的是配置 box 的内容（不含 8 字节 box 头）。
+    description: bytes.subarray(config.bodyStart, config.bodyEnd)
+  };
+};
+var hevcCodecString = (bytes, description, sampleType) => {
+  if (!description || description.length < 13) return sampleType;
+  const profileSpace = ["", "A", "B", "C"][description[1] >> 6 & 3];
+  const tierFlag = description[1] >> 5 & 1 ? "H" : "L";
+  const profileIdc = description[1] & 31;
+  const compatFlags = (description[2] << 24 | description[3] << 16 | description[4] << 8 | description[5]) >>> 0;
+  let reversed = 0;
+  for (let index = 0; index < 32; index += 1) reversed = reversed << 1 | compatFlags >>> index & 1;
+  reversed >>>= 0;
+  const levelIdc = description[12];
+  return `${sampleType}.${profileSpace}${profileIdc}.${reversed.toString(16).toUpperCase()}.${tierFlag}${levelIdc}`;
+};
+var avcCodecString = (bytes, description, sampleType) => {
+  if (!description || description.length < 4) return sampleType;
+  const hex = (value) => value.toString(16).padStart(2, "0");
+  return `${sampleType}.${hex(description[1])}${hex(description[2])}${hex(description[3])}`;
+};
+var esdsCodecString = (bytes, description, sampleType) => {
+  const data = description || new Uint8Array(0);
+  let index = 4;
+  let objectType = 64;
+  let audioObjectType = 2;
+  const readLength = () => {
+    let length = 0;
+    for (let count = 0; count < 4 && index < data.length; count += 1) {
+      const value = data[index];
+      index += 1;
+      length = length << 7 | value & 127;
+      if (!(value & 128)) break;
+    }
+    return length;
+  };
+  while (index + 1 < data.length) {
+    const tag = data[index];
+    index += 1;
+    const length = readLength();
+    const end = Math.min(data.length, index + length);
+    if (tag === 3) {
+      const flags = data[index + 2] || 0;
+      index += 3;
+      if (flags & 128) index += 2;
+      if (flags & 64) {
+        const urlLength = data[index] || 0;
+        index += 1 + urlLength;
+      }
+      if (flags & 32) index += 2;
+      continue;
+    }
+    if (tag === 4) {
+      objectType = data[index] || 64;
+      index = end;
+      continue;
+    }
+    if (tag === 5) {
+      audioObjectType = (data[index] || 18) >> 3;
+      break;
+    }
+    index = end;
+  }
+  return `${sampleType}.${objectType.toString(16)}.${audioObjectType}`;
+};
+var readSampleTable = (bytes, stbl) => {
+  const stts = childOf(stbl, "stts");
+  const stsc = childOf(stbl, "stsc");
+  const stsz = childOf(stbl, "stsz");
+  const stco = childOf(stbl, "stco") || childOf(stbl, "co64");
+  const stss = childOf(stbl, "stss");
+  if (!stts || !stsc || !stsz || !stco) return [];
+  const sttsCount = u32(bytes, stts.bodyStart + 4);
+  const deltas = [];
+  for (let index = 0; index < sttsCount; index += 1) {
+    const at = stts.bodyStart + 8 + index * 8;
+    deltas.push({ count: u32(bytes, at), delta: u32(bytes, at + 4) });
+  }
+  const stscCount = u32(bytes, stsc.bodyStart + 4);
+  const runs = [];
+  for (let index = 0; index < stscCount; index += 1) {
+    const at = stsc.bodyStart + 8 + index * 12;
+    runs.push({
+      firstChunk: u32(bytes, at),
+      samplesPerChunk: u32(bytes, at + 4),
+      sampleDescIndex: u32(bytes, at + 8)
+    });
+  }
+  const uniformSize = u32(bytes, stsz.bodyStart + 4);
+  const sampleCount = u32(bytes, stsz.bodyStart + 8);
+  const sizes = [];
+  for (let index = 0; index < sampleCount; index += 1) {
+    sizes.push(uniformSize || u32(bytes, stsz.bodyStart + 12 + index * 4));
+  }
+  const chunkCount = u32(bytes, stco.bodyStart + 4);
+  const chunkOffsets = [];
+  for (let index = 0; index < chunkCount; index += 1) {
+    const at = stco.bodyStart + 8 + (stco.type === "co64" ? index * 8 : index * 4);
+    chunkOffsets.push(stco.type === "co64" ? u64(bytes, at) : u32(bytes, at));
+  }
+  const syncSamples = /* @__PURE__ */ new Set();
+  if (stss) {
+    const syncCount = u32(bytes, stss.bodyStart + 4);
+    for (let index = 0; index < syncCount; index += 1) {
+      syncSamples.add(u32(bytes, stss.bodyStart + 8 + index * 4));
+    }
+  }
+  const samples = [];
+  let sampleIndex = 0;
+  for (let chunk = 0; chunk < chunkCount; chunk += 1) {
+    let perChunk = runs[0]?.samplesPerChunk || 1;
+    for (let runIndex = 0; runIndex < runs.length; runIndex += 1) {
+      if (chunk + 1 >= runs[runIndex].firstChunk) perChunk = runs[runIndex].samplesPerChunk;
+    }
+    let offset = chunkOffsets[chunk];
+    for (let inner = 0; inner < perChunk && sampleIndex < sampleCount; inner += 1) {
+      const size = sizes[sampleIndex] || 0;
+      samples.push({
+        index: sampleIndex,
+        offset,
+        size,
+        // stss 缺省时全部样本都是同步样本。
+        key: stss ? syncSamples.has(sampleIndex + 1) : true
+      });
+      offset += size;
+      sampleIndex += 1;
+    }
+  }
+  let cursor = 0;
+  let sampleAt = 0;
+  for (const entry of deltas) {
+    for (let index = 0; index < entry.count && sampleAt < samples.length; index += 1) {
+      samples[sampleAt].time = cursor;
+      samples[sampleAt].duration = entry.delta;
+      cursor += entry.delta;
+      sampleAt += 1;
+    }
+  }
+  return samples;
+};
+var readTracks = (bytes, moov) => {
+  const tracks = [];
+  for (const trak of childrenOf(readBoxes(bytes, moov.bodyStart, moov.bodyEnd), "trak")) {
+    const trakBoxes = readBoxes(bytes, trak.bodyStart, trak.bodyEnd);
+    const mdia = childOf(trakBoxes, "mdia");
+    if (!mdia) continue;
+    const tkhd = childOf(trakBoxes, "tkhd");
+    const edts = childOf(trakBoxes, "edts");
+    let mediaTime = 0;
+    if (edts) {
+      const elst = childOf(readBoxes(bytes, edts.bodyStart, edts.bodyEnd), "elst");
+      if (elst) {
+        const raw = bytes[elst.bodyStart] === 1 ? u32(bytes, elst.bodyStart + 20) : u32(bytes, elst.bodyStart + 12);
+        mediaTime = raw === 4294967295 ? 0 : raw;
+      }
+    }
+    const mdiaBoxes = readBoxes(bytes, mdia.bodyStart, mdia.bodyEnd);
+    const mdhd = childOf(mdiaBoxes, "mdhd");
+    const hdlr = childOf(mdiaBoxes, "hdlr");
+    const minf = childOf(mdiaBoxes, "minf");
+    if (!mdhd || !hdlr || !minf) continue;
+    const version = bytes[mdhd.bodyStart];
+    const timescale = version === 1 ? u32(bytes, mdhd.bodyStart + 20) : u32(bytes, mdhd.bodyStart + 12);
+    let trackId = 0;
+    if (tkhd) {
+      trackId = bytes[tkhd.bodyStart] === 1 ? u32(bytes, tkhd.bodyStart + 20) : u32(bytes, tkhd.bodyStart + 12);
+    }
+    const handler = textAt(bytes, hdlr.bodyStart + 8);
+    const minfBoxes = readBoxes(bytes, minf.bodyStart, minf.bodyEnd);
+    const stbl = childOf(minfBoxes, "stbl");
+    if (!stbl) continue;
+    const stblBoxes = readBoxes(bytes, stbl.bodyStart, stbl.bodyEnd);
+    const stsd = childOf(stblBoxes, "stsd");
+    if (!stsd) continue;
+    const entries = readBoxes(bytes, stsd.bodyStart + 8, stsd.bodyEnd);
+    const entry = entries[0];
+    if (!entry) continue;
+    const { configType, description } = readEntryCodec(bytes, entry);
+    const sampleType = entry.type;
+    let codec = sampleType;
+    if (configType === "hvcC") codec = hevcCodecString(bytes, description, sampleType);
+    else if (configType === "avcC") codec = avcCodecString(bytes, description, sampleType);
+    else if (configType === "esds") codec = esdsCodecString(bytes, description, sampleType);
+    const width = ENTRY_PREFIX[sampleType] ? u16(bytes, entry.bodyStart + 24) : 0;
+    const height = ENTRY_PREFIX[sampleType] ? u16(bytes, entry.bodyStart + 26) : 0;
+    const channels = sampleType === "mp4a" || sampleType === "enca" ? u16(bytes, entry.bodyStart + 16) : 0;
+    const sampleRate = sampleType === "mp4a" || sampleType === "enca" ? u16(bytes, entry.bodyStart + 24) : 0;
+    tracks.push({
+      id: trackId,
+      handler,
+      kind: handler === "vide" ? "video" : handler === "soun" ? "audio" : "other",
+      timescale: timescale || 1,
+      sampleType,
+      configType,
+      codec,
+      description,
+      width,
+      height,
+      channels,
+      sampleRate,
+      mediaTime,
+      samples: readSampleTable(bytes, stblBoxes)
+    });
+  }
+  return tracks;
+};
+var parseMp4 = (bytes) => {
+  const top = readBoxes(bytes);
+  const moov = childOf(top, "moov");
+  const tracks = moov ? readTracks(bytes, moov) : [];
+  const withSamples = tracks.filter((track) => track.samples.length > 0);
+  return {
+    tracks,
+    video: tracks.find((track) => track.kind === "video") || null,
+    audio: tracks.find((track) => track.kind === "audio") || null,
+    playable: withSamples,
+    // 分片解析要用 trex 的默认样本参数。
+    trex: moov ? readTrex(bytes, moov) : {}
+  };
+};
+var toMicros = (time, timescale) => Math.round(time * 1e6 / (timescale || 1));
+var readTrex = (bytes, moov) => {
+  const mvex = childOf(readBoxes(bytes, moov.bodyStart, moov.bodyEnd), "mvex");
+  const table = {};
+  if (!mvex) return table;
+  for (const trex of childrenOf(readBoxes(bytes, mvex.bodyStart, mvex.bodyEnd), "trex")) {
+    const at = trex.bodyStart + 4;
+    table[u32(bytes, at)] = {
+      duration: u32(bytes, at + 8),
+      size: u32(bytes, at + 12),
+      flags: u32(bytes, at + 16)
+    };
+  }
+  return table;
+};
+var readTraf = (bytes, traf, context, buckets) => {
+  const inner = readBoxes(bytes, traf.bodyStart, traf.bodyEnd);
+  const tfhd = childOf(inner, "tfhd");
+  if (!tfhd) return;
+  const tfhdFlags = u32(bytes, tfhd.bodyStart) & 16777215;
+  let at = tfhd.bodyStart + 4;
+  const trackId = u32(bytes, at);
+  at += 4;
+  let baseDataOffset = 0;
+  if (tfhdFlags & 1) {
+    baseDataOffset = u64(bytes, at);
+    at += 8;
+  }
+  if (tfhdFlags & 2) at += 4;
+  let defaultDuration = 0;
+  if (tfhdFlags & 8) {
+    defaultDuration = u32(bytes, at);
+    at += 4;
+  }
+  let defaultSize = 0;
+  if (tfhdFlags & 16) {
+    defaultSize = u32(bytes, at);
+    at += 4;
+  }
+  let defaultFlags = 0;
+  if (tfhdFlags & 32) {
+    defaultFlags = u32(bytes, at);
+    at += 4;
+  }
+  const defaults = context.trex[trackId] || {};
+  if (!defaultDuration) defaultDuration = defaults.duration || 0;
+  if (!defaultSize) defaultSize = defaults.size || 0;
+  if (!defaultFlags) defaultFlags = defaults.flags || 0;
+  const tfdt = childOf(inner, "tfdt");
+  let decodeTime = 0;
+  if (tfdt) {
+    decodeTime = bytes[tfdt.bodyStart] === 1 ? u64(bytes, tfdt.bodyStart + 4) : u32(bytes, tfdt.bodyStart + 4);
+  } else {
+    const track2 = context.tracks.find((item) => item.id === trackId);
+    decodeTime = track2?.decodeTime || 0;
+  }
+  const base = baseDataOffset || context.moofStart;
+  const list = buckets.get(trackId) || [];
+  for (const trun of childrenOf(inner, "trun")) {
+    const version = bytes[trun.bodyStart];
+    const flags = u32(bytes, trun.bodyStart) & 16777215;
+    const count = u32(bytes, trun.bodyStart + 4);
+    let ptr = trun.bodyStart + 8;
+    let dataOffset = 0;
+    if (flags & 1) {
+      dataOffset = u32(bytes, ptr) | 0;
+      ptr += 4;
+    }
+    let firstSampleFlags = 0;
+    if (flags & 4) {
+      firstSampleFlags = u32(bytes, ptr);
+      ptr += 4;
+    }
+    let offset = base + dataOffset;
+    for (let index = 0; index < count; index += 1) {
+      let duration = defaultDuration;
+      let size = defaultSize;
+      let sampleFlags = defaultFlags;
+      let cts = 0;
+      if (flags & 256) {
+        duration = u32(bytes, ptr);
+        ptr += 4;
+      }
+      if (flags & 512) {
+        size = u32(bytes, ptr);
+        ptr += 4;
+      }
+      if (flags & 1024) {
+        sampleFlags = u32(bytes, ptr);
+        ptr += 4;
+      } else if (index === 0 && firstSampleFlags) {
+        sampleFlags = firstSampleFlags;
+      }
+      if (flags & 2048) {
+        cts = version === 1 ? u32(bytes, ptr) | 0 : u32(bytes, ptr);
+        ptr += 4;
+      }
+      list.push({
+        trackId,
+        offset,
+        size,
+        duration,
+        // 解码时间（DTS），组帧时再叠加 cts 偏移。
+        time: decodeTime,
+        cts,
+        // sample_is_non_sync_sample 为 0 即关键帧。
+        key: (sampleFlags & 65536) === 0
+      });
+      offset += size;
+      decodeTime += duration;
+    }
+  }
+  buckets.set(trackId, list);
+  const track = context.tracks.find((item) => item.id === trackId);
+  if (track) track.decodeTime = decodeTime;
+};
+var parseSegment = (bytes, tracks, trex = {}) => {
+  const buckets = /* @__PURE__ */ new Map();
+  const context = { tracks, trex, moofStart: 0 };
+  for (const box of readBoxes(bytes)) {
+    if (box.type !== "moof") continue;
+    context.moofStart = box.start;
+    for (const traf of childrenOf(readBoxes(bytes, box.bodyStart, box.bodyEnd), "traf")) {
+      readTraf(bytes, traf, context, buckets);
+    }
+  }
+  return buckets;
+};
+
+// src/panel/player/webcodecs-play.js
+var MAX_DECODE_PER_TICK = 16;
+var MAX_BUFFERED_FRAMES = 40;
+var RESYNC_LAG_US = 15e5;
+var MAX_LOCAL_SEGMENTS = 128;
+var createWebCodecsPlayer = ({ canvas, getRpc, onState = () => {
+}, onProgress = () => {
+}, log = () => {
+} }) => {
+  const ctx = canvas.getContext("2d", { alpha: false });
+  let disposed = false;
+  let track = null;
+  let decodeConfig = null;
+  let samples = [];
+  let decoder = null;
+  let nextIndex = 0;
+  const frames = /* @__PURE__ */ new Map();
+  let rafId = 0;
+  let anchored = false;
+  let anchorWall = 0;
+  let anchorTimeMs = 0;
+  let playing = false;
+  let lastEmitAt = 0;
+  let lastDrawnTs = -1;
+  let audioTrack = null;
+  let audioSamples = [];
+  let audioCtx = null;
+  let audioBuffer = null;
+  let audioSource = null;
+  let audioGain = null;
+  let audioStartCtxTime = 0;
+  let audioStartMs = 0;
+  let audioClockActive = false;
+  const state = {
+    phase: "idle",
+    timeMs: 0,
+    durationMs: 0,
+    width: 0,
+    height: 0,
+    decoded: 0,
+    buffered: 0,
+    dropped: 0,
+    output: 0,
+    picked: 0,
+    decoderState: "",
+    drawError: "",
+    error: ""
+  };
+  const emit = (force) => {
+    if (disposed) return;
+    const now = Date.now();
+    if (!force && now - lastEmitAt < 400) return;
+    lastEmitAt = now;
+    state.buffered = frames.size;
+    state.timeMs = currentMs();
+    state.decoderState = decoder ? decoder.state : "none";
+    try {
+      onState({ ...state });
+    } catch {
+    }
+  };
+  const currentMs = () => {
+    if (playing && audioClockActive && audioSource && audioCtx && audioCtx.state === "running") {
+      const elapsed = audioCtx.currentTime - audioStartCtxTime;
+      if (elapsed >= 0) return audioStartMs + elapsed * 1e3;
+    }
+    if (!anchored) return anchorTimeMs;
+    if (!playing) return anchorTimeMs;
+    return anchorTimeMs + (performance.now() - anchorWall);
+  };
+  const clearFrames = () => {
+    lastDrawnTs = -1;
+    for (const frame of frames.values()) {
+      try {
+        frame.close();
+      } catch {
+      }
+    }
+    frames.clear();
+  };
+  const ensureDecoder = () => {
+    if (decoder && decoder.state === "configured") return decoder;
+    try {
+      decoder?.close();
+    } catch {
+    }
+    decoder = new VideoDecoder({
+      output: (frame) => {
+        state.output += 1;
+        const existing = frames.get(frame.timestamp);
+        if (existing) {
+          try {
+            existing.close();
+          } catch {
+          }
+        }
+        frames.set(frame.timestamp, frame);
+      },
+      error: (error) => {
+        state.error = String(error?.message || error).slice(0, 120);
+        state.phase = "error";
+        log(`[wvc] 解码器错误：${state.error}`);
+        emit(true);
+      }
+    });
+    try {
+      decoder.configure(decodeConfig);
+    } catch (error) {
+      state.error = `configure: ${String(error?.message || error)}`.slice(0, 120);
+      state.phase = "error";
+      log(`[wvc] configure 失败：${state.error}`);
+      emit(true);
+      throw error;
+    }
+    return decoder;
+  };
+  const pump = () => {
+    if (disposed || !decodeConfig || nextIndex >= samples.length) return;
+    const dec = ensureDecoder();
+    let count = 0;
+    while (nextIndex < samples.length && count < MAX_DECODE_PER_TICK) {
+      if (frames.size + dec.decodeQueueSize >= MAX_BUFFERED_FRAMES) break;
+      const sample = samples[nextIndex];
+      nextIndex += 1;
+      try {
+        dec.decode(
+          new EncodedVideoChunk({
+            type: sample.key ? "key" : "delta",
+            timestamp: sample.ctsUs,
+            duration: sample.durationUs,
+            data: sample.data
+          })
+        );
+        state.decoded += 1;
+      } catch (error) {
+        state.error = String(error?.message || error).slice(0, 120);
+        state.phase = "error";
+        log(`[wvc] decode 异常：${state.error}`);
+        emit(true);
+        break;
+      }
+      count += 1;
+    }
+  };
+  const dropFrame = (timestamp) => {
+    const frame = frames.get(timestamp);
+    if (!frame) return;
+    try {
+      frame.close();
+    } catch {
+    }
+    frames.delete(timestamp);
+  };
+  const draw = () => {
+    if (!track) return;
+    const nowUs = currentMs() * 1e3;
+    let pick = -1;
+    for (const timestamp of frames.keys()) {
+      if (timestamp > lastDrawnTs && timestamp <= nowUs && (pick < 0 || timestamp > pick)) {
+        pick = timestamp;
+      }
+    }
+    if (pick < 0) return;
+    const frame = frames.get(pick);
+    lastDrawnTs = pick;
+    try {
+      ctx.drawImage(frame, 0, 0, canvas.width, canvas.height);
+      state.picked += 1;
+    } catch (error) {
+      state.drawError = String(error?.message || error).slice(0, 90);
+      log(`[wvc] drawImage 失败：${state.drawError}`);
+    }
+    for (const timestamp of [...frames.keys()]) {
+      if (timestamp <= pick) dropFrame(timestamp);
+    }
+  };
+  const resyncIfBehind = (nowUs) => {
+    if (disposed || !decodeConfig || nextIndex >= samples.length) return;
+    if (decoder?.decodeQueueSize > 0) return;
+    const next = samples[nextIndex];
+    if (!next || next.ctsUs >= nowUs - RESYNC_LAG_US) return;
+    let index = nextIndex;
+    for (let cursor = nextIndex; cursor < samples.length; cursor += 1) {
+      if (samples[cursor].ctsUs > nowUs) break;
+      if (samples[cursor].key) index = cursor;
+    }
+    if (index <= nextIndex) return;
+    nextIndex = index;
+    state.dropped += 1;
+    for (const timestamp of [...frames.keys()]) dropFrame(timestamp);
+    lastDrawnTs = -1;
+    try {
+      decoder?.reset();
+    } catch {
+    }
+    decoder = null;
+    log(`[wvc] 解码落后，跳到 ${Math.round(samples[index].ctsUs / 1e3)}ms`);
+  };
+  const tick = () => {
+    if (disposed || !playing) return;
+    try {
+      resyncIfBehind(currentMs() * 1e3);
+      pump();
+      draw();
+    } catch (error) {
+      state.error = String(error?.message || error).slice(0, 120);
+      state.phase = "error";
+      log(`[wvc] 播放循环异常：${state.error}`);
+      emit(true);
+      return;
+    }
+    if (currentMs() >= state.durationMs) {
+      playing = false;
+      anchorTimeMs = state.durationMs;
+      state.phase = "ended";
+      stopAudio();
+      emit(true);
+      return;
+    }
+    emit(false);
+    rafId = requestAnimationFrame(tick);
+  };
+  const stopAudio = () => {
+    audioClockActive = false;
+    if (!audioSource) return;
+    try {
+      audioSource.stop();
+    } catch {
+    }
+    try {
+      audioSource.disconnect();
+    } catch {
+    }
+    audioSource = null;
+  };
+  const startAudio = (fromMs) => {
+    if (!audioCtx || !audioBuffer || !audioGain) return;
+    stopAudio();
+    const at = Math.max(0, Math.min(Number(fromMs) || 0, state.durationMs));
+    anchorTimeMs = at;
+    anchorWall = performance.now();
+    audioStartMs = at;
+    void audioCtx.resume().catch(() => {
+    });
+    if (audioCtx.state !== "running") return;
+    const offset = Math.min(at / 1e3, audioBuffer.duration);
+    const when = audioCtx.currentTime + 0.06;
+    audioStartCtxTime = when;
+    const source = audioCtx.createBufferSource();
+    source.buffer = audioBuffer;
+    source.connect(audioGain);
+    source.start(when, offset);
+    audioSource = source;
+    audioClockActive = true;
+  };
+  const syncAudioState = () => {
+    if (disposed || !audioCtx) return;
+    if (audioCtx.state === "running") {
+      if (playing && !audioClockActive) startAudio(currentMs());
+      return;
+    }
+    if (!audioClockActive) return;
+    const at = currentMs();
+    audioClockActive = false;
+    stopAudio();
+    anchorTimeMs = at;
+    anchorWall = performance.now();
+  };
+  const resumeAudio = () => {
+    if (disposed || !audioCtx || audioCtx.state === "running") return;
+    void audioCtx.resume().catch(() => {
+    });
+  };
+  const prepareAudio = async () => {
+    if (!audioTrack || !audioSamples.length) {
+      onProgress("audio: 无音轨");
+      return;
+    }
+    if (typeof AudioDecoder === "undefined") {
+      onProgress("audio: 无 AudioDecoder");
+      return;
+    }
+    const sampleRate = Number(audioTrack.sampleRate) || 44100;
+    const channels = Math.max(1, Number(audioTrack.channels) || 2);
+    const chunks = [];
+    let total = 0;
+    let failure = "";
+    const audioDecoder = new AudioDecoder({
+      output: (data) => {
+        try {
+          const count = data.numberOfFrames;
+          const planes = [];
+          for (let channel = 0; channel < data.numberOfChannels; channel += 1) {
+            const plane = new Float32Array(count);
+            data.copyTo(plane, { planeIndex: channel, format: "f32-planar" });
+            planes.push(plane);
+          }
+          chunks.push({ planes, frames: count });
+          total += count;
+        } catch (error) {
+          failure = String(error?.message || error).slice(0, 80);
+        } finally {
+          data.close();
+        }
+      },
+      error: (error) => {
+        failure = String(error?.message || error).slice(0, 80);
+      }
+    });
+    try {
+      audioDecoder.configure({ codec: audioTrack.codec, sampleRate, numberOfChannels: channels });
+      for (const sample of audioSamples) {
+        audioDecoder.decode(
+          new EncodedAudioChunk({ type: "key", timestamp: sample.ctsUs, data: sample.data })
+        );
+      }
+      await audioDecoder.flush();
+    } catch (error) {
+      failure = String(error?.message || error).slice(0, 80);
+    } finally {
+      try {
+        audioDecoder.close();
+      } catch {
+      }
+    }
+    if (failure || !total) {
+      onProgress(`audio 失败: ${failure || "无输出"}`);
+      return;
+    }
+    try {
+      audioCtx = new AudioContext({ sampleRate });
+      audioCtx.addEventListener("statechange", syncAudioState);
+      const targetRate = Number(audioCtx.sampleRate) || sampleRate;
+      audioGain = audioCtx.createGain();
+      audioGain.gain.value = 1;
+      audioGain.connect(audioCtx.destination);
+      const skip = Math.max(0, Math.min(Number(audioTrack.mediaTime) || 0, total));
+      const usable = Math.max(0, total - skip);
+      const source = [];
+      for (let channel = 0; channel < channels; channel += 1) {
+        source.push(new Float32Array(Math.max(1, usable)));
+      }
+      let consumed = 0;
+      let written = 0;
+      for (const chunk of chunks) {
+        const drop = Math.max(0, skip - consumed);
+        const count = Math.min(Math.max(0, chunk.frames - drop), Math.max(0, usable - written));
+        if (count > 0) {
+          for (let channel = 0; channel < channels; channel += 1) {
+            const plane = chunk.planes[Math.min(channel, chunk.planes.length - 1)];
+            if (!plane) continue;
+            source[channel].set(plane.subarray(drop, drop + count), written);
+          }
+          written += count;
+        }
+        consumed += chunk.frames;
+      }
+      const outFrames = Math.max(1, Math.round(written / sampleRate * targetRate));
+      audioBuffer = audioCtx.createBuffer(channels, outFrames, targetRate);
+      for (let channel = 0; channel < channels; channel += 1) {
+        const input = source[channel];
+        const output = audioBuffer.getChannelData(channel);
+        if (targetRate === sampleRate) {
+          output.set(input.subarray(0, Math.min(outFrames, input.length)));
+          continue;
+        }
+        const step = sampleRate / targetRate;
+        for (let index = 0; index < outFrames; index += 1) {
+          const position = index * step;
+          const base = Math.floor(position);
+          const fraction = position - base;
+          const a = input[base] || 0;
+          const b = input[Math.min(base + 1, Math.max(0, written - 1))] || 0;
+          output[index] = a + (b - a) * fraction;
+        }
+      }
+      onProgress(
+        `audio ok: ${channels}ch ${sampleRate}Hz ctx=${targetRate}Hz ${(outFrames / targetRate).toFixed(1)}s skip=${skip}`
+      );
+    } catch (error) {
+      onProgress(`audio 初始化失败: ${String(error?.message || error).slice(0, 80)}`);
+      audioCtx = null;
+      audioBuffer = null;
+    }
+  };
+  const stopLoop = () => {
+    if (rafId) cancelAnimationFrame(rafId);
+    rafId = 0;
+  };
+  const load = async ({ episodeId, quality, segmentCount, resumeMs = 0 }) => {
+    if (disposed) return;
+    const rpc = getRpc();
+    state.phase = "loading";
+    state.error = "";
+    emit(true);
+    onProgress(`load: init q=${quality}`);
+    const initPayload = await rpc.getStreamInit(episodeId, quality);
+    const initBytes = decodeBase64(initPayload?.base64);
+    if (!initBytes.length) throw new PanelError("PROTOCOL", "init 段为空");
+    const parsed = parseMp4(initBytes);
+    track = parsed.video;
+    audioTrack = parsed.audio;
+    if (!track) throw new PanelError("PROTOCOL", "init 段没有视频轨");
+    onProgress(`init ok: ${track.codec} ${track.width}x${track.height} desc=${track.description?.length ?? 0}B`);
+    canvas.width = track.width || 854;
+    canvas.height = track.height || 480;
+    state.width = canvas.width;
+    state.height = canvas.height;
+    ctx.fillStyle = "#000";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    const declared = Math.floor(Number(segmentCount) || 0);
+    if (declared <= 0) throw new PanelError("PROTOCOL", "服务端未返回分片数量");
+    if (declared > MAX_LOCAL_SEGMENTS) {
+      throw new PanelError("SEGMENT_LIMIT", `本集共 ${declared} 段，超过本机解码上限 ${MAX_LOCAL_SEGMENTS} 段`);
+    }
+    samples = [];
+    const total = declared;
+    for (let seq = 1; seq <= total; seq += 1) {
+      if (disposed) return;
+      const payload = await rpc.getStreamSegment(episodeId, quality, seq);
+      const bytes = decodeBase64(payload?.base64);
+      if (!bytes.length) throw new PanelError("PROTOCOL", `分片 ${seq} 内容为空`);
+      const buckets = parseSegment(bytes, parsed.tracks, parsed.trex);
+      const list = buckets.get(track.id) || [];
+      const videoShift = Number(track.mediaTime) || 0;
+      for (const sample of list) {
+        samples.push({
+          // 减去 elst 的 media_time，把各轨对齐到同一条时间轴。
+          ctsUs: toMicros(Math.max(0, sample.time + sample.cts - videoShift), track.timescale),
+          durationUs: toMicros(sample.duration, track.timescale),
+          key: sample.key,
+          data: bytes.subarray(sample.offset, sample.offset + sample.size)
+        });
+      }
+      if (audioTrack) {
+        const audioList = buckets.get(audioTrack.id) || [];
+        for (const sample of audioList) {
+          audioSamples.push({
+            ctsUs: toMicros(sample.time, audioTrack.timescale),
+            data: bytes.subarray(sample.offset, sample.offset + sample.size)
+          });
+        }
+      }
+      state.phase = "loading";
+      state.durationMs = 0;
+      emit(true);
+      onProgress(`seg ${seq}/${total}: ${bytes.length}B samples=${samples.length}`);
+    }
+    if (!samples.length) throw new PanelError("PROTOCOL", "没有解析到视频样本");
+    const last = samples[samples.length - 1];
+    state.durationMs = Math.round((last.ctsUs + last.durationUs) / 1e3);
+    decodeConfig = {
+      codec: track.codec,
+      description: track.description,
+      codedWidth: canvas.width,
+      codedHeight: canvas.height,
+      // 有硬件解码就走硬件，没有会自动回退软件解码；720x1280 竖屏纯软解只能勉强实时。
+      hardwareAcceleration: "prefer-hardware"
+    };
+    onProgress(`cfg ${track.codec} keys=${samples.filter((sample) => sample.key).length}`);
+    pump();
+    await new Promise((resolve) => setTimeout(resolve, 350));
+    if (disposed) return;
+    pump();
+    await prepareAudio();
+    if (disposed) return;
+    anchorTimeMs = Math.max(0, Math.min(Number(resumeMs) || 0, state.durationMs));
+    anchorWall = performance.now();
+    anchored = true;
+    state.phase = "ready";
+    log(`[wvc] 就绪 ${track.codec} ${canvas.width}x${canvas.height} 样本=${samples.length} 时长=${state.durationMs}ms`);
+    onProgress(`ready ${samples.length} 帧 / ${state.durationMs}ms`);
+    emit(true);
+  };
+  const play = () => {
+    if (disposed || !decodeConfig) return;
+    if (state.phase === "ended") seek(0);
+    if (!playing) {
+      const from = currentMs();
+      anchorWall = performance.now();
+      playing = true;
+      startAudio(from);
+    }
+    state.phase = "playing";
+    pump();
+    stopLoop();
+    rafId = requestAnimationFrame(tick);
+    emit(true);
+  };
+  const pause = () => {
+    if (!playing) return;
+    anchorTimeMs = currentMs();
+    playing = false;
+    stopAudio();
+    state.phase = "paused";
+    stopLoop();
+    emit(true);
+  };
+  const seek = (ms) => {
+    if (!decodeConfig) return;
+    const target = Math.max(0, Math.min(Number(ms) || 0, state.durationMs));
+    const targetUs = target * 1e3;
+    let index = 0;
+    for (let cursor = 0; cursor < samples.length; cursor += 1) {
+      if (samples[cursor].ctsUs > targetUs) break;
+      if (samples[cursor].key) index = cursor;
+    }
+    clearFrames();
+    stopLoop();
+    stopAudio();
+    try {
+      decoder?.reset();
+    } catch {
+    }
+    decoder = null;
+    nextIndex = index;
+    anchorTimeMs = target;
+    anchorWall = performance.now();
+    anchored = true;
+    state.error = "";
+    if (playing) {
+      state.phase = "playing";
+      pump();
+      startAudio(target);
+      rafId = requestAnimationFrame(tick);
+    } else {
+      state.phase = "paused";
+      pump();
+    }
+    emit(true);
+  };
+  const destroy = () => {
+    if (disposed) return;
+    disposed = true;
+    playing = false;
+    stopLoop();
+    stopAudio();
+    try {
+      audioCtx?.removeEventListener?.("statechange", syncAudioState);
+      void audioCtx?.close();
+    } catch {
+    }
+    audioCtx = null;
+    audioBuffer = null;
+    audioSamples = [];
+    clearFrames();
+    try {
+      decoder?.close();
+    } catch {
+    }
+    decoder = null;
+    samples = [];
+    state.phase = "disposed";
+  };
+  const setVolume = (value) => {
+    const level = Math.max(0, Math.min(1, Number(value) || 0));
+    if (audioGain) audioGain.gain.value = level;
+    return level;
+  };
+  return {
+    load,
+    play,
+    pause,
+    seek,
+    setVolume,
+    destroy,
+    resumeAudio,
+    getState: () => ({ ...state, timeMs: currentMs(), volume: audioGain ? audioGain.gain.value : 1 })
+  };
+};
+
+// src/panel/player/controller.js
+var SPEEDS = [0.75, 1, 1.25, 1.5, 1.75, 2, 2.5, 3];
+var HIDE_DELAY_MS = 2600;
+var SEEK_STEP_SECONDS = 5;
+var VOLUME_STEP = 0.05;
+var RESUME_JUMP_TOLERANCE_MS = 2e3;
+var qualityRank = (quality) => {
+  const index = QUALITY_OPTIONS.indexOf(String(quality || ""));
+  return index < 0 ? -1 : QUALITY_OPTIONS.length - index;
+};
+var make = (tag, className) => {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  return node;
+};
+function createPlayer(slot, initialProps) {
+  const props = { ...initialProps || {} };
+  const t = (key, values) => typeof props.t === "function" ? props.t(key, values) : key;
+  const notify = (kind, text) => {
+    try {
+      props.notify?.(kind, text);
+    } catch {
+    }
+  };
+  const log = (...args) => {
+    try {
+      props.log?.(...args);
+    } catch {
+    }
+  };
+  let disposed = false;
+  let state = { state: MSE_STATE.IDLE, quality: "", info: null, appended: 0, segmentCount: 0 };
+  let playing = false;
+  let waiting = false;
+  let autoPlayPending = false;
+  let userPaused = false;
+  let desiredQuality = QUALITY_OPTIONS.includes(props.quality) ? props.quality : DEFAULT_QUALITY;
+  let overlayKind = "";
+  let dragging = false;
+  let fill = false;
+  let fillMarker = null;
+  let idleTimer = 0;
+  let lastReportAt = 0;
+  let lastReportedMs = Math.max(0, Number(props.positionMs) || 0);
+  const recentReports = [];
+  const rememberReport = (ms) => {
+    const now = Date.now();
+    recentReports.push({ ms, at: now });
+    while (recentReports.length && now - recentReports[0].at > 15e3) recentReports.shift();
+    if (recentReports.length > 60) recentReports.shift();
+  };
+  const wasReportedRecently = (ms) => recentReports.some((item) => Math.abs(item.ms - ms) <= 1500 && Date.now() - item.at <= 15e3);
+  let lastNoticeKey = "";
+  let lastSeekAt = 0;
+  let downloading = false;
+  let suppressPauseReport = false;
+  let pendingOverlayActions = null;
+  let downloadActionNode = null;
+  let lastActivityAt = Date.now();
+  let stallReported = false;
+  const root = make("div", "hg-player");
+  root.tabIndex = 0;
+  root.setAttribute("role", "region");
+  const view = make("div", "hg-player-view");
+  const video = document.createElement("video");
+  video.className = "hg-player-video";
+  video.playsInline = true;
+  video.setAttribute("playsinline", "");
+  video.setAttribute("webkit-playsinline", "");
+  video.preload = "auto";
+  video.volume = 1;
+  let wvc = null;
+  let endedReported = false;
+  const canDecodeLocally = () => typeof VideoDecoder !== "undefined" && typeof AudioDecoder !== "undefined";
+  let wvcBlocked = false;
+  let wvcSeq = 0;
+  let wvcQuality = QUALITY_OPTIONS.includes(props.quality) ? props.quality : DEFAULT_QUALITY;
+  const canvas = document.createElement("canvas");
+  canvas.className = "hg-player-video";
+  canvas.hidden = true;
+  canvas.addEventListener("click", (event) => {
+    event.stopPropagation();
+    if (!wvc) return;
+    wvc.resumeAudio?.();
+    if (wvc.getState().phase === "playing") {
+      wvc.pause();
+      playing = false;
+      report(true);
+    } else wvc.play();
+  });
+  const loading = make("div", "hg-player-loading");
+  loading.hidden = true;
+  const loadingSpinner = make("span", "hg-player-spinner");
+  const loadingText = make("span", "hg-player-loading-text");
+  loading.append(loadingSpinner, loadingText);
+  const bigPlay = make("button", "hg-player-bigplay");
+  bigPlay.type = "button";
+  bigPlay.hidden = true;
+  bigPlay.append(icon("play", 22));
+  const overlay = make("div", "hg-player-overlay");
+  overlay.hidden = true;
+  const card = make("div", "hg-player-card");
+  const cardTitle = make("div", "hg-player-card-title");
+  const cardText = make("div", "hg-player-card-text");
+  const cardHint = make("div", "hg-player-card-hint");
+  const cardActions = make("div", "hg-player-card-actions");
+  card.append(cardTitle, cardText, cardHint, cardActions);
+  overlay.append(card);
+  overlay.addEventListener("click", (event) => event.stopPropagation());
+  const noticePane = make("div", "hg-player-debug");
+  noticePane.hidden = true;
+  const showNotice = (lines) => {
+    const text = (Array.isArray(lines) ? lines : [lines]).filter(Boolean).slice(0, 3).join("\n");
+    noticePane.textContent = text;
+    noticePane.hidden = !text;
+  };
+  const hideNotice = () => {
+    noticePane.hidden = true;
+    noticePane.textContent = "";
+  };
+  view.append(video, canvas, loading, bigPlay, overlay, noticePane);
+  const controls = make("div", "hg-player-controls");
+  const progress = make("div", "hg-player-progress");
+  progress.setAttribute("role", "slider");
+  progress.setAttribute("tabindex", "-1");
+  const track = make("div", "hg-player-track");
+  const buffered = make("div", "hg-player-buffered");
+  const hoverFill = make("div", "hg-player-hover");
+  const played = make("div", "hg-player-played");
+  track.append(buffered, hoverFill, played);
+  const thumb = make("div", "hg-player-thumb");
+  const tip = make("div", "hg-player-tip");
+  tip.hidden = true;
+  progress.append(track, thumb, tip);
+  const bar = make("div", "hg-player-bar");
+  const button = (name, onClick, className) => {
+    const node = make("button", className || "hg-player-btn");
+    node.type = "button";
+    node.append(icon(name, 16));
+    node.addEventListener("click", (event) => {
+      event.stopPropagation();
+      onClick();
+      showControls();
+    });
+    return node;
+  };
+  const playBtn = button("play", () => togglePlay());
+  const nextBtn = button("next", () => nextEpisode());
+  const timeLabel = make("span", "hg-player-time");
+  const spacer = make("span", "hg-player-spacer");
+  const muteBtn = button("volume", () => toggleMute());
+  const volume = document.createElement("input");
+  volume.type = "range";
+  volume.className = "hg-player-volume";
+  volume.min = "0";
+  volume.max = "1";
+  volume.step = "0.01";
+  volume.value = "1";
+  volume.addEventListener("input", () => setVolume(Number(volume.value)));
+  volume.addEventListener("change", () => showControls());
+  const qualitySelect = document.createElement("select");
+  qualitySelect.className = "hg-player-select hg-player-quality";
+  for (const quality of QUALITY_OPTIONS) {
+    const option = document.createElement("option");
+    option.value = quality;
+    option.textContent = quality;
+    qualitySelect.append(option);
+  }
+  qualitySelect.addEventListener("change", () => setQuality(qualitySelect.value, true));
+  qualitySelect.addEventListener("click", (event) => event.stopPropagation());
+  const speedSelect = document.createElement("select");
+  speedSelect.className = "hg-player-select hg-player-speed";
+  for (const speed of SPEEDS) {
+    const option = document.createElement("option");
+    option.value = String(speed);
+    option.textContent = `${speed}x`;
+    speedSelect.append(option);
+  }
+  speedSelect.value = "1";
+  speedSelect.addEventListener("change", () => {
+    if (wvc) {
+      syncSpeed();
+      return;
+    }
+    video.playbackRate = Number(speedSelect.value) || 1;
+    syncSpeed();
+    showControls();
+  });
+  speedSelect.addEventListener("click", (event) => event.stopPropagation());
+  const pipBtn = button("pip", () => void togglePip());
+  pipBtn.classList.add("hg-player-pip");
+  const fillBtn = button("expand", () => toggleFill());
+  bar.append(playBtn, nextBtn, timeLabel, spacer, muteBtn, volume, qualitySelect, speedSelect, pipBtn, fillBtn);
+  controls.append(progress, bar);
+  root.append(view, controls);
+  if (slot) slot.replaceChildren(root);
+  const engine = createMseEngine({
+    video,
+    getRpc: () => props.rpc,
+    log,
+    onState: (snapshot) => handleEngineState(snapshot),
+    onError: (error) => {
+      try {
+        props.onError?.(error);
+      } catch {
+      }
+    }
+  });
+  const durationOf = () => {
+    if (wvc) {
+      const ms = Number(wvc.getState().durationMs) || 0;
+      if (ms > 0) return ms / 1e3;
+    }
+    const fromVideo = Number(video.duration);
+    if (Number.isFinite(fromVideo) && fromVideo > 0) return fromVideo;
+    const fromInfo = (state.info?.durationMs || 0) / 1e3;
+    return Number.isFinite(fromInfo) && fromInfo > 0 ? fromInfo : 0;
+  };
+  const currentMs = () => {
+    if (wvc) return Math.round(Number(wvc.getState().timeMs) || 0);
+    const value = Number(video.currentTime);
+    return Number.isFinite(value) && value > 0 ? Math.round(value * 1e3) : 0;
+  };
+  const currentQuality = () => wvc ? wvcQuality : state.quality || props.quality || DEFAULT_QUALITY;
+  const hasNext = () => {
+    const list = Array.isArray(props.episodes) ? props.episodes : [];
+    const next = list[props.episodeIndex + 1];
+    return !!next && next.playable !== false;
+  };
+  const setButtonIcon = (node, name) => {
+    node.replaceChildren(icon(name, 16));
+  };
+  const applyLabels = () => {
+    root.setAttribute("aria-label", t("player.region"));
+    playBtn.title = t("player.playPause");
+    playBtn.setAttribute("aria-label", playing ? t("player.pause") : t("player.play"));
+    nextBtn.title = hasNext() ? t("player.next") : t("player.lastEpisode");
+    nextBtn.setAttribute("aria-label", t("player.next"));
+    muteBtn.title = video.muted ? t("player.unmute") : t("player.mute");
+    muteBtn.setAttribute("aria-label", muteBtn.title);
+    volume.setAttribute("aria-label", t("player.volume"));
+    qualitySelect.title = t("player.quality");
+    qualitySelect.setAttribute("aria-label", t("player.quality"));
+    syncSpeed();
+    pipBtn.title = t("player.pip");
+    pipBtn.setAttribute("aria-label", t("player.pip"));
+    fillBtn.title = fill ? t("player.exitFill") : t("player.fill");
+    fillBtn.setAttribute("aria-label", fillBtn.title);
+    progress.setAttribute("aria-label", t("player.seek"));
+    bigPlay.title = t("player.play");
+    bigPlay.setAttribute("aria-label", t("player.play"));
+  };
+  const setOverlay = (kind, { title, text, hint, actions }) => {
+    hideNotice();
+    overlayKind = kind;
+    overlay.hidden = false;
+    cardTitle.textContent = title || "";
+    cardText.textContent = text || "";
+    cardHint.textContent = hint || "";
+    cardHint.hidden = !hint;
+    pendingOverlayActions = Array.isArray(actions) ? actions : [];
+    renderOverlayActions();
+    updateLoading();
+    updateBigPlay();
+    showControls();
+  };
+  const renderOverlayActions = () => {
+    const actions = pendingOverlayActions || [];
+    downloadActionNode = null;
+    const nodes = actions.map((action) => {
+      const node = make("button", `hg-player-action${action.primary ? " is-primary" : ""}`);
+      node.type = "button";
+      node.textContent = action.label;
+      if (action.disabled) node.disabled = true;
+      if (action.kind === "download") downloadActionNode = node;
+      node.addEventListener("click", (event) => {
+        event.stopPropagation();
+        try {
+          action.onClick?.();
+        } catch (error) {
+          log("[player] 覆盖层动作失败", String(error?.message || error));
+        }
+      });
+      return node;
+    });
+    cardActions.replaceChildren(...nodes);
+    cardActions.hidden = nodes.length === 0;
+  };
+  const hideOverlay = () => {
+    if (!overlayKind) return;
+    overlayKind = "";
+    overlay.hidden = true;
+    pendingOverlayActions = null;
+    updateLoading();
+    updateBigPlay();
+    showControls();
+  };
+  const describePlaybackError = (error) => {
+    const code = String(error?.code || "");
+    if (code === "PLAYBACK_STALL") {
+      return { message: t("player.stalled"), hint: t("player.errorHint") };
+    }
+    if (code.startsWith("MEDIA_") || code === "PLAYER_ERROR" || code === "ABORTED") {
+      return { message: t("player.segmentFailed"), hint: t("player.errorHint") };
+    }
+    const info = describeError(t, error);
+    return { message: info.message, hint: info.hint || t("player.errorHint") };
+  };
+  const report = (force) => {
+    if (disposed) return;
+    const now = Date.now();
+    if (!force && now - lastReportAt < 1e3) return;
+    lastReportAt = now;
+    const positionMs = currentMs();
+    lastReportedMs = positionMs;
+    rememberReport(positionMs);
+    try {
+      props.onProgress?.({
+        episodeIndex: props.episodeIndex,
+        positionMs,
+        durationMs: Math.round(durationOf() * 1e3)
+      });
+    } catch (error) {
+      log("[player] onProgress 回调异常", String(error?.message || error));
+    }
+  };
+  const safePlay = () => {
+    if (disposed) return;
+    if (overlayKind === "degraded" || overlayKind === "error" || overlayKind === "notice") return;
+    userPaused = false;
+    if (wvc) {
+      wvc.play();
+      playing = true;
+      syncPlayButton();
+      updateBigPlay();
+      return;
+    }
+    let promise = null;
+    try {
+      promise = video.play();
+    } catch (error) {
+      log("[player] play 调用失败", String(error?.message || error));
+    }
+    if (promise && typeof promise.catch === "function") {
+      promise.catch((error) => {
+        updateBigPlay();
+        if (error?.name === "NotAllowedError") notify("info", t("player.autoplayBlocked"));
+        else log("[player] play 被拒绝", String(error?.message || error));
+      });
+    }
+  };
+  const togglePlay = () => {
+    if (overlayKind === "degraded" || overlayKind === "error" || overlayKind === "notice") return;
+    if (wvc) {
+      if (wvc.getState().phase === "playing") {
+        userPaused = true;
+        wvc.pause();
+        playing = false;
+        report(true);
+      } else {
+        safePlay();
+        return;
+      }
+      syncPlayButton();
+      updateBigPlay();
+      return;
+    }
+    if (video.paused || video.ended) {
+      safePlay();
+    } else {
+      userPaused = true;
+      video.pause();
+    }
+  };
+  const replay = () => {
+    hideOverlay();
+    userPaused = false;
+    if (wvc) {
+      wvc.seek(0);
+      wvc.play();
+      playing = true;
+      syncPlayButton();
+      updateBigPlay();
+      return;
+    }
+    try {
+      video.currentTime = 0;
+    } catch {
+    }
+    safePlay();
+  };
+  function nextEpisode() {
+    if (!hasNext()) {
+      notify("info", t("player.lastEpisode"));
+      return;
+    }
+    try {
+      props.onSelectEpisode?.(props.episodeIndex + 1);
+    } catch (error) {
+      log("[player] 切集回调异常", String(error?.message || error));
+    }
+  }
+  const seekTo = (seconds, options = {}) => {
+    const duration = durationOf();
+    if (!(duration > 0)) return;
+    const target = clamp(seconds, 0, Math.max(0, duration - 0.05));
+    if (wvc) {
+      wvc.seek(Math.round(target * 1e3));
+      syncTime();
+      syncProgressBar();
+      if (!options.silent) report(true);
+      return;
+    }
+    try {
+      video.currentTime = target;
+    } catch {
+      return;
+    }
+    syncTime();
+    syncProgressBar();
+    if (!options.silent) report(true);
+  };
+  const seekBy = (delta) => seekTo(currentMs() / 1e3 + delta);
+  const setVolume = (value) => {
+    const next = clamp(value, 0, 1);
+    video.volume = next;
+    video.muted = next <= 1e-3;
+    if (wvc) wvc.setVolume(next);
+    syncVolume();
+  };
+  const toggleMute = () => {
+    video.muted = !video.muted;
+    if (!video.muted && video.volume <= 1e-3) video.volume = 0.5;
+    if (wvc) wvc.setVolume(video.muted ? 0 : video.volume);
+    syncVolume();
+  };
+  const cycleSpeed = (direction) => {
+    if (wvc) {
+      syncSpeed();
+      return;
+    }
+    const current = Number(video.playbackRate) || 1;
+    let index = 0;
+    let best = Number.POSITIVE_INFINITY;
+    SPEEDS.forEach((speed, position) => {
+      const distance = Math.abs(speed - current);
+      if (distance < best) {
+        best = distance;
+        index = position;
+      }
+    });
+    const next = SPEEDS[clamp(index + direction, 0, SPEEDS.length - 1)];
+    video.playbackRate = next;
+    syncSpeed();
+  };
+  const setQuality = (quality, persist) => {
+    const next = String(quality || "");
+    if (!next) return;
+    desiredQuality = next;
+    if (persist) props.onQualityChange?.(next);
+    if (canDecodeLocally() && !wvcBlocked) {
+      const positionMs = Math.max(0, Math.round(currentMs()));
+      wvcQuality = next;
+      syncQualitySelect();
+      userPaused = false;
+      autoPlayPending = true;
+      lastNoticeKey = "";
+      if (qualityRank(next) >= qualityRank("540p")) notify("info", t("player.qualityHeavy"));
+      void playWebCodecs({ quality: next, resumeMs: positionMs });
+      return;
+    }
+    if (next === state.quality) {
+      if (state.state === MSE_STATE.DEGRADED || state.state === MSE_STATE.ERROR) retryPlayback();
+      else syncQualitySelect();
+      return;
+    }
+    userPaused = false;
+    autoPlayPending = true;
+    lastNoticeKey = "";
+    void engine.switchQuality(next);
+  };
+  const retryPlayback = () => {
+    userPaused = false;
+    autoPlayPending = true;
+    lastNoticeKey = "";
+    void engine.retry();
+  };
+  const togglePip = async () => {
+    try {
+      if (document.pictureInPictureElement) {
+        await document.exitPictureInPicture();
+      } else if (typeof video.requestPictureInPicture === "function") {
+        await video.requestPictureInPicture();
+      }
+    } catch (error) {
+      notify("error", t("player.pipFailed"));
+      log("[player] 画中画失败", String(error?.message || error));
+    }
+  };
+  const onDocumentKey = (event) => {
+    if (!fill) return;
+    if (event.key === "Escape") {
+      event.preventDefault();
+      exitFill();
+    }
+  };
+  const enterFill = () => {
+    if (fill || !root.parentNode) return;
+    fill = true;
+    fillMarker = document.createComment("hg-player-fill");
+    root.parentNode.insertBefore(fillMarker, root);
+    document.body.appendChild(root);
+    root.classList.add("is-fill");
+    document.addEventListener("keydown", onDocumentKey);
+    syncFillButton();
+    try {
+      root.focus({ preventScroll: true });
+    } catch {
+    }
+  };
+  const exitFill = () => {
+    if (!fill) return;
+    fill = false;
+    document.removeEventListener("keydown", onDocumentKey);
+    root.classList.remove("is-fill");
+    if (fillMarker && fillMarker.parentNode) fillMarker.parentNode.insertBefore(root, fillMarker);
+    else if (slot && !slot.contains(root)) slot.appendChild(root);
+    if (fillMarker) fillMarker.remove();
+    fillMarker = null;
+    syncFillButton();
+  };
+  const toggleFill = () => {
+    if (fill) exitFill();
+    else enterFill();
+  };
+  const syncFillButton = () => {
+    setButtonIcon(fillBtn, fill ? "collapse" : "expand");
+    fillBtn.title = fill ? t("player.exitFill") : t("player.fill");
+    fillBtn.setAttribute("aria-label", fillBtn.title);
+  };
+  const syncPlayButton = () => {
+    setButtonIcon(playBtn, playing ? "pause" : "play");
+    playBtn.title = playing ? t("player.pause") : t("player.play");
+    playBtn.setAttribute("aria-label", playBtn.title);
+  };
+  const syncTime = () => {
+    const duration = durationOf();
+    timeLabel.textContent = `${formatClock(currentMs())} / ${formatClock(duration * 1e3)}`;
+  };
+  const syncBuffered = () => {
+    if (wvc) {
+      buffered.replaceChildren();
+      return;
+    }
+    const duration = durationOf();
+    const ranges = video.buffered;
+    const nodes = [];
+    if (duration > 0 && ranges) {
+      for (let index = 0; index < ranges.length; index += 1) {
+        const start = ranges.start(index);
+        const end = ranges.end(index);
+        const node = make("span", "hg-player-buffered-range");
+        node.style.left = `${clamp(start / duration * 100, 0, 100)}%`;
+        node.style.width = `${clamp((end - start) / duration * 100, 0, 100)}%`;
+        nodes.push(node);
+      }
+    }
+    buffered.replaceChildren(...nodes);
+  };
+  const syncProgressBar = () => {
+    const duration = durationOf();
+    const time = clamp(currentMs() / 1e3, 0, duration || 0);
+    const percent = duration > 0 ? time / duration * 100 : 0;
+    played.style.width = `${percent}%`;
+    thumb.style.left = `${percent}%`;
+    progress.setAttribute("aria-valuemin", "0");
+    progress.setAttribute("aria-valuemax", String(Math.max(0, Math.round(duration))));
+    progress.setAttribute("aria-valuenow", String(Math.round(time)));
+    progress.setAttribute("aria-valuetext", `${formatClock(time * 1e3)} / ${formatClock(duration * 1e3)}`);
+    syncTime();
+    syncBuffered();
+  };
+  const syncVolume = () => {
+    const muted = video.muted || video.volume <= 1e-3;
+    setButtonIcon(muteBtn, muted ? "mute" : "volume");
+    muteBtn.title = muted ? t("player.unmute") : t("player.mute");
+    muteBtn.setAttribute("aria-label", muteBtn.title);
+    volume.value = muted ? "0" : String(video.volume);
+  };
+  const syncSpeed = () => {
+    const unsupported = Boolean(wvc);
+    speedSelect.disabled = unsupported;
+    speedSelect.title = unsupported ? t("player.speedUnsupported") : t("player.speed");
+    speedSelect.setAttribute("aria-label", speedSelect.title);
+    speedSelect.value = unsupported ? "1" : String(Number(video.playbackRate) || 1);
+  };
+  const syncQualitySelect = () => {
+    const candidate = wvc ? wvcQuality : state.quality || desiredQuality || DEFAULT_QUALITY;
+    const quality = QUALITY_OPTIONS.includes(candidate) ? candidate : desiredQuality;
+    if (qualitySelect.value !== quality) qualitySelect.value = quality;
+  };
+  const updateNextButton = () => {
+    const enabled = hasNext();
+    nextBtn.disabled = !enabled;
+    nextBtn.title = enabled ? t("player.next") : t("player.lastEpisode");
+  };
+  const updateLoading = () => {
+    if (disposed) return;
+    let busy = false;
+    let textKey = "player.loading";
+    if (wvc) {
+      const snapshot = wvc.getState();
+      const phase = snapshot.phase;
+      const fetching = phase === "idle" || phase === "loading";
+      const firstFramePending = phase === "ready" || phase === "playing" && !(Number(snapshot.output) > 0);
+      busy = fetching || firstFramePending;
+      textKey = fetching ? "player.loading" : "player.buffering";
+    } else {
+      const phase = state.state;
+      const initial = phase === MSE_STATE.PROBING || phase === MSE_STATE.OPENING;
+      const appending = phase === MSE_STATE.BUFFERING || phase === MSE_STATE.RECOVERING;
+      const stalled = waiting && (phase === MSE_STATE.READY || phase === MSE_STATE.BUFFERING);
+      busy = initial || appending && (state.appended || 0) === 0 || stalled;
+      textKey = initial ? "player.loading" : "player.buffering";
+    }
+    loading.hidden = !busy || Boolean(overlayKind);
+    if (!busy) return;
+    loadingText.textContent = t(textKey);
+  };
+  const updateBigPlay = () => {
+    if (disposed) return;
+    if (wvc) {
+      const phase = wvc.getState().phase;
+      const show2 = phase === "paused" || phase === "ended";
+      bigPlay.hidden = Boolean(overlayKind) || !show2;
+      return;
+    }
+    const ready = (state.appended || 0) > 0 || state.state === MSE_STATE.ENDED;
+    const show = !overlayKind && !waiting && ready && video.paused;
+    bigPlay.hidden = !show;
+  };
+  const showControls = () => {
+    if (disposed) return;
+    root.classList.remove("is-idle");
+    if (idleTimer) {
+      clearTimeout(idleTimer);
+      idleTimer = 0;
+    }
+    if (!playing || overlayKind || dragging) return;
+    idleTimer = setTimeout(() => {
+      idleTimer = 0;
+      if (!disposed && playing && !dragging && !overlayKind) root.classList.add("is-idle");
+    }, HIDE_DELAY_MS);
+  };
+  function handleEngineState(snapshot) {
+    if (disposed) return;
+    const previousAppended = state.appended || 0;
+    const previousPhase = state.state;
+    state = snapshot;
+    if ((snapshot.appended || 0) !== previousAppended || snapshot.state !== previousPhase) {
+      lastActivityAt = Date.now();
+      stallReported = false;
+    }
+    syncQualitySelect();
+    syncPlayButton();
+    syncProgressBar();
+    updateNextButton();
+    if (snapshot.state === MSE_STATE.DEGRADED) {
+      showDegraded(snapshot);
+    } else if (snapshot.state === MSE_STATE.ERROR) {
+      showError(snapshot.error);
+    } else if (snapshot.state === MSE_STATE.READY) {
+      hideNotice();
+      if (overlayKind === "degraded" || overlayKind === "error" || overlayKind === "notice") hideOverlay();
+      if (snapshot.reason === "quality") {
+        const key = `quality:${snapshot.quality}`;
+        if (lastNoticeKey !== key) {
+          lastNoticeKey = key;
+          if (snapshot.resumeClamped) notify("info", t("player.resumeClamped"));
+          else notify("success", t("player.qualitySwitched", { quality: snapshot.quality }));
+        }
+      } else if (snapshot.resumeClamped && lastNoticeKey !== "resume-clamped") {
+        lastNoticeKey = "resume-clamped";
+        notify("info", t("player.resumeClamped"));
+      }
+      if (autoPlayPending && !userPaused && video.paused) {
+        autoPlayPending = false;
+        safePlay();
+      }
+    } else if (snapshot.state === MSE_STATE.ENDED) {
+    } else if (snapshot.state === MSE_STATE.PROBING) {
+      if (snapshot.mode === "local") showTranscoding(snapshot);
+      else if (overlayKind === "degraded" || overlayKind === "error" || overlayKind === "notice") hideOverlay();
+    } else if (snapshot.state === MSE_STATE.BUFFERING && snapshot.mode === "local") {
+      showTranscoding(snapshot);
+    }
+    updateLoading();
+    updateBigPlay();
+    showControls();
+  }
+  const DEGRADE_REASONS = {
+    "no-mse": "无 MSE",
+    codec: "编码不被接受",
+    "add-source-buffer": "SourceBuffer 被拒",
+    "src-not-supported": "解码器拒绝该流",
+    decode: "解码失败"
+  };
+  const showDegraded = (snapshot) => {
+    const codec = snapshot.codecLabel || "HEVC";
+    const reason = snapshot.degradedReason ? DEGRADE_REASONS[snapshot.degradedReason] || "" : "";
+    const actions = [
+      {
+        label: t("player.playDirect"),
+        kind: "direct",
+        primary: true,
+        // 用户主动重试：清掉本次会话的失败标记，重新走一遍本机解码。
+        onClick: () => {
+          wvcBlocked = false;
+          void playWebCodecs();
+        }
+      },
+      {
+        label: t("player.transcode"),
+        onClick: () => playTranscoded(snapshot)
+      },
+      { label: t("player.download"), kind: "download", onClick: () => void downloadEpisode() },
+      { label: t("player.copyAddress"), onClick: () => void copyAddress() },
+      { label: t("player.retry"), onClick: () => retryPlayback() }
+    ];
+    setOverlay("degraded", {
+      title: t("player.unsupportedTitle"),
+      text: t("player.unsupportedHint", { codec }),
+      hint: [
+        snapshot.info?.definition ? t("player.actualQuality", { quality: snapshot.info.definition }) : "",
+        reason ? `降级原因：${reason}` : ""
+      ].filter(Boolean).join(" · "),
+      actions
+    });
+  };
+  const playTranscoded = (snapshot) => {
+    const episodeId = snapshot?.episodeId || state.episodeId;
+    if (!episodeId) return;
+    void engine.loadLocal({
+      episodeId,
+      quality: snapshot?.quality || state.quality || props.quality,
+      resumeMs: snapshot?.resumeAppliedMs || 0,
+      autoplay: true,
+      reason: "transcode"
+    });
+  };
+  const showTranscoding = (snapshot) => {
+    const percent = Math.max(
+      Number(snapshot.transcodeProgress) || 0,
+      Number(snapshot.transcode?.progress) || 0
+    );
+    setOverlay("notice", {
+      title: t("player.transcodingTitle"),
+      text: t("player.transcodingHint", { percent: Math.round(percent) }),
+      hint: snapshot.info?.definition ? t("player.actualQuality", { quality: snapshot.info.definition }) : "",
+      actions: []
+    });
+  };
+  const showError = (error) => {
+    const info = describePlaybackError(error);
+    const current = currentQuality();
+    const actions = [
+      {
+        label: t("player.playDirect"),
+        kind: "direct",
+        primary: true,
+        // 用户主动重试：清掉本次会话的失败标记，重新走一遍本机解码。
+        onClick: () => {
+          wvcBlocked = false;
+          void playWebCodecs();
+        }
+      },
+      { label: t("player.retry"), onClick: () => retryPlayback() }
+    ];
+    for (const quality of ["360p", "480p"]) {
+      if (quality === current) continue;
+      actions.push({ label: t("player.switchTo", { quality }), onClick: () => setQuality(quality, true) });
+    }
+    setOverlay("error", {
+      title: t("player.errorTitle"),
+      text: info.message,
+      hint: info.hint,
+      actions
+    });
+  };
+  const copyAddress = async () => {
+    const episode = props.episode;
+    if (!episode?.id) {
+      notify("error", t("player.addressUnavailable"));
+      return;
+    }
+    const port = Number(props.rpc?.getState?.().port) || 0;
+    if (!port) {
+      notify("error", t("player.addressUnavailable"));
+      return;
+    }
+    const quality = currentQuality();
+    const address = `http://127.0.0.1:${port}/stream/info?episodeId=${encodeURIComponent(episode.id)}&quality=${encodeURIComponent(quality)}`;
+    const ok = await copyText(address);
+    notify(ok ? "success" : "error", ok ? t("player.copyDone") : t("player.copyFailed"));
+  };
+  const downloadEpisode = async () => {
+    if (downloading || disposed) return;
+    const episode = props.episode;
+    const quality = currentQuality();
+    const total = state.info?.segmentCount || 0;
+    if (!episode?.id || !total) {
+      notify("error", t("player.downloadFailed", { error: t("player.addressUnavailable") }));
+      return;
+    }
+    downloading = true;
+    if (downloadActionNode) {
+      downloadActionNode.disabled = true;
+      downloadActionNode.textContent = t("player.downloading", { done: 0, total });
+    }
+    notify("info", t("player.downloading", { done: 0, total }));
+    try {
+      const initPayload = await props.rpc.getStreamInit(episode.id, quality);
+      const parts = [decodeBase64(initPayload?.base64)];
+      for (let seq = 1; seq <= total; seq += 1) {
+        if (disposed) return;
+        const payload = await props.rpc.getStreamSegment(episode.id, quality, seq);
+        parts.push(decodeBase64(payload?.base64));
+        if (downloadActionNode) downloadActionNode.textContent = t("player.downloading", { done: seq, total });
+      }
+      const blob = new Blob(parts, { type: "video/mp4" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `${safeFileName(props.series?.title || "episode")}-${episode.number ?? props.episodeIndex + 1}.mp4`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      setTimeout(() => {
+        try {
+          URL.revokeObjectURL(url);
+        } catch {
+        }
+      }, 6e4);
+      notify("success", t("player.downloadDone"));
+    } catch (error) {
+      notify("error", t("player.downloadFailed", { error: String(error?.message || error) }));
+      log("[player] 下载失败", String(error?.message || error));
+    } finally {
+      downloading = false;
+      if (downloadActionNode) {
+        downloadActionNode.disabled = false;
+        downloadActionNode.textContent = t("player.download");
+      }
+    }
+  };
+  const timeFromClientX = (clientX) => {
+    const rect = track.getBoundingClientRect();
+    if (!(rect.width > 0)) return 0;
+    const ratio = clamp((clientX - rect.left) / rect.width, 0, 1);
+    return ratio * durationOf();
+  };
+  const showHover = (seconds) => {
+    const duration = durationOf();
+    if (!(duration > 0)) return;
+    const ratio = clamp(seconds / duration, 0, 1);
+    hoverFill.style.width = `${ratio * 100}%`;
+    tip.hidden = false;
+    tip.textContent = formatClock(seconds * 1e3);
+    tip.style.left = `${clamp(ratio * 100, 4, 96)}%`;
+  };
+  const clearHover = () => {
+    hoverFill.style.width = "0%";
+    tip.hidden = true;
+  };
+  progress.addEventListener("pointerdown", (event) => {
+    if (!(durationOf() > 0)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    dragging = true;
+    progress.classList.add("is-dragging");
+    try {
+      progress.setPointerCapture(event.pointerId);
+    } catch {
+    }
+    try {
+      root.focus({ preventScroll: true });
+    } catch {
+    }
+    showControls();
+    const seconds = timeFromClientX(event.clientX);
+    showHover(seconds);
+    seekTo(seconds, { silent: true });
+  });
+  progress.addEventListener("pointermove", (event) => {
+    const seconds = timeFromClientX(event.clientX);
+    showHover(seconds);
+    if (!dragging) return;
+    const now = Date.now();
+    if (now - lastSeekAt < 120) return;
+    lastSeekAt = now;
+    seekTo(seconds, { silent: true });
+  });
+  const finishDrag = (event) => {
+    if (!dragging) return;
+    dragging = false;
+    progress.classList.remove("is-dragging");
+    try {
+      progress.releasePointerCapture(event.pointerId);
+    } catch {
+    }
+    const seconds = timeFromClientX(event.clientX);
+    seekTo(seconds);
+    if (!playing) updateBigPlay();
+    showControls();
+  };
+  progress.addEventListener("pointerup", finishDrag);
+  progress.addEventListener("pointercancel", finishDrag);
+  progress.addEventListener("pointerleave", () => {
+    if (!dragging) clearHover();
+  });
+  let clickTimer = 0;
+  const onViewClick = () => {
+    if (clickTimer) return;
+    clickTimer = setTimeout(() => {
+      clickTimer = 0;
+      togglePlay();
+    }, 220);
+  };
+  const onViewDoubleClick = () => {
+    if (clickTimer) {
+      clearTimeout(clickTimer);
+      clickTimer = 0;
+    }
+    toggleFill();
+  };
+  view.addEventListener("click", onViewClick);
+  view.addEventListener("dblclick", onViewDoubleClick);
+  view.addEventListener("pointerdown", () => {
+    if (document.activeElement !== root) {
+      try {
+        root.focus({ preventScroll: true });
+      } catch {
+      }
+    }
+  });
+  bigPlay.addEventListener("click", (event) => {
+    event.stopPropagation();
+    safePlay();
+  });
+  const onKeyDown = (event) => {
+    if (event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey) return;
+    const target = event.target;
+    const tagName = target && target.tagName ? String(target.tagName).toLowerCase() : "";
+    if (tagName === "select" || tagName === "input" || tagName === "textarea") return;
+    const key = event.key;
+    const onButton = target && typeof target.closest === "function" && target.closest("button");
+    if (onButton && (key === " " || key === "Spacebar" || key === "Enter")) return;
+    if (key === " " || key === "Spacebar" || key === "k" || key === "K") {
+      event.preventDefault();
+      togglePlay();
+    } else if (key === "ArrowLeft") {
+      event.preventDefault();
+      seekBy(-SEEK_STEP_SECONDS);
+    } else if (key === "ArrowRight") {
+      event.preventDefault();
+      seekBy(SEEK_STEP_SECONDS);
+    } else if (key === "ArrowUp") {
+      event.preventDefault();
+      setVolume((Number(video.volume) || 0) + VOLUME_STEP);
+    } else if (key === "ArrowDown") {
+      event.preventDefault();
+      setVolume((Number(video.volume) || 0) - VOLUME_STEP);
+    } else if (key === "m" || key === "M") {
+      event.preventDefault();
+      toggleMute();
+    } else if (key === "f" || key === "F") {
+      event.preventDefault();
+      toggleFill();
+    } else if (key === "Escape") {
+      if (fill) {
+        event.preventDefault();
+        exitFill();
+      }
+    } else if (key === "n" || key === "N") {
+      event.preventDefault();
+      nextEpisode();
+    } else if (key === "<" || key === ">") {
+      event.preventDefault();
+      cycleSpeed(key === "<" ? -1 : 1);
+    } else {
+      return;
+    }
+    showControls();
+  };
+  root.addEventListener("keydown", onKeyDown);
+  root.addEventListener("pointermove", () => showControls());
+  root.addEventListener("pointerdown", () => {
+    wvc?.resumeAudio?.();
+    showControls();
+  });
+  root.addEventListener("mouseleave", () => {
+    if (playing && !dragging && !overlayKind) root.classList.add("is-idle");
+  });
+  video.addEventListener("play", () => {
+    playing = true;
+    userPaused = false;
+    autoPlayPending = false;
+    suppressPauseReport = false;
+    syncPlayButton();
+    updateBigPlay();
+    showControls();
+  });
+  video.addEventListener("playing", () => {
+    playing = true;
+    waiting = false;
+    updateLoading();
+    updateBigPlay();
+    syncPlayButton();
+    showControls();
+  });
+  video.addEventListener("pause", () => {
+    playing = false;
+    waiting = false;
+    syncPlayButton();
+    updateLoading();
+    updateBigPlay();
+    showControls();
+    if (suppressPauseReport) suppressPauseReport = false;
+    else report(true);
+  });
+  video.addEventListener("waiting", () => {
+    waiting = true;
+    updateLoading();
+    showControls();
+  });
+  video.addEventListener("canplay", () => {
+    waiting = false;
+    updateLoading();
+    updateBigPlay();
+  });
+  video.addEventListener("timeupdate", () => {
+    syncProgressBar();
+    report(false);
+  });
+  video.addEventListener("durationchange", () => {
+    syncProgressBar();
+  });
+  video.addEventListener("progress", () => syncBuffered());
+  video.addEventListener("seeked", () => {
+    syncProgressBar();
+    report(true);
+    updateBigPlay();
+  });
+  video.addEventListener("volumechange", () => syncVolume());
+  video.addEventListener("ratechange", () => syncSpeed());
+  const handleEnded = () => {
+    if (disposed) return;
+    playing = false;
+    waiting = false;
+    syncPlayButton();
+    updateLoading();
+    updateBigPlay();
+    report(true);
+    const durationMs = Math.round(durationOf() * 1e3);
+    try {
+      props.onEnded?.({ episodeIndex: props.episodeIndex, durationMs });
+    } catch (error) {
+      log("[player] onEnded 回调异常", String(error?.message || error));
+    }
+    const actions = [{ label: t("player.replay"), primary: true, onClick: replay }];
+    if (hasNext()) actions.push({ label: t("player.nextEpisode"), onClick: nextEpisode });
+    setOverlay("ended", {
+      title: t("player.ended"),
+      text: hasNext() ? t("player.endedNext") : t("player.endedLast"),
+      hint: "",
+      actions
+    });
+  };
+  video.addEventListener("ended", handleEnded);
+  const stopWebCodecs = () => {
+    wvcSeq += 1;
+    const hadPlayer = Boolean(wvc);
+    if (wvc) {
+      try {
+        wvc.destroy();
+      } catch {
+      }
+      wvc = null;
+    }
+    if (canvas) {
+      canvas.hidden = true;
+      canvas.style.display = "";
+    }
+    video.style.visibility = "";
+    if (hadPlayer) {
+      playing = false;
+      syncPlayButton();
+      syncSpeed();
+    }
+    syncQualitySelect();
+  };
+  const fallbackFromWebCodecs = () => {
+    if (wvcBlocked) return;
+    report(true);
+    const reportedMs = Math.max(0, Number(lastReportedMs) || 0);
+    wvcBlocked = true;
+    const episodeId = props.episode?.id || state.episodeId || "";
+    stopWebCodecs();
+    showNotice([t("player.decodeFailed"), t("player.fallbackCompatible")]);
+    if (disposed || !episodeId) return;
+    const loadOptions = {
+      episodeId,
+      quality: props.quality || DEFAULT_QUALITY,
+      resumeMs: reportedMs > 0 ? reportedMs : Math.max(0, Number(props.positionMs) || 0),
+      autoplay: true,
+      reason: "initial"
+    };
+    void engine.load(loadOptions);
+  };
+  const playWebCodecs = async (options) => {
+    if (!canDecodeLocally()) {
+      wvcBlocked = true;
+      showNotice([t("player.decodeFailed")]);
+      return;
+    }
+    let player = null;
+    stopWebCodecs();
+    const seq = wvcSeq;
+    endedReported = false;
+    hideNotice();
+    try {
+      const episodeId = props.episode?.id || state.episodeId || "";
+      if (!episodeId) return;
+      const quality = options?.quality || wvcQuality || DEFAULT_QUALITY;
+      const resumeMs = Number.isFinite(options?.resumeMs) ? Math.max(0, options.resumeMs) : Math.max(0, Number(props.positionMs) || 0);
+      let segmentCount = 0;
+      let actualQuality = "";
+      try {
+        const info = await props.rpc?.getStreamInfo?.(episodeId, quality);
+        segmentCount = Number(info?.segmentCount) || 0;
+        actualQuality = String(info?.definition || "");
+      } catch (error) {
+        log("[wvc] 取流信息失败", String(error?.message || error));
+      }
+      if (seq !== wvcSeq || disposed) return;
+      if (actualQuality) {
+        wvcQuality = actualQuality;
+        syncQualitySelect();
+      }
+      hideOverlay();
+      loading.hidden = false;
+      loadingText.textContent = t("player.loading");
+      try {
+        video.pause();
+      } catch {
+      }
+      video.style.visibility = "hidden";
+      canvas.hidden = false;
+      canvas.style.display = "block";
+      canvas.width = 854;
+      canvas.height = 480;
+      player = createWebCodecsPlayer({
+        canvas,
+        getRpc: () => props.rpc,
+        log,
+        onState: (snapshot) => {
+          if (wvc !== player) return;
+          if (snapshot.phase === "error" && snapshot.error) {
+            log("[wvc] 解码失败", snapshot.error);
+            fallbackFromWebCodecs();
+            return;
+          }
+          const active = snapshot.phase === "playing";
+          if (playing !== active) {
+            playing = active;
+            syncPlayButton();
+          }
+          if (snapshot.phase === "ended" && !endedReported) {
+            endedReported = true;
+            handleEnded();
+          }
+          updateBigPlay();
+          updateLoading();
+        }
+      });
+      wvc = player;
+      syncSpeed();
+      syncQualitySelect();
+      updateBigPlay();
+      updateLoading();
+      await player.load({
+        episodeId,
+        quality,
+        segmentCount,
+        resumeMs
+      });
+      if (seq !== wvcSeq || wvc !== player) return;
+      player.play();
+    } catch (error) {
+      if (seq !== wvcSeq || wvc !== player) return;
+      log("[wvc] 载入失败", String(error?.message || error));
+      if (error?.code === "SEGMENT_LIMIT") {
+        stopWebCodecs();
+        setOverlay("notice", {
+          title: t("player.errorTitle"),
+          text: String(error.message || t("player.decodeFailed")),
+          hint: "",
+          actions: []
+        });
+        return;
+      }
+      fallbackFromWebCodecs();
+    }
+  };
+  const loadEpisode = () => {
+    stopWebCodecs();
+    if (disposed) return;
+    hideOverlay();
+    hideNotice();
+    lastNoticeKey = "";
+    lastReportedMs = Math.max(0, Number(props.positionMs) || 0);
+    desiredQuality = props.quality || DEFAULT_QUALITY;
+    const episode = props.episode;
+    if (!episode?.id) {
+      setOverlay("notice", { title: t("player.errorTitle"), text: t("player.noEpisode"), hint: "", actions: [] });
+      return;
+    }
+    if (episode.playable === false) {
+      setOverlay("notice", { title: t("player.errorTitle"), text: t("player.unplayable"), hint: "", actions: [] });
+      return;
+    }
+    userPaused = false;
+    autoPlayPending = true;
+    updateNextButton();
+    const loadOptions = {
+      episodeId: episode.id,
+      quality: props.quality || DEFAULT_QUALITY,
+      resumeMs: Math.max(0, Number(props.positionMs) || 0),
+      autoplay: true,
+      reason: "initial"
+    };
+    if (canDecodeLocally() && !wvcBlocked) {
+      void playWebCodecs();
+      return;
+    }
+    void engine.load(loadOptions);
+  };
+  const applyProps = (next) => {
+    const prev = {
+      episodeId: props.episode?.id || "",
+      episodeIndex: props.episodeIndex,
+      quality: props.quality || "",
+      locale: props.locale || "",
+      positionMs: Number(props.positionMs) || 0
+    };
+    const episodeChanged = (next?.episode?.id || "") !== prev.episodeId;
+    if (episodeChanged) {
+      suppressPauseReport = true;
+      setTimeout(() => {
+        suppressPauseReport = false;
+      }, 1e3);
+    }
+    Object.assign(props, next);
+    if ((next.locale || "") !== prev.locale) applyLabels();
+    const nextEpisodeId = props.episode?.id || "";
+    if (nextEpisodeId !== prev.episodeId) {
+      loadEpisode();
+      return;
+    }
+    if (props.episodeIndex !== prev.episodeIndex) updateNextButton();
+    const nextQuality = props.quality || "";
+    if (nextQuality && nextQuality !== prev.quality && nextQuality !== desiredQuality) {
+      if (wvc && wvcQuality === nextQuality) {
+        desiredQuality = nextQuality;
+        syncQualitySelect();
+      } else {
+        setQuality(nextQuality, false);
+      }
+    }
+    const nextPosition = Number(props.positionMs) || 0;
+    if (nextPosition > 0 && Math.abs(nextPosition - prev.positionMs) > RESUME_JUMP_TOLERANCE_MS && Math.abs(nextPosition - lastReportedMs) > RESUME_JUMP_TOLERANCE_MS && Math.abs(nextPosition - currentMs()) > RESUME_JUMP_TOLERANCE_MS && !wasReportedRecently(nextPosition) && durationOf() > 0) {
+      seekTo(nextPosition / 1e3);
+      notify("info", t("player.resumeJump", { time: formatClock(nextPosition) }));
+    }
+  };
+  applyLabels();
+  syncQualitySelect();
+  syncVolume();
+  syncSpeed();
+  updateNextButton();
+  syncProgressBar();
+  if (typeof video.requestPictureInPicture !== "function") pipBtn.hidden = true;
+  loadEpisode();
+  const progressTimer = setInterval(() => {
+    if (disposed || !wvc || dragging) return;
+    syncProgressBar();
+    if (wvc.getState().phase === "playing") report(false);
+  }, 500);
+  const watchdog = setInterval(() => {
+    if (disposed || stallReported || overlayKind || wvc) return;
+    const phase = state.state;
+    if (phase !== MSE_STATE.BUFFERING && phase !== MSE_STATE.RECOVERING) return;
+    if (Date.now() - lastActivityAt < 45e3) return;
+    stallReported = true;
+    log("[player] 拉流超时，停止等待并给出重试入口");
+    showError({ code: "PLAYBACK_STALL" });
+  }, 5e3);
+  return {
+    update(next) {
+      if (disposed || !next) return;
+      applyProps(next);
+    },
+    destroy() {
+      if (disposed) return;
+      report(true);
+      disposed = true;
+      try {
+        exitFill();
+      } catch {
+      }
+      document.removeEventListener("keydown", onDocumentKey);
+      clearInterval(watchdog);
+      clearInterval(progressTimer);
+      if (idleTimer) {
+        clearTimeout(idleTimer);
+        idleTimer = 0;
+      }
+      if (clickTimer) {
+        clearTimeout(clickTimer);
+        clickTimer = 0;
+      }
+      try {
+        engine.destroy();
+      } catch (error) {
+        log("[player] 引擎销毁失败", String(error?.message || error));
+      }
+      try {
+        wvc?.destroy();
+        wvc = null;
+      } catch {
+      }
+      try {
+        video.pause();
+        video.removeAttribute("src");
+        video.load();
+      } catch {
+      }
+      root.remove();
+      if (slot) slot.replaceChildren();
+    }
+  };
+}
+
+// src/panel/player.js
+var PLAYER_SLOT_ID = "hg-player-slot";
+function renderPlayer(slot, initialProps) {
+  if (!slot || typeof document === "undefined") {
+    return { update: () => {
+    }, destroy: () => {
+    } };
+  }
+  try {
+    return createPlayer(slot, initialProps);
+  } catch (error) {
+    const box = document.createElement("div");
+    box.className = "hg-player-fatal";
+    box.textContent = String(error?.message || error);
+    slot.replaceChildren(box);
+    return {
+      update: () => {
+      },
+      destroy: () => {
+        slot.replaceChildren();
+      }
+    };
+  }
+}
+function PlayerMount(props) {
+  const React = getReact();
+  const slotRef = React.useRef(null);
+  const handleRef = React.useRef(null);
+  const handlersRef = React.useRef({});
+  handlersRef.current = {
+    onProgress: props.onProgress,
+    onEnded: props.onEnded,
+    onSelectEpisode: props.onSelectEpisode,
+    onError: props.onError
+  };
+  const buildProps = () => ({
+    api: props.ctx.api,
+    rpc: props.ctx.rpc,
+    t: props.ctx.t,
+    locale: props.ctx.locale,
+    notify: props.ctx.notify,
+    log: props.ctx.log,
+    quality: props.ctx.prefs?.quality || "720p",
+    series: props.series,
+    episodes: props.episodes,
+    episodeIndex: props.episodeIndex,
+    episode: props.episodes?.[props.episodeIndex] || null,
+    positionMs: props.positionMs,
+    onQualityChange: (quality) => props.ctx.updatePrefs?.({ quality }),
+    onProgress: (state) => handlersRef.current.onProgress?.(state),
+    onEnded: (state) => handlersRef.current.onEnded?.(state),
+    onSelectEpisode: (index) => handlersRef.current.onSelectEpisode?.(index),
+    onError: (error) => handlersRef.current.onError?.(error)
+  });
+  React.useEffect(() => {
+    const slot = slotRef.current;
+    if (!slot) return void 0;
+    handleRef.current = renderPlayer(slot, buildProps());
+    return () => {
+      const handle = handleRef.current;
+      handleRef.current = null;
+      try {
+        if (typeof handle === "function") handle();
+        else handle?.destroy?.();
+      } finally {
+        slot.replaceChildren();
+      }
+    };
+  }, [props.series?.id]);
+  React.useEffect(() => {
+    handleRef.current?.update?.(buildProps());
+  });
+  return h(
+    "div",
+    { className: "hg-player-stage" },
+    h("div", {
+      id: PLAYER_SLOT_ID,
+      ref: slotRef,
+      className: "hg-player-slot",
+      "data-series-id": props.series?.id || "",
+      "data-episode-id": props.episodes?.[props.episodeIndex]?.id || ""
+    })
+  );
+}
+
+// src/panel/pages/detail.js
+var normalizeEpisodes = (page) => {
+  const rows = Array.isArray(page?.items) ? page.items : [];
+  const list = [];
+  rows.forEach((row, index) => {
+    if (!row || row[0] == null) return;
+    const id = String(row[0]);
+    if (!id) return;
+    const number = Number.isFinite(Number(row[1])) ? Number(row[1]) : index + 1;
+    list.push({
+      id,
+      number,
+      playable: Number(row[2]) === 1,
+      title: typeof row[3] === "string" ? row[3] : ""
+    });
+  });
+  return list;
+};
+function DetailPage({ ctx, seed, onBack }) {
+  const React = getReact();
+  const t = ctx.t;
+  const rpc = ctx.rpc;
+  const api = ctx.api;
+  const seriesId = seed?.id ? String(seed.id) : "";
+  const [state, setState] = React.useState({
+    status: "loading",
+    error: null,
+    series: null,
+    episodes: [],
+    episodesError: null,
+    truncated: false,
+    total: 0
+  });
+  const [selectedIndex, setSelectedIndex] = React.useState(0);
+  const [positionMs, setPositionMs] = React.useState(0);
+  const [historyEntry, setHistoryEntry] = React.useState(null);
+  const [expanded, setExpanded] = React.useState(false);
+  const seqRef = React.useRef(0);
+  const aliveRef = React.useRef(true);
+  const seriesRef = React.useRef(null);
+  const episodesRef = React.useRef([]);
+  const selectedRef = React.useRef(0);
+  const positionRef = React.useRef(0);
+  const lastSaveRef = React.useRef(0);
+  const pendingSaveRef = React.useRef(null);
+  const flushTimerRef = React.useRef(0);
+  const persistRef = React.useRef(null);
+  React.useEffect(() => {
+    aliveRef.current = true;
+    return () => {
+      aliveRef.current = false;
+      if (flushTimerRef.current) {
+        clearTimeout(flushTimerRef.current);
+        flushTimerRef.current = 0;
+      }
+      const pending = pendingSaveRef.current;
+      pendingSaveRef.current = null;
+      if (pending) void persistRef.current?.(pending.index, pending.position);
+    };
+  }, []);
+  React.useEffect(() => {
+    seriesRef.current = state.series;
+    episodesRef.current = state.episodes;
+  }, [state.series, state.episodes]);
+  React.useEffect(() => {
+    selectedRef.current = selectedIndex;
+  }, [selectedIndex]);
+  React.useEffect(() => {
+    positionRef.current = positionMs;
+  }, [positionMs]);
+  const load = React.useCallback(async () => {
+    const seq = seqRef.current + 1;
+    seqRef.current = seq;
+    setState((prev) => ({ ...prev, status: "loading", error: null }));
+    if (!seriesId) {
+      const error = new Error(t("detail.missingId"));
+      error.code = "MISSING_ID";
+      setState({
+        status: "error",
+        error,
+        series: null,
+        episodes: [],
+        episodesError: null,
+        truncated: false,
+        total: 0
+      });
+      return;
+    }
+    try {
+      const [series2, episodesResult, historyList] = await Promise.all([
+        rpc.getSeries(seriesId),
+        rpc.getEpisodes(seriesId).then((page) => ({ ok: true, page })).catch((error) => ({ ok: false, error })),
+        readHistory(api).catch(() => [])
+      ]);
+      if (seq !== seqRef.current || !aliveRef.current) return;
+      const episodes2 = episodesResult.ok ? normalizeEpisodes(episodesResult.page) : [];
+      const entry = Array.isArray(historyList) ? historyList.find((item) => item.seriesId === seriesId) || null : null;
+      const resumed = entry && Number.isInteger(entry.episodeIndex) && entry.episodeIndex < episodes2.length ? entry.episodeIndex : 0;
+      const position = entry && resumed === entry.episodeIndex ? entry.positionMs : 0;
+      setState({
+        status: "idle",
+        error: null,
+        series: series2,
+        episodes: episodes2,
+        episodesError: episodesResult.ok ? null : episodesResult.error,
+        truncated: episodesResult.ok ? episodesResult.page?.truncated === true : false,
+        total: episodesResult.ok ? Number(episodesResult.page?.total) || episodes2.length : 0
+      });
+      setSelectedIndex(resumed);
+      setPositionMs(position);
+      setHistoryEntry(entry);
+    } catch (error) {
+      if (seq !== seqRef.current || !aliveRef.current) return;
+      setState({
+        status: "error",
+        error,
+        series: null,
+        episodes: [],
+        episodesError: null,
+        truncated: false,
+        total: 0
+      });
+    }
+  }, [api, rpc, seriesId, t]);
+  React.useEffect(() => {
+    void load();
+  }, [load]);
+  const persist = React.useCallback(
+    async (index, position) => {
+      const series2 = seriesRef.current;
+      if (!series2) return;
+      try {
+        const list = await upsertHistory(api, {
+          seriesId: series2.id,
+          title: series2.title,
+          cover: series2.cover,
+          episodeIndex: index,
+          positionMs: position
+        });
+        if (!aliveRef.current) return;
+        setHistoryEntry(list.find((item) => item.seriesId === series2.id) || null);
+        ctx.bumpHistory();
+      } catch (error) {
+        ctx.notify("error", t("detail.recordFailed"));
+        ctx.log?.("[detail] 写历史失败", String(error?.message || error));
+      }
+    },
+    [ctx, t]
+  );
+  persistRef.current = persist;
+  const selectEpisode = React.useCallback(
+    (index, position) => {
+      const episodes2 = episodesRef.current;
+      if (!Number.isInteger(index) || index < 0 || index >= episodes2.length) return;
+      if (!episodes2[index].playable) {
+        ctx.notify("info", t("detail.unplayable"));
+        return;
+      }
+      const nextPosition = Number.isFinite(Number(position)) && Number(position) > 0 ? Math.floor(Number(position)) : 0;
+      pendingSaveRef.current = null;
+      if (flushTimerRef.current) {
+        clearTimeout(flushTimerRef.current);
+        flushTimerRef.current = 0;
+      }
+      selectedRef.current = index;
+      positionRef.current = nextPosition;
+      setSelectedIndex(index);
+      setPositionMs(nextPosition);
+      void persist(index, nextPosition);
+    },
+    [ctx, persist, t]
+  );
+  const handleProgress = React.useCallback(
+    (payload) => {
+      const episodes2 = episodesRef.current;
+      const index = Number.isInteger(payload?.episodeIndex) ? payload.episodeIndex : selectedRef.current;
+      if (index < 0 || index >= episodes2.length) return;
+      const position = Math.max(0, Math.floor(Number(payload?.positionMs) || 0));
+      if (position <= 0 && positionRef.current > 0 && index === selectedRef.current) return;
+      const apply = (targetIndex, targetPosition) => {
+        selectedRef.current = targetIndex;
+        positionRef.current = targetPosition;
+        setSelectedIndex(targetIndex);
+        setPositionMs(targetPosition);
+        void persistRef.current?.(targetIndex, targetPosition);
+      };
+      const now = Date.now();
+      const elapsed = now - lastSaveRef.current;
+      if (elapsed >= 5e3) {
+        lastSaveRef.current = now;
+        pendingSaveRef.current = null;
+        if (flushTimerRef.current) {
+          clearTimeout(flushTimerRef.current);
+          flushTimerRef.current = 0;
+        }
+        apply(index, position);
+        return;
+      }
+      pendingSaveRef.current = { index, position };
+      if (flushTimerRef.current) return;
+      flushTimerRef.current = setTimeout(() => {
+        flushTimerRef.current = 0;
+        const pending = pendingSaveRef.current;
+        pendingSaveRef.current = null;
+        if (!pending || !aliveRef.current) return;
+        lastSaveRef.current = Date.now();
+        apply(pending.index, pending.position);
+      }, 5e3 - elapsed);
+    },
+    [persist]
+  );
+  const handleEnded = React.useCallback(
+    (payload) => {
+      const episodes2 = episodesRef.current;
+      const index = Number.isInteger(payload?.episodeIndex) ? payload.episodeIndex : selectedRef.current;
+      const duration = Number(payload?.durationMs);
+      const next = index + 1;
+      if (next >= 0 && next < episodes2.length) {
+        selectEpisode(next, 0);
+      } else if (index >= 0 && index < episodes2.length) {
+        const endPosition = Number.isFinite(duration) && duration > 0 ? Math.floor(duration) : positionRef.current;
+        void persist(index, endPosition);
+      }
+    },
+    [persist, selectEpisode]
+  );
+  const handlePlayerError = React.useCallback(
+    (error) => {
+      const info = describeError(t, error);
+      ctx.notify("error", info.message);
+    },
+    [ctx, t]
+  );
+  const retryEpisodes = async () => {
+    if (!seriesId) return;
+    try {
+      const page = await rpc.getEpisodes(seriesId);
+      if (!aliveRef.current) return;
+      const episodes2 = normalizeEpisodes(page);
+      setState((prev) => ({
+        ...prev,
+        episodes: episodes2,
+        episodesError: null,
+        truncated: page?.truncated === true,
+        total: Number(page?.total) || episodes2.length
+      }));
+    } catch (error) {
+      if (!aliveRef.current) return;
+      setState((prev) => ({ ...prev, episodesError: error }));
+    }
+  };
+  const series = state.series;
+  const episodes = state.episodes;
+  const description = series?.description || "";
+  const canExpand = description.length > 140;
+  const historyIndex = historyEntry && historyEntry.episodeIndex >= 0 && historyEntry.episodeIndex < episodes.length ? historyEntry.episodeIndex : -1;
+  const historyEpisode = historyIndex >= 0 ? episodes[historyIndex] : null;
+  const resumeIndex = historyEntry && historyEntry.episodeIndex >= 0 && historyEntry.episodeIndex < episodes.length ? historyEntry.episodeIndex : 0;
+  const resumeNumber = historyEpisode?.number ?? (historyEntry ? historyEntry.episodeIndex + 1 : 1);
+  const tags = Array.isArray(series?.tags) ? series.tags : [];
+  const meta = [];
+  if (series?.count != null) meta.push(t("unit.episodes", { count: series.count }));
+  else if (episodes.length > 0) meta.push(t("unit.episodes", { count: episodes.length }));
+  if (series?.category) meta.push(String(series.category));
+  if (series?.rightText) meta.push(String(series.rightText));
+  const topTitle = series?.title || seed?.title || t("detail.loading");
+  return h(
+    "div",
+    { className: "hg-page hg-detail" },
+    h(
+      "div",
+      { className: "hg-detail-bar" },
+      h(
+        "button",
+        {
+          type: "button",
+          className: "hg-iconbtn",
+          title: t("action.back"),
+          "aria-label": t("action.back"),
+          onClick: onBack
+        },
+        h(Icon, { ctx, name: "ChevronLeft", size: 16 })
+      ),
+      h("div", { className: "hg-detail-bar-title", title: topTitle }, topTitle)
+    ),
+    h(
+      "div",
+      { className: "hg-scroll" },
+      state.status === "loading" ? h(
+        "div",
+        { className: "hg-detail-loading" },
+        h("div", { className: "hg-skeleton hg-skeleton-player" }),
+        h("div", { className: "hg-skeleton hg-skeleton-line" }),
+        h("div", { className: "hg-skeleton hg-skeleton-line short" }),
+        h("div", { className: "hg-skeleton hg-skeleton-line" })
+      ) : null,
+      state.status === "error" && state.error ? h(ErrorNotice, { ctx, error: state.error, onRetry: () => void load() }) : null,
+      state.status === "idle" && series ? h(
+        "div",
+        { className: "hg-detail-body" },
+        episodes.length > 0 ? h(PlayerMount, {
+          ctx,
+          series,
+          episodes,
+          episodeIndex: selectedIndex,
+          positionMs,
+          onProgress: handleProgress,
+          onEnded: handleEnded,
+          onSelectEpisode: (index) => selectEpisode(index, 0),
+          onError: handlePlayerError
+        }) : null,
+        h(
+          "div",
+          { className: "hg-detail-head" },
+          h(Cover, { ctx, path: series.cover, className: "hg-detail-cover" }),
+          h(
+            "div",
+            { className: "hg-detail-info" },
+            h("h2", { className: "hg-detail-title" }, series.title || t("unit.untitled")),
+            meta.length > 0 ? h("div", { className: "hg-meta" }, meta.join(" · ")) : null,
+            tags.length > 0 ? h(
+              "div",
+              { className: "hg-tags" },
+              tags.map(
+                (tag, index) => h("span", { key: `${tag}-${index}`, className: "hg-tag" }, tag)
+              )
+            ) : null
+          )
+        ),
+        h(
+          "button",
+          {
+            type: "button",
+            className: "hg-btn primary hg-continue",
+            disabled: episodes.length === 0,
+            onClick: () => selectEpisode(
+              resumeIndex,
+              historyEntry && resumeIndex === historyEntry.episodeIndex ? historyEntry.positionMs : 0
+            )
+          },
+          h(
+            "span",
+            { className: "hg-continue-main" },
+            historyEntry ? t("detail.continue") : t("detail.start")
+          ),
+          historyEntry ? h(
+            "span",
+            { className: "hg-continue-meta" },
+            t("detail.continueAt", {
+              number: resumeNumber,
+              time: formatDuration(historyEntry.positionMs)
+            })
+          ) : null
+        ),
+        h(
+          "section",
+          { className: "hg-section" },
+          h("div", { className: "hg-sec-head" }, h("span", null, t("detail.description"))),
+          description ? h(
+            "div",
+            { className: `hg-desc${canExpand && !expanded ? " is-clamped" : ""}` },
+            description
+          ) : h("div", { className: "hg-muted" }, t("detail.noDescription")),
+          canExpand ? h(
+            "button",
+            {
+              type: "button",
+              className: "hg-linkbtn",
+              onClick: () => setExpanded((value) => !value)
+            },
+            expanded ? t("detail.collapse") : t("detail.expand")
+          ) : null
+        ),
+        h(
+          "section",
+          { className: "hg-section" },
+          h(
+            "div",
+            { className: "hg-sec-head" },
+            h("span", null, t("detail.episodes")),
+            episodes.length > 0 ? h("span", { className: "hg-count" }, t("unit.episodes", { count: episodes.length })) : null
+          ),
+          state.episodesError ? h(
+            "div",
+            { className: "hg-inline-error" },
+            h("span", null, t("detail.episodesFailed")),
+            h("button", { type: "button", className: "hg-linkbtn", onClick: () => void retryEpisodes() }, t("action.retry"))
+          ) : null,
+          state.truncated ? h("div", { className: "hg-hint" }, t("detail.truncated", { count: episodes.length })) : null,
+          episodes.length > 0 ? h(
+            "div",
+            { className: "hg-episodes" },
+            episodes.map((episode, index) => {
+              const watched = historyIndex >= 0 && index <= historyIndex;
+              const current = index === selectedIndex;
+              const label = episode.title || t("unit.episodeShort", { number: episode.number });
+              const titleText = [
+                label,
+                watched ? t("detail.watched") : "",
+                episode.playable ? "" : t("detail.unplayable")
+              ].filter(Boolean).join(" · ");
+              return h(
+                "button",
+                {
+                  key: episode.id || `${index}`,
+                  type: "button",
+                  className: `hg-ep${watched ? " is-watched" : ""}${current ? " is-current" : ""}`,
+                  disabled: !episode.playable,
+                  "aria-current": current ? "true" : void 0,
+                  title: titleText,
+                  onClick: () => selectEpisode(index, index === selectedRef.current ? positionRef.current : 0)
+                },
+                h("span", { className: "hg-ep-num" }, String(episode.number)),
+                episode.title ? h("span", { className: "hg-ep-name" }, episode.title) : null,
+                current ? h("span", { className: "hg-sr-only" }, t("detail.current")) : null
+              );
+            })
+          ) : !state.episodesError ? h("div", { className: "hg-muted" }, t("detail.noEpisodes")) : null
+        )
+      ) : null
+    )
+  );
+}
+
+// src/panel/pages/history.js
+function HistoryPage({ ctx, active, historyVersion }) {
+  const React = getReact();
+  const t = ctx.t;
+  const api = ctx.api;
+  const [list, setList] = React.useState([]);
+  const [status, setStatus] = React.useState("loading");
+  const [error, setError] = React.useState(null);
+  const [pendingDelete, setPendingDelete] = React.useState(null);
+  const [confirmClear, setConfirmClear] = React.useState(false);
+  const aliveRef = React.useRef(true);
+  const deleteTimerRef = React.useRef(null);
+  const clearTimerRef = React.useRef(null);
+  React.useEffect(() => {
+    aliveRef.current = true;
+    return () => {
+      aliveRef.current = false;
+      if (deleteTimerRef.current) clearTimeout(deleteTimerRef.current);
+      if (clearTimerRef.current) clearTimeout(clearTimerRef.current);
+    };
+  }, []);
+  const load = React.useCallback(async () => {
+    setStatus("loading");
+    setError(null);
+    try {
+      const next = await readHistory(api);
+      if (!aliveRef.current) return;
+      setList(next);
+      setStatus("idle");
+    } catch (loadError) {
+      if (!aliveRef.current) return;
+      setError(loadError);
+      setStatus("error");
+    }
+  }, [api]);
+  React.useEffect(() => {
+    if (!active) return;
+    void load();
+  }, [active, historyVersion, load]);
+  const askDelete = (seriesId) => {
+    if (deleteTimerRef.current) {
+      clearTimeout(deleteTimerRef.current);
+      deleteTimerRef.current = null;
+    }
+    if (pendingDelete === seriesId) {
+      setPendingDelete(null);
+      removeHistory(api, seriesId).then((next) => {
+        if (!aliveRef.current) return;
+        setList(next);
+        ctx.bumpHistory();
+        ctx.notify("success", t("history.removed"));
+      }).catch((deleteError) => {
+        if (!aliveRef.current) return;
+        ctx.notify("error", describeError(t, deleteError).message);
+      });
+      return;
+    }
+    setPendingDelete(seriesId);
+    deleteTimerRef.current = setTimeout(() => {
+      deleteTimerRef.current = null;
+      if (aliveRef.current) setPendingDelete(null);
+    }, 3e3);
+  };
+  const askClear = () => {
+    if (clearTimerRef.current) {
+      clearTimeout(clearTimerRef.current);
+      clearTimerRef.current = null;
+    }
+    if (!confirmClear) {
+      setConfirmClear(true);
+      clearTimerRef.current = setTimeout(() => {
+        clearTimerRef.current = null;
+        if (aliveRef.current) setConfirmClear(false);
+      }, 4e3);
+      return;
+    }
+    setConfirmClear(false);
+    clearHistory(api).then(() => {
+      if (!aliveRef.current) return;
+      setList([]);
+      ctx.bumpHistory();
+      ctx.notify("success", t("history.cleared"));
+    }).catch((clearError) => {
+      if (!aliveRef.current) return;
+      ctx.notify("error", describeError(t, clearError).message);
+    });
+  };
+  return h(
+    "div",
+    { className: "hg-page hg-history" },
+    h(
+      "div",
+      { className: "hg-page-head" },
+      h("div", { className: "hg-page-title" }, t("history.heading")),
+      status === "loading" && list.length > 0 ? h(Spinner, { label: t("history.heading") }) : null,
+      list.length > 0 ? h(
+        "button",
+        {
+          type: "button",
+          className: `hg-linkbtn${confirmClear ? " is-danger" : ""}`,
+          onClick: askClear
+        },
+        confirmClear ? t("history.clearConfirm") : t("history.clear")
+      ) : null
+    ),
+    h(
+      "div",
+      { className: "hg-scroll" },
+      status === "loading" && list.length === 0 ? h(
+        "div",
+        { className: "hg-history-skeleton" },
+        Array.from(
+          { length: 3 },
+          (_, index) => h(
+            "div",
+            { key: `history-skeleton-${index}`, className: "hg-skeleton-row" },
+            h("div", { className: "hg-skeleton hg-skeleton-thumb" }),
+            h(
+              "div",
+              { className: "hg-skeleton-row-main" },
+              h("div", { className: "hg-skeleton hg-skeleton-line" }),
+              h("div", { className: "hg-skeleton hg-skeleton-line short" })
+            )
+          )
+        )
+      ) : null,
+      status === "error" && error ? h(ErrorNotice, { ctx, error, onRetry: () => void load() }) : null,
+      status !== "error" && status !== "loading" && list.length === 0 ? h(EmptyState, {
+        ctx,
+        icon: "History",
+        title: t("history.empty"),
+        hint: t("history.emptyHint"),
+        action: h(
+          "button",
+          { type: "button", className: "hg-btn", onClick: () => ctx.openTab("discover") },
+          t("action.browse")
+        )
+      }) : null,
+      list.length > 0 ? h(
+        "div",
+        { className: "hg-history-list" },
+        list.map((entry) => {
+          const confirming = pendingDelete === entry.seriesId;
+          return h(
+            "div",
+            { className: "hg-history-row", key: entry.seriesId },
+            h(
+              "button",
+              {
+                type: "button",
+                className: "hg-history-main",
+                onClick: () => ctx.openSeries({
+                  id: entry.seriesId,
+                  title: entry.title,
+                  cover: entry.cover
+                })
+              },
+              h(Cover, { ctx, path: entry.cover, className: "hg-history-cover" }),
+              h(
+                "div",
+                { className: "hg-history-text" },
+                h("div", { className: "hg-history-title" }, entry.title || t("unit.untitled")),
+                h(
+                  "div",
+                  { className: "hg-history-meta" },
+                  t("history.lastWatched", {
+                    number: entry.episodeIndex + 1,
+                    time: formatDuration(entry.positionMs)
+                  })
+                )
+              ),
+              h(
+                "div",
+                { className: "hg-history-time" },
+                formatDateTime(entry.updatedAt, ctx.locale)
+              )
+            ),
+            h(
+              "button",
+              {
+                type: "button",
+                className: `hg-iconbtn danger${confirming ? " is-confirming" : ""}`,
+                title: confirming ? t("history.confirmRemove") : t("history.remove"),
+                "aria-label": confirming ? t("history.confirmRemove") : t("history.remove"),
+                onClick: () => askDelete(entry.seriesId)
+              },
+              confirming ? h("span", { className: "hg-confirm-text" }, t("history.confirmRemove")) : h(Icon, { ctx, name: "Trash2", size: 14 })
+            )
+          );
+        })
+      ) : null
+    )
+  );
+}
+
+// src/panel/pages/settings.js
+function SettingsPage({ ctx, active }) {
+  const React = getReact();
+  const t = ctx.t;
+  const rpc = ctx.rpc;
+  const [healthState, setHealthState] = React.useState({ status: "loading", data: null, error: null });
+  const [clearing, setClearing] = React.useState(false);
+  const [confirmClear, setConfirmClear] = React.useState(false);
+  const [cacheMessage, setCacheMessage] = React.useState(null);
+  const healthSeqRef = React.useRef(0);
+  const healthBusyRef = React.useRef(false);
+  const clearTimerRef = React.useRef(null);
+  React.useEffect(
+    () => () => {
+      if (clearTimerRef.current) clearTimeout(clearTimerRef.current);
+    },
+    []
+  );
+  const refreshHealth = React.useCallback(async () => {
+    if (healthBusyRef.current) return;
+    healthBusyRef.current = true;
+    const seq = healthSeqRef.current + 1;
+    healthSeqRef.current = seq;
+    setHealthState((prev) => ({ ...prev, status: "loading", error: null }));
+    try {
+      const data = await rpc.health();
+      if (seq !== healthSeqRef.current) return;
+      setHealthState({ status: "ok", data, error: null });
+    } catch (error) {
+      if (seq !== healthSeqRef.current) return;
+      setHealthState({ status: "error", data: null, error });
+    } finally {
+      healthBusyRef.current = false;
+    }
+  }, [rpc]);
+  React.useEffect(() => {
+    if (!active) return;
+    void refreshHealth();
+  }, [active, refreshHealth]);
+  const askClearCache = async () => {
+    if (clearTimerRef.current) {
+      clearTimeout(clearTimerRef.current);
+      clearTimerRef.current = null;
+    }
+    if (!confirmClear) {
+      setConfirmClear(true);
+      clearTimerRef.current = setTimeout(() => {
+        clearTimerRef.current = null;
+        setConfirmClear(false);
+      }, 4e3);
+      return;
+    }
+    setConfirmClear(false);
+    setClearing(true);
+    setCacheMessage(null);
+    try {
+      const result = await rpc.clearCache();
+      const removed = Number(result?.removed);
+      setCacheMessage({
+        kind: "success",
+        text: Number.isFinite(removed) ? t("settings.cacheClearedCount", { count: removed }) : t("settings.cacheCleared")
+      });
+    } catch (error) {
+      if (error?.code === "NOT_FOUND" || error?.code === "METHOD_NOT_ALLOWED") {
+        setCacheMessage({ kind: "warn", text: t("settings.cacheUnsupported") });
+      } else {
+        setCacheMessage({
+          kind: "error",
+          text: t("settings.cacheFailed", { error: describeError(t, error).message })
+        });
+      }
+    } finally {
+      setClearing(false);
+    }
+  };
+  const health = healthState.data;
+  const quality = ctx.prefs?.quality || "720p";
+  return h(
+    "div",
+    { className: "hg-page hg-settings" },
+    h("div", { className: "hg-page-head" }, h("div", { className: "hg-page-title" }, t("settings.heading"))),
+    h(
+      "div",
+      { className: "hg-scroll" },
+      h(
+        "section",
+        { className: "hg-card-panel" },
+        h(
+          "div",
+          { className: "hg-sec-head" },
+          h("span", null, t("settings.playback")),
+          h(Icon, { ctx, name: "SlidersHorizontal", size: 14 })
+        ),
+        h(
+          "div",
+          { className: "hg-field" },
+          h("label", { className: "hg-field-label", htmlFor: "hg-quality" }, t("settings.quality")),
+          h(
+            "select",
+            {
+              id: "hg-quality",
+              className: "hg-select",
+              value: quality,
+              onChange: (event) => ctx.updatePrefs({ quality: event.target.value })
+            },
+            QUALITY_OPTIONS.map(
+              (option) => h("option", { key: option, value: option }, option)
+            )
+          )
+        ),
+        h("div", { className: "hg-hint" }, t("settings.qualityHint"))
+      ),
+      h(
+        "section",
+        { className: "hg-card-panel" },
+        h(
+          "div",
+          { className: "hg-sec-head" },
+          h("span", null, t("settings.cache")),
+          h(Icon, { ctx, name: "Database", size: 14 })
+        ),
+        h("div", { className: "hg-hint" }, t("settings.cacheHint")),
+        h(
+          "button",
+          {
+            type: "button",
+            className: `hg-btn${confirmClear ? " danger" : ""}`,
+            disabled: clearing,
+            onClick: () => void askClearCache()
+          },
+          clearing ? h(Spinner, { label: t("settings.clearCache") }) : null,
+          clearing ? t("settings.clearCache") : confirmClear ? t("settings.clearCacheConfirm") : t("settings.clearCache")
+        ),
+        cacheMessage ? h(
+          "div",
+          { className: `hg-callout is-${cacheMessage.kind}` },
+          cacheMessage.text
+        ) : null
+      ),
+      h(
+        "section",
+        { className: "hg-card-panel" },
+        h(
+          "div",
+          { className: "hg-sec-head" },
+          h("span", null, t("settings.status")),
+          h(
+            "span",
+            { className: `hg-status-dot${health ? " is-online" : ""}` },
+            health ? t("settings.running") : t("settings.notRunning")
+          )
+        ),
+        h("div", { className: "hg-hint" }, t("settings.statusHint")),
+        healthState.status === "error" && healthState.error ? h(
+          "div",
+          { className: "hg-health-error" },
+          h(ErrorNotice, {
+            ctx,
+            error: healthState.error,
+            compact: true,
+            onRetry: () => void refreshHealth()
+          }),
+          h("div", { className: "hg-hint" }, t("settings.unavailableHint"))
+        ) : null,
+        healthState.status === "loading" && !health ? h(
+          "div",
+          { className: "hg-loading-line" },
+          h(Spinner, { label: t("settings.status") }),
+          h("span", null, t("settings.status"))
+        ) : null,
+        health ? h(
+          "div",
+          { className: "hg-kv" },
+          h("div", { className: "hg-kv-row" }, h("span", null, t("settings.port")), h("code", null, `127.0.0.1:${health.port ?? "?"}`)),
+          h("div", { className: "hg-kv-row" }, h("span", null, t("settings.version")), h("code", null, String(health.version ?? "?"))),
+          h("div", { className: "hg-kv-row" }, h("span", null, t("settings.pid")), h("code", null, String(health.pid ?? "?"))),
+          h("div", { className: "hg-kv-row" }, h("span", null, t("settings.uptime")), h("code", null, formatUptime(health.uptimeMs))),
+          h(
+            "div",
+            { className: "hg-kv-row" },
+            h("span", null, t("settings.sdk")),
+            h(
+              "code",
+              null,
+              health.sdk?.ready ? t("settings.sdkReady") : t("settings.sdkIdle")
+            )
+          ),
+          health.sdk?.lastError ? h(
+            "div",
+            { className: "hg-kv-row" },
+            h("span", null, t("settings.sdkLastError")),
+            h("code", null, String(health.sdk.lastError))
+          ) : null
+        ) : null,
+        h(
+          "button",
+          {
+            type: "button",
+            className: "hg-btn",
+            disabled: healthState.status === "loading",
+            onClick: () => void refreshHealth()
+          },
+          healthState.status === "loading" ? h(Spinner, { label: t("settings.recheck") }) : null,
+          t("settings.recheck")
+        )
+      ),
+      h(
+        "section",
+        { className: "hg-card-panel" },
+        h("div", { className: "hg-sec-head" }, h("span", null, t("settings.about"))),
+        h("div", { className: "hg-about-version" }, `${ctx.api?.name || "Hongguo Shorts"} · v${ctx.api?.version || "?"}`),
+        h("div", { className: "hg-hint" }, t("settings.aboutText"))
+      )
+    )
+  );
+}
+
+// src/panel/main.js
+var TABS = [
+  { id: "discover", icon: "Sparkles", labelKey: "tab.discover" },
+  { id: "search", icon: "Search", labelKey: "tab.search" },
+  { id: "history", icon: "History", labelKey: "tab.history" },
+  { id: "settings", icon: "Settings", labelKey: "tab.settings" }
+];
+var NOTICE_ICONS = { success: "CircleCheck", error: "CircleAlert", info: "Info" };
+var getHostReact = (api) => api && api.ui && api.ui.React || typeof window !== "undefined" && window.SnowAppPlugin && window.SnowAppPlugin.React || null;
+function PanelApp({ api, React, locale }) {
+  const translator = React.useMemo(() => createTranslator(api, locale), [api, locale]);
+  const t = translator.t;
+  const resolvedLocale = translator.locale;
+  const log = React.useCallback(
+    (...args) => {
+      try {
+        api?.log?.(...args);
+      } catch {
+      }
+    },
+    [api]
+  );
+  const rpc = React.useMemo(() => createRpc(api, { log }), [api, log]);
+  const cover = React.useMemo(() => createCoverStore(rpc, { log }), [rpc, log]);
+  const [boot, setBoot] = React.useState({ status: "loading", error: null, health: null });
+  const [activeTab, setActiveTab] = React.useState("discover");
+  const [route, setRoute] = React.useState(null);
+  const [visited, setVisited] = React.useState(() => ({ discover: true }));
+  const [prefs, setPrefs] = React.useState({ quality: "720p" });
+  const [historyVersion, setHistoryVersion] = React.useState(0);
+  const [notices, setNotices] = React.useState([]);
+  const prefsRef = React.useRef(prefs);
+  const aliveRef = React.useRef(true);
+  const bootSeqRef = React.useRef(0);
+  const noticeTimersRef = React.useRef(/* @__PURE__ */ new Map());
+  React.useEffect(() => {
+    if (typeof document === "undefined") return void 0;
+    const pluginId = api?.id || "com.snow.hongguo";
+    if (document.querySelector(`style[data-snow-plugin="${pluginId}"]`)) {
+      for (const node of document.querySelectorAll("style[data-hg-fallback]")) node.remove();
+      return void 0;
+    }
+    if (document.querySelector("style[data-hg-fallback]")) return void 0;
+    let disposed = false;
+    (async () => {
+      try {
+        const dataUrl = await api?.assets?.resolve?.("style.css");
+        if (disposed || typeof dataUrl !== "string" || !dataUrl.includes(";base64,")) return;
+        if (document.querySelector(`style[data-snow-plugin="${pluginId}"]`)) return;
+        const binary = atob(dataUrl.slice(dataUrl.indexOf(";base64,") + 8));
+        const bytes = new Uint8Array(binary.length);
+        for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+        const style = document.createElement("style");
+        style.dataset.hgFallback = "1";
+        style.textContent = new TextDecoder().decode(bytes);
+        document.head.appendChild(style);
+        log("[panel] 清单未注入样式，已使用 style.css 兜底");
+      } catch (error) {
+        log("[panel] 样式兜底注入失败", String(error?.message || error));
+      }
+    })();
+    return () => {
+      disposed = true;
+    };
+  }, [api, log]);
+  React.useEffect(() => {
+    prefsRef.current = prefs;
+  }, [prefs]);
+  React.useEffect(() => {
+    aliveRef.current = true;
+    const timers = noticeTimersRef.current;
+    return () => {
+      aliveRef.current = false;
+      cover.dispose();
+      for (const timer of timers.values()) clearTimeout(timer);
+      timers.clear();
+    };
+  }, [cover]);
+  const notify = React.useCallback((kind, text) => {
+    if (!aliveRef.current) return;
+    const id = `notice-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    setNotices((list) => [...list.slice(-2), { id, kind: kind || "info", text: String(text || "") }]);
+    const timer = setTimeout(() => {
+      noticeTimersRef.current.delete(id);
+      if (!aliveRef.current) return;
+      setNotices((list) => list.filter((item) => item.id !== id));
+    }, 4e3);
+    noticeTimersRef.current.set(id, timer);
+  }, []);
+  const updatePrefs = React.useCallback(
+    (patch) => {
+      const next = { ...prefsRef.current, ...patch };
+      prefsRef.current = next;
+      setPrefs(next);
+      writePrefs(api, next).catch((error) => {
+        notify("error", t("settings.saveFailed", { error: String(error?.message || error) }));
+      });
+    },
+    [api, notify, t]
+  );
+  const startBoot = React.useCallback(() => {
+    const seq = bootSeqRef.current + 1;
+    bootSeqRef.current = seq;
+    setBoot({ status: "loading", error: null, health: null });
+    rpc.ensureReady().then((health) => {
+      if (!aliveRef.current || seq !== bootSeqRef.current) return;
+      setBoot({ status: "ready", error: null, health });
+    }).catch((error) => {
+      if (!aliveRef.current || seq !== bootSeqRef.current) return;
+      setBoot({ status: "failed", error, health: null });
+    });
+  }, [rpc]);
+  React.useEffect(() => {
+    startBoot();
+  }, [startBoot]);
+  React.useEffect(() => {
+    if (boot.status !== "ready") return void 0;
+    let alive = true;
+    readPrefs(api).then((value) => {
+      if (!alive || !value) return;
+      prefsRef.current = value;
+      setPrefs(value);
+    }).catch(() => {
+    });
+    return () => {
+      alive = false;
+    };
+  }, [api, boot.status]);
+  const ctx = React.useMemo(
+    () => ({
+      api,
+      rpc,
+      t,
+      locale: resolvedLocale,
+      cover,
+      prefs,
+      updatePrefs,
+      notify,
+      log,
+      bumpHistory: () => setHistoryVersion((value) => value + 1),
+      openSeries: (seed) => {
+        if (!seed || !seed.id) return;
+        setRoute({ id: String(seed.id), seed });
+      },
+      openTab: (id) => {
+        setActiveTab(id);
+        setVisited((prev) => prev[id] ? prev : { ...prev, [id]: true });
+        setRoute(null);
+      }
+    }),
+    [api, rpc, t, resolvedLocale, cover, prefs, updatePrefs, notify, log]
+  );
+  const ErrorBoundary = React.useMemo(() => {
+    class Boundary extends React.Component {
+      constructor(props) {
+        super(props);
+        this.state = { error: null };
+      }
+      static getDerivedStateFromError(error) {
+        return { error };
+      }
+      componentDidCatch(error, info) {
+        log("[panel] render error", String(error?.message || error), String(info?.componentStack || ""));
+      }
+      componentDidUpdate(prevProps) {
+        if (this.state.error && prevProps.resetKey !== this.props.resetKey) {
+          this.setState({ error: null });
+        }
+      }
+      render() {
+        if (this.state.error) {
+          return h(
+            "div",
+            { className: "hg-panel hg-boot" },
+            h("div", { className: "hg-boot-title" }, t("error.renderTitle")),
+            h("div", { className: "hg-boot-text" }, String(this.state.error?.message || this.state.error)),
+            h(
+              "button",
+              { type: "button", className: "hg-btn primary", onClick: () => this.setState({ error: null }) },
+              t("error.retryPanel")
+            )
+          );
+        }
+        return this.props.children;
+      }
+    }
+    return Boundary;
+  }, [log, t]);
+  if (boot.status === "loading") {
+    return h(
+      "div",
+      { className: "hg-panel" },
+      h(
+        "div",
+        { className: "hg-boot" },
+        h(Spinner, { label: t("boot.loading") }),
+        h("div", { className: "hg-boot-title" }, t("plugin.title")),
+        h("div", { className: "hg-boot-text" }, t("boot.loading"))
+      )
+    );
+  }
+  if (boot.status === "failed") {
+    const info = describeError(t, boot.error);
+    return h(
+      "div",
+      { className: "hg-panel" },
+      h(
+        "div",
+        { className: "hg-boot" },
+        h("div", { className: "hg-boot-icon" }, h(Icon, { ctx, name: "ServerOff", size: 24 })),
+        h("div", { className: "hg-boot-title" }, t("boot.failedTitle")),
+        h("div", { className: "hg-boot-text" }, info.message),
+        h("div", { className: "hg-boot-hint" }, t("boot.failedHint")),
+        boot.error?.message ? h("code", { className: "hg-boot-detail" }, String(boot.error.message)) : null,
+        h(
+          "button",
+          { type: "button", className: "hg-btn primary", onClick: startBoot },
+          t("boot.retry")
+        )
+      )
+    );
+  }
+  const covered = Boolean(route);
+  const tabPanes = h(
+    "div",
+    {
+      className: `hg-tabpanes${covered ? " is-covered" : ""}`,
+      "aria-hidden": covered ? "true" : void 0
+    },
+    visited.discover ? h(
+      "div",
+      { className: "hg-tabpane", hidden: activeTab !== "discover" },
+      h(DiscoverPage, { ctx, active: activeTab === "discover" && !covered })
+    ) : null,
+    visited.search ? h(
+      "div",
+      { className: "hg-tabpane", hidden: activeTab !== "search" },
+      h(SearchPage, { ctx, active: activeTab === "search" })
+    ) : null,
+    visited.history ? h(
+      "div",
+      { className: "hg-tabpane", hidden: activeTab !== "history" },
+      h(HistoryPage, { ctx, active: activeTab === "history", historyVersion })
+    ) : null,
+    visited.settings ? h(
+      "div",
+      { className: "hg-tabpane", hidden: activeTab !== "settings" },
+      h(SettingsPage, { ctx, active: activeTab === "settings" })
+    ) : null
+  );
+  const detailLayer = route ? h(
+    "div",
+    { className: "hg-detail-layer" },
+    h(DetailPage, { key: route.id, ctx, seed: route.seed, onBack: () => setRoute(null) })
+  ) : null;
+  return h(
+    "div",
+    { className: "hg-panel" },
+    h(
+      "header",
+      { className: "hg-head" },
+      h("div", { className: "hg-head-mark" }, h(Icon, { ctx, name: "Film", size: 16 })),
+      h(
+        "div",
+        { className: "hg-head-text" },
+        h("div", { className: "hg-head-title" }, t("plugin.title")),
+        h(
+          "div",
+          { className: "hg-head-sub" },
+          t("app.subtitle")
+        )
+      ),
+      h("span", { className: "hg-head-dot", title: t("settings.running") })
+    ),
+    h(
+      "main",
+      { className: "hg-body" },
+      h(
+        ErrorBoundary,
+        { resetKey: route ? `detail:${route.id}` : `tab:${activeTab}` },
+        tabPanes,
+        detailLayer
+      )
+    ),
+    notices.length > 0 ? h(
+      "div",
+      { className: "hg-notices" },
+      notices.map(
+        (notice) => h(
+          "div",
+          { key: notice.id, className: `hg-notice is-${notice.kind}`, role: "status" },
+          h(Icon, { ctx, name: NOTICE_ICONS[notice.kind] || "Info", size: 13 }),
+          h("span", null, notice.text)
+        )
+      )
+    ) : null,
+    h(
+      "nav",
+      { className: "hg-tabs", role: "tablist" },
+      TABS.map((tab) => {
+        const selected = activeTab === tab.id;
+        return h(
+          "button",
+          {
+            key: tab.id,
+            type: "button",
+            role: "tab",
+            "aria-selected": selected,
+            className: `hg-tab${selected ? " is-active" : ""}`,
+            onClick: () => ctx.openTab(tab.id)
+          },
+          h(Icon, { ctx, name: tab.icon, size: 16 }),
+          h("span", { className: "hg-tab-label" }, t(tab.labelKey))
+        );
+      })
+    )
+  );
+}
+function Panel(props) {
+  const api = props?.api;
+  const React = getHostReact(api);
+  if (!React) return null;
+  bindReact(React);
+  return React.createElement(PanelApp, {
+    api,
+    React,
+    locale: props?.locale,
+    panelId: props?.panelId,
+    isActive: props?.isActive
+  });
+}
+export {
+  PLAYER_SLOT_ID,
+  PlayerMount,
+  Panel as default,
+  renderPlayer
+};
