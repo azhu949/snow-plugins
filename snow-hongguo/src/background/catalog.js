@@ -1,13 +1,12 @@
 // 榜单和分类的协议适配：只返回作品及筛选元数据，沿用 SDK 的限流调度。
-import { createHash } from "node:crypto";
 import { HttpError } from "./errors.js";
 import { createTtlCache, truncateChars, withSingleFlight } from "./util.js";
+import { createPageCursors } from "./cursors.js";
 
 // SDK 的短剧内容频道。演员榜需要独立的人物页，本阶段只提供作品榜。
 const SERIES_CONTENTS = new Set(["all", "human", "comic_series_rank", "ai_playlet", "series_album"]);
 const ID = /^[0-9A-Za-z_.-]{1,64}$/;
 const FILTER_KEY = /^[a-zA-Z][a-zA-Z0-9_-]{0,63}$/;
-const CURSOR_PREFIX = "hg1.";
 const forbiddenKeys = new Set(["__proto__", "constructor", "prototype"]);
 const validFilterKey = (key) => typeof key === "string" && FILTER_KEY.test(key) && !forbiddenKeys.has(key);
 const fail = (message) => { throw new HttpError(400, "INVALID_PARAM", message); };
@@ -71,30 +70,15 @@ const filterRows = (raw) => {
 
 export function createCatalogHandlers({ sdk, toListItem, fetchPage }) {
   const panels = createTtlCache({ ttlMs: 10 * 60 * 1000, max: 20 });
-  // SDK 游标累计已展示的 ID，不能放进有长度上限的 GET 地址；只在后台保留原值。
-  const cursors = createTtlCache({ ttlMs: 30 * 60 * 1000, max: 200 });
+  const cursors = createPageCursors();
   const inflight = new Map();
   const requireMethod = (name) => {
     if (typeof sdk[name] !== "function") throw new HttpError(503, "CATALOG_UNAVAILABLE", "当前后台不支持榜单或分类，请更新插件");
   };
   const readCursor = (query, kind) => {
-    const value = param(query, "cursor", 4096);
-    // 兼容更新前已加载页面中的短 SDK 游标。
-    if (!value.startsWith(CURSOR_PREFIX)) return value;
-    const entry = cursors.get(value);
-    if (!entry || entry.kind !== kind) {
-      throw new HttpError(410, "CURSOR_EXPIRED", "分页已过期，请重试以重新加载列表");
-    }
-    return entry.cursor;
+    return cursors.read(param(query, "cursor", 4096), kind);
   };
-  const pageInfo = (page, kind) => {
-    const raw = typeof page?.cursor === "string" ? page.cursor : "";
-    if (page?.has_more !== true || !raw) return { cursor: null, hasMore: false };
-    // 同一游标始终生成同一标识，保留面板的循环游标检测；失败重试也不消耗映射。
-    const cursor = CURSOR_PREFIX + createHash("sha256").update(`${kind}\0${raw}`).digest("base64url");
-    cursors.set(cursor, { kind, cursor: raw });
-    return { cursor, hasMore: true };
-  };
+  const pageInfo = cursors.pageInfo;
   const seriesItem = (raw) => {
     const item = toListItem(raw);
     item.title = truncateChars(item.title, 160);

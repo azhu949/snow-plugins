@@ -118,6 +118,7 @@ const mount = async () => {
       async getSeries() { return { id: "series", title: "测试剧", count: 2, tags: [] }; },
       async getEpisodes() { return { items: [["e1", 1, 1], ["e2", 2, 1]] }; },
       async getStreamInfo() { return { codec: "hvc1", definition: "720p", durationMs: 60000, segmentCount: 1 }; },
+      async getStreamInit() { return { base64: "AA==" }; },
     },
     notify: () => {}, log: () => {}, bumpHistory: () => {}, bumpWatchlist: () => {}, updatePrefs: () => {},
   };

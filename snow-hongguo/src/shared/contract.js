@@ -19,6 +19,8 @@ export const ROUTES = {
   filterPanel: "/filter-panel",
   filter: "/filter",
   search: "/search",
+  suggest: "/search/suggest",
+  hotSearch: "/search/hot",
   series: "/series",
   episodes: "/episodes",
   playback: "/playback",

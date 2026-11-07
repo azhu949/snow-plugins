@@ -261,6 +261,8 @@ var ROUTES = {
   filterPanel: "/filter-panel",
   filter: "/filter",
   search: "/search",
+  suggest: "/search/suggest",
+  hotSearch: "/search/hot",
   series: "/series",
   episodes: "/episodes",
   playback: "/playback",
@@ -606,6 +608,8 @@ var MEDIA_ROUTES = {
   streamInfo: "/stream/info",
   streamInit: "/stream/init",
   streamSegment: "/stream/segment",
+  streamPrefetch: "/stream/prefetch",
+  streamPrefetchCancel: "/stream/prefetch/cancel",
   cacheClear: "/cache/clear",
   /** H.264 转码兜底：宿主没有 HEVC 解码器时使用，产物是普通 MP4。 */
   h264Info: "/h264/info",
@@ -630,10 +634,14 @@ var MEDIA_LIMITS = {
   /** 同一个源的下载失败重试次数（配合 .part 续传）。 */
   rangeRetries: 2,
   rangeRetryDelayMs: 400,
-  /** 等某个分段落盘的最长时间。 */
+  /** 等分段时允许连续没有新分段落盘的最长时间。 */
   segmentWaitMs: 3e4,
   /** 同时保留的播放任务数（按 LRU 淘汰）。 */
   maxJobs: 6,
+  /** 下一集只预取开头，最多 4MB / 两个面板，租约到期自动停止。 */
+  prefetchMaxBytes: 4 * 1024 * 1024,
+  prefetchMaxJobs: 2,
+  prefetchTtlMs: 60 * 1e3,
   /** 转码任务保留数：只保留少量已完成任务，其余按 LRU 淘汰；实际执行始终串行。 */
   transcodeMaxJobs: 4,
   coverTimeoutMs: 8e3
@@ -1427,7 +1435,7 @@ var readRange = async (handle, from, to) => {
   }
   return buffer;
 };
-async function fetchHead(url, { signal } = {}) {
+async function fetchHead(url, { signal, maxBytes = MEDIA_LIMITS.maxHeadBytes } = {}) {
   let want = MEDIA_LIMITS.headBytes;
   let total = 0;
   for (let round = 0; round < 4; round += 1) {
@@ -1438,7 +1446,7 @@ async function fetchHead(url, { signal } = {}) {
     if (scanned.moov) return { head, total };
     if (!scanned.need) throw new HttpError(502, "MEDIA_FORMAT", "视频容器格式不支持（找不到 moov）");
     if (scanned.need > total) throw new HttpError(502, "MEDIA_FORMAT", "视频文件不完整（moov 超出文件长度）");
-    if (scanned.need > MEDIA_LIMITS.maxHeadBytes) throw new HttpError(502, "MEDIA_FORMAT", "moov 过大，暂不支持");
+    if (scanned.need > maxBytes) throw new HttpError(502, "MEDIA_FORMAT", "moov 过大，暂不支持");
     want = Math.min(scanned.need, total);
   }
   throw new HttpError(502, "MEDIA_FORMAT", "无法读取完整的 moov");
@@ -1465,6 +1473,56 @@ function createMedia({ sdk, cache, log = () => {
   if (!cache?.videoDir) throw new TypeError("createMedia 需要 cache");
   const jobs = /* @__PURE__ */ new Map();
   const pending = /* @__PURE__ */ new Map();
+  const definitionStarts = /* @__PURE__ */ new Map();
+  const demands = /* @__PURE__ */ new Map();
+  const warmups = /* @__PURE__ */ new Map();
+  const cancelledTokens = /* @__PURE__ */ new Map();
+  let disposed = false;
+  let clearing = false;
+  const aborted = () => new HttpError(499, "MEDIA_ABORTED", "下载已取消");
+  const demandFor = (key) => {
+    if (!demands.has(key)) demands.set(key, { key, foreground: false, tokens: /* @__PURE__ */ new Set(), job: null });
+    return demands.get(key);
+  };
+  const wanted = (demand) => {
+    if (disposed || clearing || !demand.foreground && !demand.tokens.size) throw aborted();
+  };
+  const attachDemand = (job, demand) => {
+    job.demands.add(demand);
+    demand.job = job;
+    if (demand.foreground) {
+      job.foreground = true;
+      job.wake?.();
+    }
+    return job;
+  };
+  const forgetJob = (job) => {
+    if (jobs.get(job.key) === job) jobs.delete(job.key);
+    for (const demand of job.demands) {
+      if (demand.job !== job) continue;
+      demand.job = null;
+      if (demands.get(demand.key) === demand) demands.delete(demand.key);
+    }
+    if (![...jobs.values()].some((entry) => entry.dir === job.dir)) cache.release(job.dir);
+  };
+  const cancelPrefetch = (token) => {
+    const now = Date.now();
+    for (const [id, until] of cancelledTokens) if (until <= now) cancelledTokens.delete(id);
+    cancelledTokens.set(token, now + 2 * MEDIA_LIMITS.prefetchTtlMs);
+    while (cancelledTokens.size > 256) cancelledTokens.delete(cancelledTokens.keys().next().value);
+    const lease = warmups.get(token);
+    if (!lease) return;
+    clearTimeout(lease.timer);
+    warmups.delete(token);
+    lease.demand.tokens.delete(token);
+    const job = lease.demand.job;
+    if (job && !job.foreground && ![...job.demands].some((entry) => entry.tokens.size)) {
+      job.abort.abort();
+      void Promise.resolve(job.task).finally(() => forgetJob(job));
+    } else if (!job && !lease.demand.foreground && !lease.demand.tokens.size && !pending.has(lease.demand.key)) {
+      demands.delete(lease.demand.key);
+    }
+  };
   const episodeDirOf = (episodeId) => join3(cache.videoDir, safeId(episodeId));
   const qualityDirOf = (episodeId, definition) => join3(episodeDirOf(episodeId), definition);
   const infoPathOf = (dir) => join3(dir, "info.json");
@@ -1485,9 +1543,22 @@ function createMedia({ sdk, cache, log = () => {
     }
     job.waiters.clear();
   };
+  const resetWaiterTimeout = (job, seq, waiter) => {
+    clearTimeout(waiter.timer);
+    waiter.timer = setTimeout(() => {
+      const set = job.waiters.get(seq);
+      set?.delete(waiter);
+      if (set?.size === 0) job.waiters.delete(seq);
+      waiter.reject(new HttpError(504, "SEGMENT_TIMEOUT", "该分段还在下载，请稍后重试"));
+    }, MEDIA_LIMITS.segmentWaitMs);
+    waiter.timer.unref?.();
+  };
   const resolveWaiters = (job, writtenSeq) => {
     for (const [seq, set] of job.waiters) {
-      if (seq > writtenSeq) continue;
+      if (seq > writtenSeq) {
+        for (const waiter of set) resetWaiterTimeout(job, seq, waiter);
+        continue;
+      }
       for (const waiter of set) {
         clearTimeout(waiter.timer);
         waiter.resolve();
@@ -1501,16 +1572,12 @@ function createMedia({ sdk, cache, log = () => {
     if (job.state === "ready") return Promise.reject(new HttpError(404, "SEGMENT_NOT_FOUND", "分段不存在"));
     return new Promise((resolve, reject) => {
       const waiter = { resolve, reject, timer: null };
-      waiter.timer = setTimeout(() => {
-        job.waiters.get(seq)?.delete(waiter);
-        reject(new HttpError(504, "SEGMENT_TIMEOUT", "该分段还在下载，请稍后重试"));
-      }, MEDIA_LIMITS.segmentWaitMs);
-      waiter.timer.unref?.();
+      resetWaiterTimeout(job, seq, waiter);
       if (!job.waiters.has(seq)) job.waiters.set(seq, newWaiterSet());
       job.waiters.get(seq).add(waiter);
     });
   };
-  const createJob = ({ episodeId, quality, definition, dir, info, cached }) => {
+  const createJob = ({ episodeId, quality, definition, dir, info, cached, demand }) => {
     const job = {
       key: `${episodeId}:${quality}`,
       episodeId,
@@ -1534,7 +1601,10 @@ function createMedia({ sdk, cache, log = () => {
       task: null,
       infoReady: null,
       resolveInfo: null,
-      rejectInfo: null
+      rejectInfo: null,
+      foreground: false,
+      demands: /* @__PURE__ */ new Set(),
+      wake: null
     };
     job.infoReady = new Promise((resolve, reject) => {
       job.resolveInfo = resolve;
@@ -1547,6 +1617,7 @@ function createMedia({ sdk, cache, log = () => {
       job.resolveInfo(job.info);
     }
     jobs.set(job.key, job);
+    attachDemand(job, demand);
     cache.markInUse(dir);
     return job;
   };
@@ -1554,19 +1625,25 @@ function createMedia({ sdk, cache, log = () => {
     while (jobs.size > MEDIA_LIMITS.maxJobs) {
       const victim = [...jobs.values()].filter((job) => job.state !== "preparing").sort((left, right) => left.lastUsed - right.lastUsed)[0];
       if (!victim) return;
-      jobs.delete(victim.key);
       victim.abort.abort();
-      cache.release(victim.dir);
+      void Promise.resolve(victim.task).finally(() => forgetJob(victim));
+      jobs.delete(victim.key);
       log(`[media] 淘汰任务 ${victim.episodeId} ${victim.definition}`);
     }
   };
-  const findJob = (episodeId, quality) => {
-    const direct = jobs.get(`${episodeId}:${quality}`);
-    if (direct) return direct;
+  const findDefinitionJob = (episodeId, definition) => {
     for (const job of jobs.values()) {
-      if (job.episodeId === episodeId && job.definition === quality) return job;
+      if (job.episodeId === episodeId && job.definition === definition) return job;
     }
     return null;
+  };
+  const findJob = (episodeId, quality) => {
+    const key = `${episodeId}:${quality}`;
+    const direct = jobs.get(key);
+    if (direct) return direct;
+    const alias = demands.get(key)?.job;
+    if (alias && jobs.get(alias.key) === alias) return alias;
+    return findDefinitionJob(episodeId, quality);
   };
   const readCachedDefinition = async (episodeId, definition) => {
     if (!QUALITIES.includes(definition)) return null;
@@ -1619,7 +1696,7 @@ function createMedia({ sdk, cache, log = () => {
   const downloadFrom = async (job, url, keyHex) => {
     const signal = job.abort.signal;
     const partPath = join3(job.dir, "source.part");
-    const fetched = await fetchHead(url, { signal });
+    const fetched = await fetchHead(url, { signal, maxBytes: job.foreground ? MEDIA_LIMITS.maxHeadBytes : MEDIA_LIMITS.prefetchMaxBytes });
     const head = fetched.head;
     const total = fetched.total;
     await resetQualityDir(job.dir);
@@ -1669,8 +1746,27 @@ function createMedia({ sdk, cache, log = () => {
         try {
           while (job.have < total) {
             if (signal.aborted) throw new HttpError(499, "MEDIA_ABORTED", "下载已取消");
+            if (!job.foreground && (job.segments.size >= 1 || job.have >= MEDIA_LIMITS.prefetchMaxBytes)) {
+              job.state = "prefetched";
+              await new Promise((resolve) => {
+                const wake = () => {
+                  signal.removeEventListener("abort", wake);
+                  job.wake = null;
+                  resolve();
+                };
+                job.wake = wake;
+                signal.addEventListener("abort", wake, { once: true });
+                if (signal.aborted || job.foreground) wake();
+              });
+              if (signal.aborted) throw aborted();
+              job.state = "streaming";
+            }
             const from = job.have;
-            const to = Math.min(from + MEDIA_LIMITS.blockBytes - 1, total - 1);
+            const to = Math.min(
+              from + MEDIA_LIMITS.blockBytes - 1,
+              total - 1,
+              job.foreground ? total - 1 : MEDIA_LIMITS.prefetchMaxBytes - 1
+            );
             const block = await requestRange(url, from, to, { signal });
             const chunk = block.bytes.length > to - from + 1 ? block.bytes.subarray(0, to - from + 1) : block.bytes;
             if (chunk.length === 0) throw new HttpError(502, "MEDIA_TRANSPORT", "视频地址返回空数据");
@@ -1742,9 +1838,36 @@ function createMedia({ sdk, cache, log = () => {
     }
     fail2(job, lastError ?? new Error("没有可用的播放地址"));
   };
+  const startDefinition = async (episodeId, definition, demand, create) => {
+    const key = `${episodeId}:${definition}`;
+    const previous = definitionStarts.get(key);
+    const task = (async () => {
+      if (previous) await previous.catch(() => {
+      });
+      wanted(demand);
+      const running = findDefinitionJob(episodeId, definition);
+      if (running && running.state !== "error" && !running.abort.signal.aborted) return attachDemand(running, demand);
+      if (running) {
+        await running.task;
+        forgetJob(running);
+      }
+      wanted(demand);
+      demands.set(demand.key, demand);
+      return create();
+    })();
+    definitionStarts.set(key, task);
+    try {
+      return await task;
+    } finally {
+      if (definitionStarts.get(key) === task) definitionStarts.delete(key);
+    }
+  };
   const startJob = async ({ episodeId, quality, definition, dir, cached }) => {
-    if (cached) return createJob({ episodeId, quality, definition, dir, info: cached.info, cached: true });
+    const demand = demandFor(`${episodeId}:${quality}`);
+    wanted(demand);
+    if (cached) return startDefinition(episodeId, definition, demand, () => createJob({ episodeId, quality, definition, dir, info: cached.info, cached: true, demand }));
     const result = await sdk.resolvePlayback(episodeId);
+    wanted(demand);
     const playback = result?.playback;
     if (!playback || !Array.isArray(playback.streams) || playback.streams.length === 0) {
       throw new HttpError(502, "CONTENT_UNAVAILABLE", "内容不可用");
@@ -1754,40 +1877,59 @@ function createMedia({ sdk, cache, log = () => {
     }
     const stream = pickStream(playback.streams, quality);
     if (!stream) throw new HttpError(502, "CONTENT_UNAVAILABLE", "没有可用的播放地址");
-    const cachedTarget = await readCachedDefinition(episodeId, stream.definition);
-    if (cachedTarget) {
-      return createJob({
-        episodeId,
-        quality,
-        definition: cachedTarget.definition,
-        dir: cachedTarget.dir,
-        info: cachedTarget.info,
-        cached: true
+    return startDefinition(episodeId, stream.definition, demand, async () => {
+      const cachedTarget = await readCachedDefinition(episodeId, stream.definition);
+      wanted(demand);
+      if (cachedTarget) {
+        return createJob({
+          episodeId,
+          quality,
+          definition: cachedTarget.definition,
+          dir: cachedTarget.dir,
+          info: cachedTarget.info,
+          cached: true,
+          demand
+        });
+      }
+      const keyHex = playback.protected === true ? result.contentKey.key : null;
+      const targetDir = qualityDirOf(episodeId, stream.definition);
+      await mkdir3(targetDir, { recursive: true, mode: 448 });
+      wanted(demand);
+      const job = createJob({ episodeId, quality, definition: stream.definition, dir: targetDir, info: null, cached: false, demand });
+      job.info = { episodeId, definition: stream.definition, segmentCount: 0, complete: false };
+      const urls = [stream.url, stream.backup_url].filter((url) => typeof url === "string" && url);
+      job.task = runJob(job, urls, keyHex).catch(() => {
       });
-    }
-    const keyHex = playback.protected === true ? result.contentKey.key : null;
-    const targetDir = qualityDirOf(episodeId, stream.definition);
-    await mkdir3(targetDir, { recursive: true, mode: 448 });
-    const job = createJob({ episodeId, quality, definition: stream.definition, dir: targetDir, info: null, cached: false });
-    job.info = { episodeId, definition: stream.definition, segmentCount: 0, complete: false };
-    const urls = [stream.url, stream.backup_url].filter((url) => typeof url === "string" && url);
-    job.task = runJob(job, urls, keyHex).catch(() => {
+      return job;
     });
-    return job;
   };
-  const ensureJob = async (episodeId, quality) => {
-    const existing = findJob(episodeId, quality);
-    if (existing && existing.state !== "error") {
-      existing.lastUsed = Date.now();
-      return existing;
-    }
-    if (existing?.state === "error") {
-      jobs.delete(existing.key);
-      cache.release(existing.dir);
-    }
+  const ensureJob = async (episodeId, quality, background = false, retried = false) => {
+    if (disposed || clearing) throw aborted();
     const key = `${episodeId}:${quality}`;
+    const demand = demandFor(key);
+    if (!background) demand.foreground = true;
+    wanted(demand);
+    const existing = findJob(episodeId, quality);
+    if (existing && existing.state !== "error" && !existing.abort.signal.aborted) {
+      existing.lastUsed = Date.now();
+      return attachDemand(existing, demand);
+    }
+    if (existing) {
+      await existing.task;
+      forgetJob(existing);
+      demands.set(key, demand);
+    }
     const pendingJob = pending.get(key);
-    if (pendingJob) return pendingJob;
+    if (pendingJob) {
+      try {
+        return attachDemand(await pendingJob, demand);
+      } catch (error) {
+        if (!background && !retried && isAborted(error) && !disposed && !clearing) {
+          return ensureJob(episodeId, quality, false, true);
+        }
+        throw error;
+      }
+    }
     const task = (async () => {
       const cached = await findCached(episodeId, quality);
       const job = await startJob({
@@ -1805,7 +1947,8 @@ function createMedia({ sdk, cache, log = () => {
     try {
       return await task;
     } finally {
-      pending.delete(key);
+      if (pending.get(key) === task) pending.delete(key);
+      if (!demand.job && !demand.tokens.size && demands.get(key) === demand) demands.delete(key);
     }
   };
   const readSegment = async (job, seq) => {
@@ -1816,6 +1959,30 @@ function createMedia({ sdk, cache, log = () => {
     return readFile3(segmentPathOf(job.dir, seq));
   };
   return {
+    /** 只预取下一集开头；正式播放会提升同一任务，取消不能中断已提升的任务。 */
+    async prefetch(episodeId, quality, token) {
+      if (disposed || clearing || (cancelledTokens.get(token) || 0) > Date.now()) return { accepted: false };
+      if (warmups.has(token)) return { accepted: true };
+      if (warmups.size >= MEDIA_LIMITS.prefetchMaxJobs) return { accepted: false };
+      if ([...jobs.values()].some((job) => job.foreground && !job.complete && job.state !== "error")) return { accepted: false };
+      const demand = demandFor(`${episodeId}:${quality}`);
+      demand.tokens.add(token);
+      const timer = setTimeout(() => cancelPrefetch(token), MEDIA_LIMITS.prefetchTtlMs);
+      timer.unref?.();
+      warmups.set(token, { demand, timer });
+      try {
+        const job = await ensureJob(episodeId, quality, true);
+        await job.infoReady;
+        return { accepted: warmups.has(token) };
+      } catch (error) {
+        cancelPrefetch(token);
+        throw error;
+      }
+    },
+    cancelPrefetch(token) {
+      cancelPrefetch(token);
+      return { ok: true };
+    },
     /** /stream/info：只返回面板拼 MSE 需要的元数据，不含直链与密钥。 */
     async info(episodeId, quality) {
       const job = await ensureJob(episodeId, quality);
@@ -1837,7 +2004,7 @@ function createMedia({ sdk, cache, log = () => {
       job.lastUsed = Date.now();
       return readFile3(initPathOf(job.dir));
     },
-    /** /stream/segment：seq 从 1 开始，未就绪时最多等 30 秒。 */
+    /** /stream/segment：seq 从 1 开始，连续 30 秒没有新分段落盘才超时。 */
     async segment(episodeId, quality, seq) {
       const job = await ensureJob(episodeId, quality);
       await job.infoReady;
@@ -1848,16 +2015,23 @@ function createMedia({ sdk, cache, log = () => {
     },
     /** POST /cache/clear：停掉任务、等在途任务收敛，再释放占用并清空 video/ 与 covers/。 */
     async clearCache() {
-      const waiting = [...pending.values()];
-      for (const job of jobs.values()) job.abort.abort();
-      await Promise.allSettled(waiting);
-      for (const job of jobs.values()) job.abort.abort();
-      const inflight = [...jobs.values()];
-      await Promise.allSettled(inflight.map((job) => job.task).filter(Boolean));
-      for (const job of inflight) cache.release(job.dir);
-      jobs.clear();
-      const result = await cache.clear();
-      return { ok: true, removed: (result.videos ?? 0) + (result.covers ?? 0) };
+      clearing = true;
+      for (const token of [...warmups.keys()]) cancelPrefetch(token);
+      try {
+        const waiting = [...pending.values()];
+        for (const job of jobs.values()) job.abort.abort();
+        await Promise.allSettled(waiting);
+        for (const job of jobs.values()) job.abort.abort();
+        const inflight = [...jobs.values()];
+        await Promise.allSettled(inflight.map((job) => job.task).filter(Boolean));
+        for (const job of inflight) cache.release(job.dir);
+        jobs.clear();
+        demands.clear();
+        const result = await cache.clear();
+        return { ok: true, removed: (result.videos ?? 0) + (result.covers ?? 0) };
+      } finally {
+        clearing = false;
+      }
     },
     stats() {
       return {
@@ -1874,12 +2048,15 @@ function createMedia({ sdk, cache, log = () => {
       };
     },
     dispose() {
+      disposed = true;
+      for (const token of [...warmups.keys()]) cancelPrefetch(token);
       for (const job of jobs.values()) {
         job.abort.abort();
         cache.release(job.dir);
       }
       jobs.clear();
       pending.clear();
+      demands.clear();
     }
   };
 }
@@ -2539,6 +2716,8 @@ function createSdk({
     shortFilterPanel: (genre = "") => execute("shortFilterPanel", "shortFilterPanel", "shortFilterPanel", [String(genre)]),
     shortFilter: (options = {}) => execute("shortFilter", "shortFilter", "shortFilter", [compactOptions(options)]),
     search: (query, options = {}) => execute("search", "search", "search", [String(query ?? ""), compactOptions(options)]),
+    suggest: (prefix) => execute("suggest", "suggest", "suggest", [String(prefix ?? "")]),
+    hotSearch: () => execute("hotSearch", "hotSearch", "hotSearch", []),
     getSeries: (seriesId) => execute("getSeries", "getSeries", "getSeries", [String(seriesId)]),
     listEpisodes: (seriesId, options = {}) => execute("listEpisodes", "listEpisodes", "listEpisodes", [String(seriesId), compactOptions(options)]),
     /**
@@ -2922,12 +3101,34 @@ function createCoverResolver({ cache, log = () => {
   };
 }
 
-// src/background/catalog.js
+// src/background/cursors.js
 import { createHash as createHash2 } from "node:crypto";
+function createPageCursors() {
+  const prefix = "hg1.";
+  const cache = createTtlCache({ ttlMs: 30 * 60 * 1e3, max: 200 });
+  return {
+    read(value, scope) {
+      if (typeof value !== "string" || !value.startsWith(prefix)) return value;
+      const entry = cache.get(value);
+      if (!entry || entry.scope !== scope) {
+        throw new HttpError(410, "CURSOR_EXPIRED", "分页已过期，请重试以重新加载列表");
+      }
+      return entry.cursor;
+    },
+    pageInfo(page, scope) {
+      const raw = typeof page?.cursor === "string" ? page.cursor : "";
+      if (page?.has_more !== true || !raw) return { cursor: null, hasMore: false };
+      const cursor = prefix + createHash2("sha256").update(`${scope}\0${raw}`).digest("base64url");
+      cache.set(cursor, { scope, cursor: raw });
+      return { cursor, hasMore: true };
+    }
+  };
+}
+
+// src/background/catalog.js
 var SERIES_CONTENTS = /* @__PURE__ */ new Set(["all", "human", "comic_series_rank", "ai_playlet", "series_album"]);
 var ID = /^[0-9A-Za-z_.-]{1,64}$/;
 var FILTER_KEY = /^[a-zA-Z][a-zA-Z0-9_-]{0,63}$/;
-var CURSOR_PREFIX = "hg1.";
 var forbiddenKeys = /* @__PURE__ */ new Set(["__proto__", "constructor", "prototype"]);
 var validFilterKey = (key) => typeof key === "string" && FILTER_KEY.test(key) && !forbiddenKeys.has(key);
 var fail = (message) => {
@@ -2991,27 +3192,15 @@ var filterRows = (raw) => {
 };
 function createCatalogHandlers({ sdk, toListItem: toListItem2, fetchPage }) {
   const panels = createTtlCache({ ttlMs: 10 * 60 * 1e3, max: 20 });
-  const cursors = createTtlCache({ ttlMs: 30 * 60 * 1e3, max: 200 });
+  const cursors = createPageCursors();
   const inflight = /* @__PURE__ */ new Map();
   const requireMethod = (name) => {
     if (typeof sdk[name] !== "function") throw new HttpError(503, "CATALOG_UNAVAILABLE", "当前后台不支持榜单或分类，请更新插件");
   };
   const readCursor = (query, kind) => {
-    const value = param(query, "cursor", 4096);
-    if (!value.startsWith(CURSOR_PREFIX)) return value;
-    const entry = cursors.get(value);
-    if (!entry || entry.kind !== kind) {
-      throw new HttpError(410, "CURSOR_EXPIRED", "分页已过期，请重试以重新加载列表");
-    }
-    return entry.cursor;
+    return cursors.read(param(query, "cursor", 4096), kind);
   };
-  const pageInfo = (page, kind) => {
-    const raw = typeof page?.cursor === "string" ? page.cursor : "";
-    if (page?.has_more !== true || !raw) return { cursor: null, hasMore: false };
-    const cursor = CURSOR_PREFIX + createHash2("sha256").update(`${kind}\0${raw}`).digest("base64url");
-    cursors.set(cursor, { kind, cursor: raw });
-    return { cursor, hasMore: true };
-  };
+  const pageInfo = cursors.pageInfo;
   const seriesItem = (raw) => {
     const item = toListItem2(raw);
     item.title = truncateChars(item.title, 160);
@@ -3069,6 +3258,69 @@ function createCatalogHandlers({ sdk, toListItem: toListItem2, fetchPage }) {
       }
       const items = (Array.isArray(page?.items) ? page.items : []).map(seriesItem).filter((item) => ID.test(item.id));
       return { status: 200, payload: { items, ...pageInfo(page, "filter") } };
+    }
+  };
+}
+
+// src/background/search-discovery.js
+var ID2 = /^[0-9A-Za-z_.-]{1,64}$/;
+var clean = (value, max) => truncateChars(value, max).replace(/[\u0000-\u001f\u007f]/g, " ").trim();
+var unique = (items, key, max) => {
+  const seen = /* @__PURE__ */ new Set();
+  return items.filter((item) => {
+    if (!item || seen.has(item[key])) return false;
+    seen.add(item[key]);
+    return true;
+  }).slice(0, max);
+};
+function createSearchDiscoveryHandlers({ sdk, toListItem: toListItem2 }) {
+  const hotCache = createTtlCache({ ttlMs: 5 * 60 * 1e3, max: 1 });
+  const suggestionCache = createTtlCache({ ttlMs: 60 * 1e3, max: 100 });
+  const inflight = /* @__PURE__ */ new Map();
+  const cached = (cache, key, task) => cache.get(key) || withSingleFlight(inflight, key, async () => {
+    const value = await task();
+    cache.set(key, value);
+    return value;
+  });
+  const series = (raw) => unique((Array.isArray(raw) ? raw : []).map((item) => {
+    if (!ID2.test(String(item?.series_id || "")) || !clean(item?.title, 160)) return null;
+    return {
+      ...toListItem2({ id: item.series_id, title: clean(item.title, 160), cover_url: item.cover_url, episode_count: item.episode_count }),
+      position: Number.isInteger(item.position) && item.position > 0 ? item.position : null,
+      score: clean(item.search_score || item.heat, 80),
+      tag: clean(item.tag, 24)
+    };
+  }), "id", 20);
+  return {
+    hotSearch: async () => ({ status: 200, payload: await cached(hotCache, "hot", async () => {
+      const page = await sdk.hotSearch();
+      if (!page || typeof page !== "object" || Array.isArray(page)) throw new HttpError(502, "PROTOCOL", "热搜数据格式不正确");
+      return {
+        guesses: series(page.guesses).slice(0, 8),
+        boards: (Array.isArray(page.boards) ? page.boards : []).map((board) => ({
+          name: clean(board?.name, 48),
+          items: series(board?.items),
+          topics: unique((Array.isArray(board?.topics) ? board.topics : []).map((topic) => {
+            const title = clean(topic?.title, 160);
+            const query = clean(topic?.query || topic?.title, 80).slice(0, 80);
+            return title && query ? { title, query, heat: clean(topic.heat, 80) } : null;
+          }), "query", 20)
+        })).filter((board) => board.name && (board.items.length || board.topics.length)).slice(0, 6)
+      };
+    }) }),
+    suggest: async ({ query }) => {
+      const q = (query.get("q") || "").trim();
+      if (q.length > 80 || /[\u0000-\u001f\u007f]/.test(q)) throw new HttpError(400, "INVALID_PARAM", "搜索词格式不正确");
+      if (!q) return { status: 200, payload: { items: [] } };
+      const payload = await cached(suggestionCache, `suggest:${q}`, async () => {
+        const rows = await sdk.suggest(q);
+        if (!Array.isArray(rows)) throw new HttpError(502, "PROTOCOL", "联想词格式不正确");
+        return { items: unique(rows.map((row) => {
+          const text = clean(row?.text, 80).slice(0, 80);
+          return text ? { text, query: text } : null;
+        }), "query", 6) };
+      });
+      return { status: 200, payload };
     }
   };
 }
@@ -3282,8 +3534,10 @@ function createRequestHandler({
     });
     return items;
   };
+  const searchCursors = createPageCursors();
   const handles = {
     ...createCatalogHandlers({ sdk, toListItem, fetchPage }),
+    ...createSearchDiscoveryHandlers({ sdk, toListItem }),
     health: async () => {
       const stats = typeof sdk.stats === "function" ? sdk.stats() : {};
       return {
@@ -3315,14 +3569,14 @@ function createRequestHandler({
     },
     search: async ({ query }) => {
       const q = readParam(query, "q", { required: true, maxLength: 80 });
-      const cursor = readParam(query, "cursor", { maxLength: 4096 });
+      const cursor = searchCursors.read(readParam(query, "cursor", { maxLength: 4096 }), `search:${q}`);
       const page = await fetchPage(() => sdk.search(q, cursor ? { cursor } : {}));
       const rawItems = Array.isArray(page?.items) ? page.items : [];
       const items = rawItems.map(toListItem);
       await enrichSearchCovers(items, rawItems);
       return {
         status: 200,
-        payload: { items, cursor: page?.cursor ?? null, hasMore: page?.has_more === true }
+        payload: { items, ...searchCursors.pageInfo(page, `search:${q}`) }
       };
     },
     series: async ({ query }) => {
@@ -3379,6 +3633,14 @@ function createRequestHandler({
       const quality = readQuality(query);
       return { status: 200, payload: await engine.info(episodeId, quality) };
     },
+    streamPrefetch: async ({ query }) => ({
+      status: 200,
+      payload: await requireMedia().prefetch(readId(query, "episodeId"), readQuality(query), readId(query, "token"))
+    }),
+    streamPrefetchCancel: async ({ query }) => ({
+      status: 200,
+      payload: requireMedia().cancelPrefetch(readId(query, "token"))
+    }),
     /** 解密后的 init segment（ftyp + moov），始终是同一任务同一次解析的产物。 */
     streamInit: async ({ query }) => {
       const engine = requireMedia();
@@ -3484,6 +3746,8 @@ function createRequestHandler({
     [ROUTES.filterPanel, { method: "GET", handler: handles.filterPanel }],
     [ROUTES.filter, { method: "GET", handler: handles.filter }],
     [ROUTES.search, { method: "GET", handler: handles.search }],
+    [ROUTES.suggest, { method: "GET", handler: handles.suggest }],
+    [ROUTES.hotSearch, { method: "GET", handler: handles.hotSearch }],
     [ROUTES.series, { method: "GET", handler: handles.series }],
     [ROUTES.episodes, { method: "GET", handler: handles.episodes }],
     [ROUTES.playback, { method: "GET", handler: handles.playback }],
@@ -3491,6 +3755,8 @@ function createRequestHandler({
     [MEDIA_ROUTES.streamInfo, { method: "GET", handler: handles.streamInfo }],
     [MEDIA_ROUTES.streamInit, { method: "GET", handler: handles.streamInit }],
     [MEDIA_ROUTES.streamSegment, { method: "GET", handler: handles.streamSegment }],
+    [MEDIA_ROUTES.streamPrefetch, { method: "POST", handler: handles.streamPrefetch }],
+    [MEDIA_ROUTES.streamPrefetchCancel, { method: "POST", handler: handles.streamPrefetchCancel }],
     [MEDIA_ROUTES.cacheClear, { method: "POST", handler: handles.cacheClear }],
     [MEDIA_ROUTES.h264Info, { method: "GET", handler: handles.h264Info }],
     [MEDIA_ROUTES.h264Start, { method: "POST", handler: handles.h264Start }],

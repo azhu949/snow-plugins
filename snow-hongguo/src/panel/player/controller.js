@@ -12,6 +12,7 @@ import { MSE_STATE, createMseEngine } from "./engine.js";
 import { icon } from "./icons.js";
 import { PLAYBACK_RATES, createWebCodecsPlayer } from "./webcodecs-play.js";
 import { clamp, copyText, decodeBase64, formatClock, safeFileName } from "./util.js";
+import { createNextPrefetch } from "./prefetch.js";
 
 const HIDE_DELAY_MS = 2600;
 const SEEK_STEP_SECONDS = 5;
@@ -53,6 +54,7 @@ export function createPlayer(slot, initialProps) {
   };
 
   let disposed = false;
+  const prefetch = createNextPrefetch({ getRpc: () => props.rpc });
   let state = { state: MSE_STATE.IDLE, quality: "", info: null, appended: 0, segmentCount: 0 };
 
   let playing = false;
@@ -550,6 +552,22 @@ export function createPlayer(slot, initialProps) {
     } catch (error) {
       log("[player] 切集回调异常", String(error?.message || error));
     }
+  }
+
+  function syncPrefetch() {
+    const snapshot = wvc?.getState();
+    const enabled = props.autoNext !== false && !disposed && !miniHidden && !document.hidden;
+    // 自动连播的 React 更新尚未提交时，保留下一集租约交给 activate。
+    if ((snapshot?.phase === "ended" || (!wvc && video.ended)) && enabled && hasNext()) return;
+    prefetch.update({
+      episodeId: props.episode?.id, next: props.episodes?.[props.episodeIndex + 1],
+      quality: wvc ? wvcQuality : currentQuality(),
+      enabled: enabled && !overlayKind,
+      playing: snapshot ? snapshot.phase === "playing" : playing && !video.ended,
+      buffering: snapshot ? snapshot.buffering || !(snapshot.output > 0) : waiting || state.state !== MSE_STATE.READY,
+      timeMs: currentMs(), durationMs: durationOf() * 1000,
+      playbackRate: currentPlaybackRate(),
+    });
   }
 
   const seekTo = (seconds, options = {}) => {
@@ -1689,7 +1707,8 @@ export function createPlayer(slot, initialProps) {
       reason: "initial",
     };
     // 自动转码会被宿主 CSP 拦在媒体元素外，只保留 MSE 探测；转码改由用户在降级面板显式触发。
-    void engine.load(loadOptions);
+    const releasePrefetch = prefetch.activate(loadOptions.episodeId, loadOptions.quality);
+    void engine.load(loadOptions).finally(releasePrefetch);
   };
 
   /**
@@ -1721,16 +1740,14 @@ export function createPlayer(slot, initialProps) {
       const resumeMs = Number.isFinite(options?.resumeMs)
         ? Math.max(0, options.resumeMs)
         : Math.max(0, Number(props.positionMs) || 0);
-      let segmentCount = 0;
-      let actualQuality = "";
-      try {
-        const info = await props.rpc?.getStreamInfo?.(episodeId, quality);
-        segmentCount = Number(info?.segmentCount) || 0;
-        actualQuality = String(info?.definition || "");
-      } catch (error) {
-        // 分段数量拿不到时按 1 段试，真正的失败由解码层抛出来。
-        log("[wvc] 取流信息失败", String(error?.message || error));
-      }
+      // 两项共享后台的媒体任务，同时准备，避免额外等待一轮 IPC。
+      const releasePrefetch = prefetch.activate(episodeId, quality);
+      const [info, initPayload] = await Promise.all([
+        props.rpc.getStreamInfo(episodeId, quality),
+        props.rpc.getStreamInit(episodeId, quality),
+      ]).finally(releasePrefetch);
+      const segmentCount = Number(info?.segmentCount) || 0;
+      const actualQuality = String(info?.definition || "");
       // 期间又切了集或又换了档：本轮作废，别去抢画布。
       if (seq !== wvcSeq || disposed) return;
       // 源站不一定给到请求的档位（例如只有 720p），下拉按服务器实际档位显示。
@@ -1781,6 +1798,7 @@ export function createPlayer(slot, initialProps) {
           syncSpeed();
           updateBigPlay();
           updateLoading();
+          syncPrefetch();
         },
       });
       wvc = player;
@@ -1794,6 +1812,7 @@ export function createPlayer(slot, initialProps) {
         episodeId,
         quality,
         segmentCount,
+        initPayload,
         resumeMs,
       });
       if (seq !== wvcSeq || wvc !== player) return;
@@ -1858,7 +1877,8 @@ export function createPlayer(slot, initialProps) {
       return;
     }
     // 本机解码不可用时走 MSE 探测；转码只在降级面板里由用户显式触发。
-    void engine.load(loadOptions);
+    const releasePrefetch = prefetch.activate(loadOptions.episodeId, loadOptions.quality);
+    void engine.load(loadOptions).finally(releasePrefetch);
   };
 
   const applyProps = (next) => {
@@ -1884,6 +1904,7 @@ export function createPlayer(slot, initialProps) {
     }
 
     Object.assign(props, next);
+    if (props.autoNext === false) prefetch.cancel();
 
     const playback = normalizePlaybackPrefs(props);
     if (props.playbackRate !== prev.playbackRate && playback.playbackRate !== desiredPlaybackRate) {
@@ -1955,11 +1976,13 @@ export function createPlayer(slot, initialProps) {
 
   // 直连播放不走 <video> 事件，进度条、时间标签与进度上报都只能靠定时器拉动。
   const progressTimer = setInterval(() => {
+    if (!disposed) syncPrefetch();
     if (disposed || !wvc || dragging) return;
     syncProgressBar();
     // WebCodecs 通道没有 timeupdate：播放中由这里上报，report 内部已做 1 秒节流。
     if (wvc.getState().phase === "playing") report(false);
   }, 500);
+  document.addEventListener("visibilitychange", syncPrefetch);
 
   // 拉流看门狗：单段请求最坏要等几十秒，超过 45 秒没有任何新增分段就给可重试的错误界面。
   // 本机解码在用时不看 MSE 的旧快照，避免拿上一集的相位误报超时。
@@ -1982,6 +2005,8 @@ export function createPlayer(slot, initialProps) {
       if (disposed) return;
       report(true);
       disposed = true;
+      prefetch.destroy();
+      document.removeEventListener("visibilitychange", syncPrefetch);
       qualityControl.destroy();
       speedControl.destroy();
       try {

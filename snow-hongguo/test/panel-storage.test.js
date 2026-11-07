@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   readHistory, upsertHistory, getEpisodeProgress, resumeEpisodeIndex, resumePosition, removeHistory, clearHistory,
   readWatchlist, saveWatchlistEntry, removeWatchlistEntry, markWatching, readPrefs, writePrefs,
+  readRecentSearches, pushRecentSearch, clearRecentSearches,
 } from "../src/panel/storage.js";
 
 const memory = (initial = {}) => {
@@ -20,6 +21,14 @@ const memory = (initial = {}) => {
 };
 const progress = (episodeId, episodeIndex, positionMs, extra = {}) => ({
   seriesId: "series", title: "测试剧", episodeId, episodeIndex, positionMs, durationMs: 60000, ...extra,
+});
+
+test("快速搜索并发保存不丢词，清空等待之前的写入且不会复活旧记录", async () => {
+  const { api } = memory();
+  await Promise.all([pushRecentSearch(api, "甲"), pushRecentSearch(api, "乙"), pushRecentSearch(api, "甲")]);
+  assert.deepEqual(await readRecentSearches(api), ["甲", "乙"]);
+  await Promise.all([pushRecentSearch(api, "丙"), clearRecentSearches(api)]);
+  assert.deepEqual(await readRecentSearches(api), []);
 });
 
 test("旧版第 20 集历史只迁移已知的一集，补上 ID 后仍保留原位置", async () => {

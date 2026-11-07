@@ -7,6 +7,17 @@ import { createSdk } from "../src/background/sdk.js";
 
 const page = { items: [{ id: "1", title: "测试剧" }], has_more: false };
 
+test("热搜与输入联想经过 SDK 调度并正确传递参数", async (t) => {
+  const calls = [];
+  const { sdk } = await makeSdk(t, { clientFactory: async () => fakeClient({
+    hotSearch: async () => { calls.push("hot"); return { guesses: [] }; },
+    suggest: async (q) => { calls.push(q); return [{ text: q }]; },
+  }) });
+  assert.deepEqual(await sdk.hotSearch(), { guesses: [] });
+  assert.deepEqual(await sdk.suggest("中文 & +"), [{ text: "中文 & +" }]);
+  assert.deepEqual(calls, ["hot", "中文 & +"]);
+});
+
 const makeError = (code, extra = {}) => Object.assign(new Error(`${code} from upstream`), { code, ...extra });
 
 const fakeClient = (overrides = {}) => ({

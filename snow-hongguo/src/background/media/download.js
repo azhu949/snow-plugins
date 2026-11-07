@@ -183,7 +183,7 @@ const readRange = async (handle, from, to) => {
  * 取 ftyp+moov：先要 512KB，moov 超界时按 scanHead() 的 need 重新要一次。
  * moov 的最大大小在这里兜底，避免异常文件把内存打满。
  */
-export async function fetchHead(url, { signal } = {}) {
+export async function fetchHead(url, { signal, maxBytes = MEDIA_LIMITS.maxHeadBytes } = {}) {
   let want = MEDIA_LIMITS.headBytes;
   let total = 0;
   for (let round = 0; round < 4; round += 1) {
@@ -194,7 +194,7 @@ export async function fetchHead(url, { signal } = {}) {
     if (scanned.moov) return { head, total };
     if (!scanned.need) throw new HttpError(502, "MEDIA_FORMAT", "视频容器格式不支持（找不到 moov）");
     if (scanned.need > total) throw new HttpError(502, "MEDIA_FORMAT", "视频文件不完整（moov 超出文件长度）");
-    if (scanned.need > MEDIA_LIMITS.maxHeadBytes) throw new HttpError(502, "MEDIA_FORMAT", "moov 过大，暂不支持");
+    if (scanned.need > maxBytes) throw new HttpError(502, "MEDIA_FORMAT", "moov 过大，暂不支持");
     want = Math.min(scanned.need, total);
   }
   throw new HttpError(502, "MEDIA_FORMAT", "无法读取完整的 moov");
@@ -233,6 +233,58 @@ export function createMedia({ sdk, cache, log = () => {} }) {
 
   const jobs = new Map();
   const pending = new Map();
+  const definitionStarts = new Map();
+  const demands = new Map();
+  const warmups = new Map();
+  const cancelledTokens = new Map();
+  let disposed = false;
+  let clearing = false;
+  const aborted = () => new HttpError(499, "MEDIA_ABORTED", "下载已取消");
+  const demandFor = (key) => {
+    if (!demands.has(key)) demands.set(key, { key, foreground: false, tokens: new Set(), job: null });
+    return demands.get(key);
+  };
+  const wanted = (demand) => {
+    if (disposed || clearing || (!demand.foreground && !demand.tokens.size)) throw aborted();
+  };
+  const attachDemand = (job, demand) => {
+    job.demands.add(demand);
+    demand.job = job;
+    if (demand.foreground) {
+      job.foreground = true;
+      job.wake?.();
+    }
+    return job;
+  };
+  const forgetJob = (job) => {
+    if (jobs.get(job.key) === job) jobs.delete(job.key);
+    for (const demand of job.demands) {
+      if (demand.job !== job) continue;
+      demand.job = null;
+      if (demands.get(demand.key) === demand) demands.delete(demand.key);
+    }
+    if (![...jobs.values()].some((entry) => entry.dir === job.dir)) cache.release(job.dir);
+  };
+  const cancelPrefetch = (token) => {
+    // 取消可能比启动请求先到，保留短期墓碑，防止迟到请求又启动下载。
+    const now = Date.now();
+    for (const [id, until] of cancelledTokens) if (until <= now) cancelledTokens.delete(id);
+    cancelledTokens.set(token, now + 2 * MEDIA_LIMITS.prefetchTtlMs);
+    while (cancelledTokens.size > 256) cancelledTokens.delete(cancelledTokens.keys().next().value);
+    const lease = warmups.get(token);
+    if (!lease) return;
+    clearTimeout(lease.timer);
+    warmups.delete(token);
+    lease.demand.tokens.delete(token);
+    const job = lease.demand.job;
+    if (job && !job.foreground && ![...job.demands].some((entry) => entry.tokens.size)) {
+      job.abort.abort();
+      // 等最后一次写入结束再释放占用，不与缓存清理竞争。
+      void Promise.resolve(job.task).finally(() => forgetJob(job));
+    } else if (!job && !lease.demand.foreground && !lease.demand.tokens.size && !pending.has(lease.demand.key)) {
+      demands.delete(lease.demand.key);
+    }
+  };
 
   const episodeDirOf = (episodeId) => join(cache.videoDir, safeId(episodeId));
   const qualityDirOf = (episodeId, definition) => join(episodeDirOf(episodeId), definition);
@@ -257,9 +309,24 @@ export function createMedia({ sdk, cache, log = () => {} }) {
     job.waiters.clear();
   };
 
+  const resetWaiterTimeout = (job, seq, waiter) => {
+    clearTimeout(waiter.timer);
+    waiter.timer = setTimeout(() => {
+      const set = job.waiters.get(seq);
+      set?.delete(waiter);
+      if (set?.size === 0) job.waiters.delete(seq);
+      waiter.reject(new HttpError(504, "SEGMENT_TIMEOUT", "该分段还在下载，请稍后重试"));
+    }, MEDIA_LIMITS.segmentWaitMs);
+    waiter.timer.unref?.();
+  };
+
   const resolveWaiters = (job, writtenSeq) => {
     for (const [seq, set] of job.waiters) {
-      if (seq > writtenSeq) continue;
+      if (seq > writtenSeq) {
+        // 下载按顺序产出分段；前段落盘代表仍有进展，给并行预读的后段重新计时。
+        for (const waiter of set) resetWaiterTimeout(job, seq, waiter);
+        continue;
+      }
       for (const waiter of set) {
         clearTimeout(waiter.timer);
         waiter.resolve();
@@ -274,17 +341,13 @@ export function createMedia({ sdk, cache, log = () => {} }) {
     if (job.state === "ready") return Promise.reject(new HttpError(404, "SEGMENT_NOT_FOUND", "分段不存在"));
     return new Promise((resolve, reject) => {
       const waiter = { resolve, reject, timer: null };
-      waiter.timer = setTimeout(() => {
-        job.waiters.get(seq)?.delete(waiter);
-        reject(new HttpError(504, "SEGMENT_TIMEOUT", "该分段还在下载，请稍后重试"));
-      }, MEDIA_LIMITS.segmentWaitMs);
-      waiter.timer.unref?.();
+      resetWaiterTimeout(job, seq, waiter);
       if (!job.waiters.has(seq)) job.waiters.set(seq, newWaiterSet());
       job.waiters.get(seq).add(waiter);
     });
   };
 
-  const createJob = ({ episodeId, quality, definition, dir, info, cached }) => {
+  const createJob = ({ episodeId, quality, definition, dir, info, cached, demand }) => {
     const job = {
       key: `${episodeId}:${quality}`,
       episodeId,
@@ -309,6 +372,9 @@ export function createMedia({ sdk, cache, log = () => {} }) {
       infoReady: null,
       resolveInfo: null,
       rejectInfo: null,
+      foreground: false,
+      demands: new Set(),
+      wake: null,
     };
     job.infoReady = new Promise((resolve, reject) => {
       job.resolveInfo = resolve;
@@ -321,6 +387,7 @@ export function createMedia({ sdk, cache, log = () => {} }) {
       job.resolveInfo(job.info);
     }
     jobs.set(job.key, job);
+    attachDemand(job, demand);
     cache.markInUse(dir);
     return job;
   };
@@ -331,20 +398,28 @@ export function createMedia({ sdk, cache, log = () => {} }) {
         .filter((job) => job.state !== "preparing")
         .sort((left, right) => left.lastUsed - right.lastUsed)[0];
       if (!victim) return;
-      jobs.delete(victim.key);
       victim.abort.abort();
-      cache.release(victim.dir);
+      void Promise.resolve(victim.task).finally(() => forgetJob(victim));
+      jobs.delete(victim.key);
       log(`[media] 淘汰任务 ${victim.episodeId} ${victim.definition}`);
     }
   };
 
-  const findJob = (episodeId, quality) => {
-    const direct = jobs.get(`${episodeId}:${quality}`);
-    if (direct) return direct;
+  const findDefinitionJob = (episodeId, definition) => {
     for (const job of jobs.values()) {
-      if (job.episodeId === episodeId && job.definition === quality) return job;
+      if (job.episodeId === episodeId && job.definition === definition) return job;
     }
     return null;
+  };
+
+  const findJob = (episodeId, quality) => {
+    const key = `${episodeId}:${quality}`;
+    const direct = jobs.get(key);
+    if (direct) return direct;
+    // 不同请求档位可共用同一实际档位；后续读取沿用已绑定任务，避免反复解析上游。
+    const alias = demands.get(key)?.job;
+    if (alias && jobs.get(alias.key) === alias) return alias;
+    return findDefinitionJob(episodeId, quality);
   };
 
   /**
@@ -414,7 +489,7 @@ export function createMedia({ sdk, cache, log = () => {} }) {
     const partPath = join(job.dir, "source.part");
 
     // 每次下载都重新取头：.part 只在本次任务内有效，启动清理也会删掉残留文件。
-    const fetched = await fetchHead(url, { signal });
+    const fetched = await fetchHead(url, { signal, maxBytes: job.foreground ? MEDIA_LIMITS.maxHeadBytes : MEDIA_LIMITS.prefetchMaxBytes });
     const head = fetched.head;
     const total = fetched.total;
     await resetQualityDir(job.dir);
@@ -471,8 +546,20 @@ export function createMedia({ sdk, cache, log = () => {} }) {
         try {
           while (job.have < total) {
             if (signal.aborted) throw new HttpError(499, "MEDIA_ABORTED", "下载已取消");
+            if (!job.foreground && (job.segments.size >= 1 || job.have >= MEDIA_LIMITS.prefetchMaxBytes)) {
+              job.state = "prefetched";
+              await new Promise((resolve) => {
+                const wake = () => { signal.removeEventListener("abort", wake); job.wake = null; resolve(); };
+                job.wake = wake;
+                signal.addEventListener("abort", wake, { once: true });
+                if (signal.aborted || job.foreground) wake();
+              });
+              if (signal.aborted) throw aborted();
+              job.state = "streaming";
+            }
             const from = job.have;
-            const to = Math.min(from + MEDIA_LIMITS.blockBytes - 1, total - 1);
+            const to = Math.min(from + MEDIA_LIMITS.blockBytes - 1, total - 1,
+              job.foreground ? total - 1 : MEDIA_LIMITS.prefetchMaxBytes - 1);
             const block = await requestRange(url, from, to, { signal });
             const chunk = block.bytes.length > to - from + 1 ? block.bytes.subarray(0, to - from + 1) : block.bytes;
             if (chunk.length === 0) throw new HttpError(502, "MEDIA_TRANSPORT", "视频地址返回空数据");
@@ -549,10 +636,33 @@ export function createMedia({ sdk, cache, log = () => {} }) {
     fail(job, lastError ?? new Error("没有可用的播放地址"));
   };
 
+  // 请求档位不同也可能落到同一个实际档位，目录创建与换源只能有一个写入者。
+  const startDefinition = async (episodeId, definition, demand, create) => {
+    const key = `${episodeId}:${definition}`;
+    const previous = definitionStarts.get(key);
+    const task = (async () => {
+      if (previous) await previous.catch(() => {});
+      wanted(demand);
+      const running = findDefinitionJob(episodeId, definition);
+      if (running && running.state !== "error" && !running.abort.signal.aborted) return attachDemand(running, demand);
+      if (running) { await running.task; forgetJob(running); }
+      wanted(demand);
+      demands.set(demand.key, demand);
+      return create();
+    })();
+    definitionStarts.set(key, task);
+    try { return await task; }
+    finally { if (definitionStarts.get(key) === task) definitionStarts.delete(key); }
+  };
+
   const startJob = async ({ episodeId, quality, definition, dir, cached }) => {
-    if (cached) return createJob({ episodeId, quality, definition, dir, info: cached.info, cached: true });
+    const demand = demandFor(`${episodeId}:${quality}`);
+    wanted(demand);
+    if (cached) return startDefinition(episodeId, definition, demand, () =>
+      createJob({ episodeId, quality, definition, dir, info: cached.info, cached: true, demand }));
 
     const result = await sdk.resolvePlayback(episodeId);
+    wanted(demand);
     const playback = result?.playback;
     if (!playback || !Array.isArray(playback.streams) || playback.streams.length === 0) {
       throw new HttpError(502, "CONTENT_UNAVAILABLE", "内容不可用");
@@ -562,42 +672,53 @@ export function createMedia({ sdk, cache, log = () => {} }) {
     }
     const stream = pickStream(playback.streams, quality);
     if (!stream) throw new HttpError(502, "CONTENT_UNAVAILABLE", "没有可用的播放地址");
-    // 源站没有请求档位时 pickStream 会落到别的清晰度：该档位若已完整缓存就直接复用，不重复下载。
-    const cachedTarget = await readCachedDefinition(episodeId, stream.definition);
-    if (cachedTarget) {
-      return createJob({
-        episodeId,
-        quality,
-        definition: cachedTarget.definition,
-        dir: cachedTarget.dir,
-        info: cachedTarget.info,
-        cached: true,
-      });
-    }
-    const keyHex = playback.protected === true ? result.contentKey.key : null;
-    const targetDir = qualityDirOf(episodeId, stream.definition);
-    await mkdir(targetDir, { recursive: true, mode: 0o700 });
-    const job = createJob({ episodeId, quality, definition: stream.definition, dir: targetDir, info: null, cached: false });
-    job.info = { episodeId, definition: stream.definition, segmentCount: 0, complete: false };
-    const urls = [stream.url, stream.backup_url].filter((url) => typeof url === "string" && url);
-    job.task = runJob(job, urls, keyHex).catch(() => {});
-    return job;
+    return startDefinition(episodeId, stream.definition, demand, async () => {
+      // 源站没有请求档位时 pickStream 会落到别的清晰度：该档位若已完整缓存就直接复用，不重复下载。
+      const cachedTarget = await readCachedDefinition(episodeId, stream.definition);
+      wanted(demand);
+      if (cachedTarget) {
+        return createJob({ episodeId, quality, definition: cachedTarget.definition, dir: cachedTarget.dir,
+          info: cachedTarget.info, cached: true, demand });
+      }
+      const keyHex = playback.protected === true ? result.contentKey.key : null;
+      const targetDir = qualityDirOf(episodeId, stream.definition);
+      await mkdir(targetDir, { recursive: true, mode: 0o700 });
+      wanted(demand);
+      const job = createJob({ episodeId, quality, definition: stream.definition, dir: targetDir, info: null, cached: false, demand });
+      job.info = { episodeId, definition: stream.definition, segmentCount: 0, complete: false };
+      const urls = [stream.url, stream.backup_url].filter((url) => typeof url === "string" && url);
+      job.task = runJob(job, urls, keyHex).catch(() => {});
+      return job;
+    });
   };
 
-  const ensureJob = async (episodeId, quality) => {
+  const ensureJob = async (episodeId, quality, background = false, retried = false) => {
+    if (disposed || clearing) throw aborted();
+    const key = `${episodeId}:${quality}`;
+    const demand = demandFor(key);
+    if (!background) demand.foreground = true;
+    wanted(demand);
     const existing = findJob(episodeId, quality);
-    if (existing && existing.state !== "error") {
+    if (existing && existing.state !== "error" && !existing.abort.signal.aborted) {
       existing.lastUsed = Date.now();
-      return existing;
+      return attachDemand(existing, demand);
     }
-    if (existing?.state === "error") {
-      jobs.delete(existing.key);
-      cache.release(existing.dir);
+    if (existing) {
+      await existing.task;
+      forgetJob(existing);
+      demands.set(key, demand);
     }
 
-    const key = `${episodeId}:${quality}`;
     const pendingJob = pending.get(key);
-    if (pendingJob) return pendingJob;
+    if (pendingJob) {
+      try { return attachDemand(await pendingJob, demand); }
+      catch (error) {
+        if (!background && !retried && isAborted(error) && !disposed && !clearing) {
+          return ensureJob(episodeId, quality, false, true);
+        }
+        throw error;
+      }
+    }
 
     const task = (async () => {
       const cached = await findCached(episodeId, quality);
@@ -616,7 +737,8 @@ export function createMedia({ sdk, cache, log = () => {} }) {
     try {
       return await task;
     } finally {
-      pending.delete(key);
+      if (pending.get(key) === task) pending.delete(key);
+      if (!demand.job && !demand.tokens.size && demands.get(key) === demand) demands.delete(key);
     }
   };
 
@@ -629,6 +751,28 @@ export function createMedia({ sdk, cache, log = () => {} }) {
   };
 
   return {
+    /** 只预取下一集开头；正式播放会提升同一任务，取消不能中断已提升的任务。 */
+    async prefetch(episodeId, quality, token) {
+      if (disposed || clearing || (cancelledTokens.get(token) || 0) > Date.now()) return { accepted: false };
+      if (warmups.has(token)) return { accepted: true };
+      if (warmups.size >= MEDIA_LIMITS.prefetchMaxJobs) return { accepted: false };
+      // 当前集下载优先，预加载不与尚未完成的正式播放抢网络。
+      if ([...jobs.values()].some((job) => job.foreground && !job.complete && job.state !== "error")) return { accepted: false };
+      const demand = demandFor(`${episodeId}:${quality}`);
+      demand.tokens.add(token);
+      const timer = setTimeout(() => cancelPrefetch(token), MEDIA_LIMITS.prefetchTtlMs);
+      timer.unref?.();
+      warmups.set(token, { demand, timer });
+      try {
+        const job = await ensureJob(episodeId, quality, true);
+        await job.infoReady;
+        return { accepted: warmups.has(token) };
+      } catch (error) {
+        cancelPrefetch(token);
+        throw error;
+      }
+    },
+    cancelPrefetch(token) { cancelPrefetch(token); return { ok: true }; },
     /** /stream/info：只返回面板拼 MSE 需要的元数据，不含直链与密钥。 */
     async info(episodeId, quality) {
       const job = await ensureJob(episodeId, quality);
@@ -652,7 +796,7 @@ export function createMedia({ sdk, cache, log = () => {} }) {
       return readFile(initPathOf(job.dir));
     },
 
-    /** /stream/segment：seq 从 1 开始，未就绪时最多等 30 秒。 */
+    /** /stream/segment：seq 从 1 开始，连续 30 秒没有新分段落盘才超时。 */
     async segment(episodeId, quality, seq) {
       const job = await ensureJob(episodeId, quality);
       await job.infoReady;
@@ -664,17 +808,22 @@ export function createMedia({ sdk, cache, log = () => {} }) {
 
     /** POST /cache/clear：停掉任务、等在途任务收敛，再释放占用并清空 video/ 与 covers/。 */
     async clearCache() {
-      const waiting = [...pending.values()];
-      for (const job of jobs.values()) job.abort.abort();
-      await Promise.allSettled(waiting);
-      // 等待期间可能又创建了任务：再中止一次，确保没有新的写入落到清理后的目录。
-      for (const job of jobs.values()) job.abort.abort();
-      const inflight = [...jobs.values()];
-      await Promise.allSettled(inflight.map((job) => job.task).filter(Boolean));
-      for (const job of inflight) cache.release(job.dir);
-      jobs.clear();
-      const result = await cache.clear();
-      return { ok: true, removed: (result.videos ?? 0) + (result.covers ?? 0) };
+      clearing = true;
+      for (const token of [...warmups.keys()]) cancelPrefetch(token);
+      try {
+        const waiting = [...pending.values()];
+        for (const job of jobs.values()) job.abort.abort();
+        await Promise.allSettled(waiting);
+        // 等待期间可能又创建了任务：再中止一次，确保没有新的写入落到清理后的目录。
+        for (const job of jobs.values()) job.abort.abort();
+        const inflight = [...jobs.values()];
+        await Promise.allSettled(inflight.map((job) => job.task).filter(Boolean));
+        for (const job of inflight) cache.release(job.dir);
+        jobs.clear();
+        demands.clear();
+        const result = await cache.clear();
+        return { ok: true, removed: (result.videos ?? 0) + (result.covers ?? 0) };
+      } finally { clearing = false; }
     },
 
     stats() {
@@ -693,12 +842,15 @@ export function createMedia({ sdk, cache, log = () => {} }) {
     },
 
     dispose() {
+      disposed = true;
+      for (const token of [...warmups.keys()]) cancelPrefetch(token);
       for (const job of jobs.values()) {
         job.abort.abort();
         cache.release(job.dir);
       }
       jobs.clear();
       pending.clear();
+      demands.clear();
     },
   };
 }

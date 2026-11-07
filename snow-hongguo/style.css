@@ -837,6 +837,111 @@
 
 /* ---------------- 搜索页 ---------------- */
 
+.hg-search-entry {
+  position: relative;
+  flex: none;
+  min-width: 0;
+  z-index: 2;
+}
+
+.hg-suggestions {
+  position: absolute;
+  top: calc(100% - 4px);
+  left: 12px;
+  right: 12px;
+  max-height: min(220px, 40vh);
+  overflow-y: auto;
+  padding: 4px;
+  border: 1px solid var(--hg-border);
+  border-radius: 8px;
+  background: var(--hg-bg);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.12);
+}
+
+.hg-suggestion {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.hg-suggestion:hover,
+.hg-suggestion.is-selected,
+.hg-hot-row:hover {
+  background: var(--hg-hover);
+}
+
+.hg-suggestion span,
+.hg-hot-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hg-search-section {
+  margin-top: 16px;
+}
+
+.hg-hot-list {
+  margin-top: 4px;
+}
+
+.hg-hot-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  min-width: 0;
+  padding: 8px 4px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.hg-hot-position {
+  flex: none;
+  width: 22px;
+  text-align: center;
+  color: var(--hg-sub);
+  font-variant-numeric: tabular-nums;
+}
+
+.hg-hot-position.is-top {
+  color: var(--hg-primary);
+  font-weight: 600;
+}
+
+.hg-hot-score,
+.hg-hot-tag {
+  flex: none;
+  max-width: 28%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--hg-sub);
+  font-size: 10px;
+}
+
+.hg-hot-tag {
+  padding: 1px 4px;
+  border: 1px solid var(--hg-border);
+  border-radius: 4px;
+}
+
 .hg-searchbar {
   flex: none;
   display: flex;
@@ -980,11 +1085,6 @@
   color: var(--hg-sub);
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
-}
-
-.hg-loadmore {
-  width: 100%;
-  margin-top: 8px;
 }
 
 /* ---------------- 详情页 ---------------- */

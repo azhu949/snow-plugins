@@ -77,6 +77,7 @@ export function PlayerMount(props) {
     playbackRate: props.ctx.prefs?.playbackRate,
     volume: props.ctx.prefs?.volume,
     muted: props.ctx.prefs?.muted,
+    autoNext: props.ctx.prefs?.autoNext,
     miniWindow: props.ctx.prefs?.miniWindow,
     series: props.series,
     episodes: props.episodes,

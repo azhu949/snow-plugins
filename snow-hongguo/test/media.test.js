@@ -14,7 +14,8 @@ import { createMedia, fetchHead, pickStream, requestRange } from "../src/backgro
 import { createCoverResolver, detectImageConverter, isBrowserImage } from "../src/background/media/cover.js";
 import { MEDIA_LIMITS, base64Length } from "../src/background/media/limits.js";
 import { Remuxer, decryptSample, parseBoxes, scanHead } from "../src/background/media/remux.js";
-import { startServer } from "../src/background/server.js";
+import { createRequestHandler, startServer } from "../src/background/server.js";
+import { readSegments } from "../src/panel/player/segments.js";
 
 const CHANNEL = { "x-snow-hongguo-channel": "panel-rpc-v1" };
 const FIXTURE_DIR = fileURLToPath(new URL("./fixtures/", import.meta.url));
@@ -74,9 +75,9 @@ const nalTypesOf = (sample, lengthSize = 4) => {
   return types.length > 0 ? types : null;
 };
 
-/** 本地 Range 服务器：可注入失败，用来测断点续传与备用源切换。 */
-const startRangeServer = async (source, { failWhen = () => false } = {}) => {
-  const state = { requests: [], count: 0 };
+/** 本地 Range 服务器：可注入失败或手动放行响应，验证续传、换源与慢速下载。 */
+const startRangeServer = async (source, { failWhen = () => false, holdWhen = () => false } = {}) => {
+  const state = { requests: [], count: 0, held: [] };
   const server = createHttpServer((req, res) => {
     state.count += 1;
     const match = /^bytes=(\d+)-(\d+)$/.exec(String(req.headers.range ?? ""));
@@ -92,13 +93,18 @@ const startRangeServer = async (source, { failWhen = () => false } = {}) => {
       res.destroy();
       return;
     }
-    const body = source.subarray(from, to + 1);
-    res.writeHead(206, {
-      "content-type": "video/mp4",
-      "content-length": body.length,
-      "content-range": `bytes ${from}-${to}/${source.length}`,
-    });
-    res.end(body);
+    const respond = () => {
+      if (res.destroyed) return;
+      const body = source.subarray(from, to + 1);
+      res.writeHead(206, {
+        "content-type": "video/mp4",
+        "content-length": body.length,
+        "content-range": `bytes ${from}-${to}/${source.length}`,
+      });
+      res.end(body);
+    };
+    if (holdWhen(state.count)) state.held.push(respond);
+    else respond();
   });
   server.on("clientError", () => {});
   await new Promise((resolve, reject) => {
@@ -116,6 +122,206 @@ const startRangeServer = async (source, { failWhen = () => false } = {}) => {
 const playbackFor = (streams, key = DUMMY_KEY) => ({
   playback: { protected: true, duration_seconds: meta.durationSeconds, streams },
   contentKey: { key, version: "1" },
+});
+
+const until = async (condition) => {
+  const end = Date.now() + 4000;
+  while (!condition()) {
+    if (Date.now() > end) assert.fail("等待媒体状态超时");
+    await new Promise(setImmediate);
+  }
+};
+const warmFixture = async (t, sdkFactory, rangeOptions) => {
+  const rootDir = await mkdtemp(join(tmpdir(), "hongguo-warm-"));
+  const source = await startRangeServer(makeSource(), rangeOptions);
+  let calls = 0;
+  const response = playbackFor([{ url: source.url, definition: "360p", bitrate: 1 }]);
+  const sdk = sdkFactory ? sdkFactory(response) : { resolvePlayback: async () => { calls++; return response; } };
+  const media = createMedia({ sdk, cache: await makeCacheInstance(rootDir) });
+  t.after(async () => { await media.clearCache(); media.dispose(); await source.close(); await rm(rootDir, { recursive: true, force: true }); });
+  return { media, source, rootDir, calls: () => calls };
+};
+
+test("并行预读在下载持续推进时等待后续分段，不受最初 30 秒期限影响", async (t) => {
+  const { media, source } = await warmFixture(t, null, { holdWhen: (count) => count > 1 });
+  const info = await media.info("slow", "360p");
+  assert.equal(info.segmentCount, 3);
+  await until(() => source.state.held.length === 1);
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const rpc = { getStreamSegment: async (id, quality, seq) => ({
+    base64: (await media.segment(id, quality, seq)).bytes.toString("base64"),
+  }) };
+  const reader = readSegments({ rpc, episodeId: "slow", quality: "360p", count: info.segmentCount, cancelled: () => false });
+  const first = reader.next();
+  await new Promise(setImmediate);
+  t.mock.timers.tick(20_000);
+  source.state.held.shift()();
+  assert.equal((await first).value.seq, 1);
+  assert.equal((await reader.next()).value.seq, 2);
+  await until(() => source.state.held.length === 1);
+  t.mock.timers.tick(20_000);
+  source.state.held.shift()();
+  assert.equal((await reader.next()).value.seq, 3);
+  assert.equal((await reader.next()).done, true);
+  t.mock.timers.reset();
+});
+
+test("分段下载没有进展时仍在 30 秒后超时", async (t) => {
+  const { media, source } = await warmFixture(t, null, { holdWhen: (count) => count > 1 });
+  await media.info("stalled", "360p");
+  await until(() => source.state.held.length === 1);
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const rejected = assert.rejects(media.segment("stalled", "360p", 1), { code: "SEGMENT_TIMEOUT" });
+  await new Promise(setImmediate);
+  t.mock.timers.tick(MEDIA_LIMITS.segmentWaitMs);
+  await rejected;
+  t.mock.timers.reset();
+});
+
+test("预加载只取开头并暂停，切集提升同一任务且旧租约取消不影响正式播放", async (t) => {
+  const { media, source, calls } = await warmFixture(t);
+  assert.deepEqual(await media.prefetch("warm", "360p", "lease-one"), { accepted: true });
+  await until(() => media.stats().jobs[0]?.state === "prefetched");
+  const warm = media.stats().jobs[0];
+  assert.ok(warm.segments >= 1);
+  assert.ok(warm.have <= MEDIA_LIMITS.prefetchMaxBytes);
+  assert.ok(warm.have < warm.total);
+  const before = source.state.requests.length;
+  await new Promise(setImmediate); assert.equal(source.state.requests.length, before);
+  const [info, init] = await Promise.all([media.info("warm", "360p"), media.init("warm", "360p")]);
+  media.cancelPrefetch("lease-one");
+  const last = await media.segment("warm", "360p", info.segmentCount);
+  assert.ok(init.length); assert.ok(last.bytes.length); assert.equal(calls(), 1);
+  assert.equal(source.state.requests.filter((request) => request.from === 0).length, 1, "开头缓存不能重下");
+});
+
+test("取消和过期停止预加载，取消先到时迟到启动不能复活任务", async (t) => {
+  const { media, source } = await warmFixture(t);
+  media.cancelPrefetch("cancel-first");
+  assert.deepEqual(await media.prefetch("warm", "360p", "cancel-first"), { accepted: false });
+  assert.equal(source.state.requests.length, 0);
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  assert.equal((await media.prefetch("warm", "360p", "expires")).accepted, true);
+  await until(() => media.stats().jobs[0]?.state === "prefetched");
+  t.mock.timers.tick(MEDIA_LIMITS.prefetchTtlMs);
+  await until(() => media.stats().jobs.length === 0);
+  const count = source.state.requests.length;
+  assert.deepEqual(await media.prefetch("warm", "360p", "expires"), { accepted: false });
+  assert.equal(source.state.requests.length, count);
+  t.mock.timers.reset();
+});
+
+test("SDK 尚未返回时取消预取，不创建下载；下一次正式播放仍可成功", async (t) => {
+  let resolve, entered = false;
+  const pending = new Promise((yes) => { resolve = yes; });
+  const { media, source } = await warmFixture(t, (response) => ({ resolvePlayback: async () => { entered = true; await pending; return response; } }));
+  const request = media.prefetch("slow", "360p", "slow-lease");
+  const rejected = assert.rejects(request, { code: "MEDIA_ABORTED" });
+  await until(() => entered); media.cancelPrefetch("slow-lease"); resolve(); await rejected;
+  assert.equal(source.state.requests.length, 0);
+  const info = await media.info("slow", "360p");
+  assert.ok((await media.segment("slow", "360p", info.segmentCount)).bytes.length);
+});
+
+test("正在预取时请求实际清晰度，复用缓存；清理会终止暂停任务且不再落盘", async (t) => {
+  const { media, source, rootDir, calls } = await warmFixture(t);
+  await media.prefetch("alias", "720p", "alias-lease");
+  await until(() => media.stats().jobs[0]?.state === "prefetched");
+  const info = await media.info("alias", "360p");
+  media.cancelPrefetch("alias-lease");
+  await media.segment("alias", "360p", info.segmentCount);
+  assert.equal(calls(), 1);
+  await until(() => media.stats().jobs[0]?.state === "ready");
+  await media.prefetch("other", "360p", "other-lease");
+  await until(() => media.stats().jobs.some((job) => job.state === "prefetched"));
+  await media.clearCache(); assert.deepEqual(media.stats().jobs, []);
+  const count = source.state.requests.length; await new Promise(setImmediate); assert.equal(source.state.requests.length, count);
+  assert.deepEqual(await readdir(join(rootDir, "video")), []);
+});
+
+test("预加载路由只接受 POST，校验参数并与取消使用同一租约", async () => {
+  const calls = [];
+  const handler = createRequestHandler({ sdk: {}, cache: {}, media: {
+    prefetch: async (...args) => { calls.push(args); return { accepted: true }; },
+    cancelPrefetch: (token) => { calls.push(token); return { ok: true }; },
+  } });
+  const run = (pathname, query, method = "POST") => handler({ pathname, query: new URLSearchParams(query), method });
+  await assert.rejects(run("/stream/prefetch", {}, "GET"), { code: "METHOD_NOT_ALLOWED" });
+  await assert.rejects(run("/stream/prefetch", { episodeId: "../bad", quality: "720p", token: "lease" }), { code: "INVALID_PARAM" });
+  await assert.rejects(run("/stream/prefetch", { episodeId: "one", quality: "bad", token: "lease" }), { code: "INVALID_PARAM" });
+  assert.equal((await run("/stream/prefetch", { episodeId: "one", quality: "720p", token: "lease" })).payload.accepted, true);
+  await run("/stream/prefetch/cancel", { token: "lease" });
+  assert.deepEqual(calls, [["one", "720p", "lease"], "lease"]);
+});
+
+test("两个请求档位落到相同实际档位时只创建一个下载，取消其中一个租约不影响另一个", async (t) => {
+  const { media, source } = await warmFixture(t);
+  await Promise.all([media.prefetch("same", "720p", "high"), media.prefetch("same", "480p", "low")]);
+  await until(() => media.stats().jobs[0]?.state === "prefetched");
+  assert.equal(media.stats().jobs.length, 1);
+  assert.equal(source.state.requests.filter((request) => request.from === 0).length, 1);
+  media.cancelPrefetch("high"); await new Promise(setImmediate); assert.equal(media.stats().jobs[0].state, "prefetched");
+  const info = await media.info("same", "360p"); media.cancelPrefetch("low");
+  assert.ok((await media.segment("same", "360p", info.segmentCount)).bytes.length);
+});
+
+test("复用实际档位后通过请求档位读取信息和所有分段不再解析上游，清理后重新解析", async (t) => {
+  const { media, calls } = await warmFixture(t);
+  await media.prefetch("alias", "720p", "high");
+  await media.prefetch("alias", "480p", "low");
+  assert.equal(calls(), 2);
+  const info = await media.info("alias", "480p");
+  assert.equal(info.definition, "360p");
+  assert.ok((await media.init("alias", "480p")).length);
+  media.cancelPrefetch("high");
+  media.cancelPrefetch("low");
+  for (let seq = 1; seq <= info.segmentCount; seq += 1) {
+    assert.ok((await media.segment("alias", "480p", seq)).bytes.length);
+  }
+  assert.equal(calls(), 2, "请求档位的后续读取必须命中已复用任务");
+  await media.clearCache();
+  await media.info("alias", "480p");
+  assert.equal(calls(), 3, "清理后不能复用旧档位映射");
+});
+
+test("取消全部预取租约后请求档位不再指向被取消的任务", async (t) => {
+  const { media, calls } = await warmFixture(t);
+  await media.prefetch("cancel-alias", "720p", "high");
+  await media.prefetch("cancel-alias", "480p", "low");
+  await until(() => media.stats().jobs[0]?.state === "prefetched");
+  media.cancelPrefetch("high");
+  media.cancelPrefetch("low");
+  await until(() => media.stats().jobs.length === 0);
+  const info = await media.info("cancel-alias", "480p");
+  assert.ok((await media.segment("cancel-alias", "480p", info.segmentCount)).bytes.length);
+  assert.equal(calls(), 3);
+});
+
+test("新解析到的实际档位不能误命中同名的旧请求档位别名", async (t) => {
+  let calls = 0;
+  const { media } = await warmFixture(t, (response) => ({ resolvePlayback: async () => {
+    const definition = ++calls > 2 ? "480p" : "360p";
+    return { ...response, playback: { ...response.playback, streams: [{ ...response.playback.streams[0], definition }] } };
+  } }));
+  await media.prefetch("actual", "720p", "high");
+  await media.prefetch("actual", "480p", "low");
+  const info = await media.info("actual", "1080p");
+  assert.equal(info.definition, "480p");
+  assert.deepEqual(new Set(media.stats().jobs.map((job) => job.definition)), new Set(["360p", "480p"]));
+  assert.ok((await media.segment("actual", "1080p", info.segmentCount)).bytes.length);
+  assert.equal(calls, 3);
+});
+
+test("预加载限制并发数量，正式播放正在下载时不抢占网络", async (t) => {
+  const { media } = await warmFixture(t);
+  const warmups = [media.prefetch("a", "360p", "a-lease"), media.prefetch("b", "360p", "b-lease")];
+  assert.deepEqual(await media.prefetch("c", "360p", "c-lease"), { accepted: false });
+  await Promise.all(warmups);
+  await until(() => media.stats().jobs.filter((job) => job.state === "prefetched").length === 2);
+  const info = await media.info("a", "360p");
+  media.cancelPrefetch("a-lease");
+  assert.deepEqual(await media.prefetch("c", "360p", "another-lease"), { accepted: false });
+  await media.segment("a", "360p", info.segmentCount);
 });
 
 /** 真实网络用例默认跳过；开启 HONGGUO_LIVE=1 后，只在网络/上游异常时 skip，断言失败照常 fail。 */

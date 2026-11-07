@@ -15,6 +15,8 @@ import { byteLength, createTtlCache, mapWithConcurrency, truncateChars, withSing
 import { createCoverResolver } from "./media/cover.js";
 import { MEDIA_LIMITS, MEDIA_ROUTES, QUALITIES, base64Length } from "./media/limits.js";
 import { createCatalogHandlers } from "./catalog.js";
+import { createSearchDiscoveryHandlers } from "./search-discovery.js";
+import { createPageCursors } from "./cursors.js";
 
 const HOST = "127.0.0.1";
 const MAX_REQUEST_BYTES = 64 * 1024;
@@ -256,8 +258,10 @@ export function createRequestHandler({
     return items;
   };
 
+  const searchCursors = createPageCursors();
   const handles = {
     ...createCatalogHandlers({ sdk, toListItem, fetchPage }),
+    ...createSearchDiscoveryHandlers({ sdk, toListItem }),
     health: async () => {
       const stats = typeof sdk.stats === "function" ? sdk.stats() : {};
       return {
@@ -291,7 +295,7 @@ export function createRequestHandler({
 
     search: async ({ query }) => {
       const q = readParam(query, "q", { required: true, maxLength: 80 });
-      const cursor = readParam(query, "cursor", { maxLength: 4096 });
+      const cursor = searchCursors.read(readParam(query, "cursor", { maxLength: 4096 }), `search:${q}`);
       const page = await fetchPage(() => sdk.search(q, cursor ? { cursor } : {}));
       const rawItems = Array.isArray(page?.items) ? page.items : [];
       const items = rawItems.map(toListItem);
@@ -299,7 +303,7 @@ export function createRequestHandler({
       await enrichSearchCovers(items, rawItems);
       return {
         status: 200,
-        payload: { items, cursor: page?.cursor ?? null, hasMore: page?.has_more === true },
+        payload: { items, ...searchCursors.pageInfo(page, `search:${q}`) },
       };
     },
 
@@ -362,6 +366,14 @@ export function createRequestHandler({
       const quality = readQuality(query);
       return { status: 200, payload: await engine.info(episodeId, quality) };
     },
+
+    streamPrefetch: async ({ query }) => ({
+      status: 200,
+      payload: await requireMedia().prefetch(readId(query, "episodeId"), readQuality(query), readId(query, "token")),
+    }),
+    streamPrefetchCancel: async ({ query }) => ({
+      status: 200, payload: requireMedia().cancelPrefetch(readId(query, "token")),
+    }),
 
     /** 解密后的 init segment（ftyp + moov），始终是同一任务同一次解析的产物。 */
     streamInit: async ({ query }) => {
@@ -477,6 +489,8 @@ export function createRequestHandler({
     [ROUTES.filterPanel, { method: "GET", handler: handles.filterPanel }],
     [ROUTES.filter, { method: "GET", handler: handles.filter }],
     [ROUTES.search, { method: "GET", handler: handles.search }],
+    [ROUTES.suggest, { method: "GET", handler: handles.suggest }],
+    [ROUTES.hotSearch, { method: "GET", handler: handles.hotSearch }],
     [ROUTES.series, { method: "GET", handler: handles.series }],
     [ROUTES.episodes, { method: "GET", handler: handles.episodes }],
     [ROUTES.playback, { method: "GET", handler: handles.playback }],
@@ -484,6 +498,8 @@ export function createRequestHandler({
     [MEDIA_ROUTES.streamInfo, { method: "GET", handler: handles.streamInfo }],
     [MEDIA_ROUTES.streamInit, { method: "GET", handler: handles.streamInit }],
     [MEDIA_ROUTES.streamSegment, { method: "GET", handler: handles.streamSegment }],
+    [MEDIA_ROUTES.streamPrefetch, { method: "POST", handler: handles.streamPrefetch }],
+    [MEDIA_ROUTES.streamPrefetchCancel, { method: "POST", handler: handles.streamPrefetchCancel }],
     [MEDIA_ROUTES.cacheClear, { method: "POST", handler: handles.cacheClear }],
     [MEDIA_ROUTES.h264Info, { method: "GET", handler: handles.h264Info }],
     [MEDIA_ROUTES.h264Start, { method: "POST", handler: handles.h264Start }],

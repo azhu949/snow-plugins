@@ -200,6 +200,10 @@ export function createSdk({
     search: (query, options = {}) =>
       execute("search", "search", "search", [String(query ?? ""), compactOptions(options)]),
 
+    suggest: (prefix) => execute("suggest", "suggest", "suggest", [String(prefix ?? "")]),
+
+    hotSearch: () => execute("hotSearch", "hotSearch", "hotSearch", []),
+
     getSeries: (seriesId) => execute("getSeries", "getSeries", "getSeries", [String(seriesId)]),
 
     listEpisodes: (seriesId, options = {}) =>

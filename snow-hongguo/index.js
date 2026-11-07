@@ -60,7 +60,10 @@ var zh_CN_default = {
   "search.empty": "没有找到相关内容",
   "search.emptyHint": "换个关键词再试",
   "search.searching": "正在搜索…",
-  "search.results": "共 {{count}} 个结果",
+  "search.results": "已加载 {{count}} 个结果",
+  "search.suggestions": "搜索联想",
+  "search.hotLoading": "正在加载热搜…",
+  "search.guesses": "猜你想搜",
   "search.loadMore": "加载更多结果",
   "search.loadingMore": "正在加载更多…",
   "search.clearInput": "清空输入",
@@ -272,7 +275,10 @@ var zh_TW_default = {
   "search.empty": "沒有找到相關內容",
   "search.emptyHint": "換個關鍵詞再試",
   "search.searching": "正在搜尋…",
-  "search.results": "共 {{count}} 個結果",
+  "search.results": "已載入 {{count}} 個結果",
+  "search.suggestions": "搜尋建議",
+  "search.hotLoading": "正在載入熱搜…",
+  "search.guesses": "猜你想搜",
   "search.loadMore": "載入更多結果",
   "search.loadingMore": "正在載入更多…",
   "search.clearInput": "清空輸入",
@@ -484,7 +490,10 @@ var en_default = {
   "search.empty": "No results found",
   "search.emptyHint": "Try a different keyword",
   "search.searching": "Searching…",
-  "search.results": "{{count}} results",
+  "search.results": "{{count}} results loaded",
+  "search.suggestions": "Search suggestions",
+  "search.hotLoading": "Loading trending searches…",
+  "search.guesses": "Suggested for you",
   "search.loadMore": "Load more results",
   "search.loadingMore": "Loading more…",
   "search.clearInput": "Clear input",
@@ -731,6 +740,8 @@ var PANEL_ROUTES = {
   filterPanel: "/filter-panel",
   filter: "/filter",
   search: "/search",
+  suggest: "/search/suggest",
+  hotSearch: "/search/hot",
   series: "/series",
   episodes: "/episodes",
   playback: "/playback",
@@ -739,6 +750,8 @@ var PANEL_ROUTES = {
   streamInfo: "/stream/info",
   streamInit: "/stream/init",
   streamSegment: "/stream/segment",
+  streamPrefetch: "/stream/prefetch",
+  streamPrefetchCancel: "/stream/prefetch/cancel",
   h264Info: "/h264/info",
   h264Start: "/h264/start",
   h264Chunk: "/h264/chunk"
@@ -1017,6 +1030,8 @@ function createRpc(api, { log = () => {
       query: { q, cursor },
       timeoutMs: TIMEOUTS.search
     }),
+    suggest: (q) => call(PANEL_ROUTES.suggest, { query: { q }, timeoutMs: TIMEOUTS.list }),
+    hotSearch: () => call(PANEL_ROUTES.hotSearch, { timeoutMs: TIMEOUTS.list }),
     getSeries: (id) => call(PANEL_ROUTES.series, {
       query: { id },
       timeoutMs: TIMEOUTS.detail
@@ -1041,6 +1056,16 @@ function createRpc(api, { log = () => {
     getStreamSegment: (episodeId, quality, seq) => call(PANEL_ROUTES.streamSegment, {
       query: { episodeId, quality, seq },
       timeoutMs: TIMEOUTS.media
+    }),
+    prefetchStream: (episodeId, quality, token) => call(PANEL_ROUTES.streamPrefetch, {
+      method: "POST",
+      query: { episodeId, quality, token },
+      timeoutMs: TIMEOUTS.media
+    }),
+    cancelPrefetch: (token) => call(PANEL_ROUTES.streamPrefetchCancel, {
+      method: "POST",
+      query: { token },
+      timeoutMs: TIMEOUTS.action
     }),
     /** 转码兜底：查询进度 / 启动 / 分块读取成品（宿主没有 HEVC 解码器时使用）。 */
     h264Info: (episodeId, quality) => call(PANEL_ROUTES.h264Info, {
@@ -1329,13 +1354,12 @@ var writePrefs = (api, prefs) => mutate(api, async () => {
   await api.storage.setJson(PREFS_KEY, next);
   return next;
 });
-var readRecentSearches = async (api) => {
-  const raw = await api.storage.getJson(RECENT_SEARCH_KEY, []);
+var normalizeRecentSearches = (raw) => {
   if (!Array.isArray(raw)) return [];
   const seen = /* @__PURE__ */ new Set();
   const list = [];
   for (const item of raw) {
-    const text = typeof item === "string" ? item.trim() : "";
+    const text = typeof item === "string" ? item.trim().slice(0, 80) : "";
     if (!text || seen.has(text)) continue;
     seen.add(text);
     list.push(text);
@@ -1343,17 +1367,20 @@ var readRecentSearches = async (api) => {
   }
   return list;
 };
+var readRecentSearches = async (api) => normalizeRecentSearches(await readStored(api, RECENT_SEARCH_KEY, []));
 var pushRecentSearch = async (api, query) => {
   const text = String(query || "").trim().slice(0, 80);
   if (!text) return readRecentSearches(api);
-  const list = await readRecentSearches(api);
-  const next = [text, ...list.filter((item) => item !== text)].slice(0, RECENT_SEARCH_LIMIT);
-  await api.storage.setJson(RECENT_SEARCH_KEY, next);
-  return next;
+  return mutate(api, async () => {
+    const list = normalizeRecentSearches(await api.storage.getJson(RECENT_SEARCH_KEY, []));
+    const next = [text, ...list.filter((item) => item !== text)].slice(0, RECENT_SEARCH_LIMIT);
+    await api.storage.setJson(RECENT_SEARCH_KEY, next);
+    return next;
+  });
 };
-var clearRecentSearches = async (api) => {
+var clearRecentSearches = (api) => mutate(api, async () => {
   await api.storage.setJson(RECENT_SEARCH_KEY, []);
-};
+});
 
 // src/panel/ui/common.js
 function Icon({ ctx, name, size = 14 }) {
@@ -2497,261 +2524,430 @@ function DiscoveryPage({ ctx, active }) {
   );
 }
 
-// src/panel/pages/search.js
-var DEBOUNCE_MS = 300;
-var dedupeById2 = (list) => {
-  const seen = /* @__PURE__ */ new Set();
-  const result = [];
-  for (const item of list) {
-    if (!item || typeof item !== "object" || !item.id || seen.has(item.id)) continue;
-    seen.add(item.id);
-    result.push(item);
-  }
-  return result;
-};
-function SearchPage({ ctx, active }) {
+// src/panel/ui/auto-load.js
+function useAutoLoadMore({ active, ready, hasMore, cursor, scrollRef, sentinelRef, load }) {
   const React = getReact();
-  const t = ctx.t;
-  const rpc = ctx.rpc;
-  const api = ctx.api;
-  const [text, setText] = React.useState("");
-  const [submitted, setSubmitted] = React.useState("");
-  const [items, setItems] = React.useState([]);
-  const [hasMore, setHasMore] = React.useState(false);
-  const [status, setStatus] = React.useState("idle");
-  const [error, setError] = React.useState(null);
-  const [recent, setRecent] = React.useState([]);
-  const inputRef = React.useRef(null);
-  const seqRef = React.useRef(0);
-  const submittedRef = React.useRef("");
-  const cursorRef = React.useRef(null);
-  const hasMoreRef = React.useRef(false);
-  const busyRef = React.useRef(false);
-  const debounceRef = React.useRef(null);
   React.useEffect(() => {
+    if (!active || !ready || !hasMore) return void 0;
+    const root = scrollRef.current;
+    if (!root) return void 0;
+    let disposed = false;
+    const check = () => {
+      if (!disposed && root.clientHeight > 0 && root.scrollHeight - root.scrollTop - root.clientHeight < 240) load();
+    };
+    const intersection = typeof IntersectionObserver === "function" ? new IntersectionObserver(check, { root, rootMargin: "240px 0px" }) : null;
+    const resize = typeof ResizeObserver === "function" ? new ResizeObserver(check) : null;
+    if (sentinelRef.current) intersection?.observe(sentinelRef.current);
+    resize?.observe(root);
+    root.addEventListener("scroll", check, { passive: true });
+    window.addEventListener("resize", check);
+    check();
+    return () => {
+      disposed = true;
+      intersection?.disconnect();
+      resize?.disconnect();
+      root.removeEventListener("scroll", check);
+      window.removeEventListener("resize", check);
+    };
+  }, [active, ready, hasMore, cursor, scrollRef, sentinelRef, load]);
+}
+
+// src/panel/pages/search-explore.js
+function SearchExplore({ ctx, active, visible, onSearch }) {
+  const React = getReact();
+  const [state, setState] = React.useState({ status: "idle", data: null, error: null });
+  const [retry, setRetry] = React.useState(0);
+  const loaded = React.useRef(false);
+  React.useEffect(() => {
+    if (!active || !visible || loaded.current) return void 0;
     let alive = true;
-    readRecentSearches(api).then((list) => {
-      if (alive) setRecent(list);
-    }).catch(() => {
+    setState((prev) => ({ ...prev, status: "loading", error: null }));
+    Promise.resolve().then(() => ctx.rpc.hotSearch()).then((data) => {
+      if (!alive) return;
+      loaded.current = true;
+      setState({ status: "ready", data, error: null });
+    }).catch((error) => {
+      if (alive) setState({ status: "error", data: null, error });
     });
     return () => {
       alive = false;
     };
-  }, [api]);
-  const runSearch = React.useCallback(
-    async (query, append) => {
-      const q = String(query || "").trim().slice(0, 80);
-      if (!q) return;
-      if (append && (!hasMoreRef.current || !cursorRef.current)) return;
-      busyRef.current = true;
-      const seq = seqRef.current + 1;
-      seqRef.current = seq;
-      if (!append) {
-        submittedRef.current = q;
-        setSubmitted(q);
-        cursorRef.current = null;
-        hasMoreRef.current = false;
-        setItems([]);
-        setHasMore(false);
-      }
-      setStatus(append ? "more" : "loading");
-      setError(null);
-      try {
-        const page = await rpc.search(q, append ? cursorRef.current : null);
-        if (seq !== seqRef.current) return;
-        const list = dedupeById2(Array.isArray(page?.items) ? page.items : []);
-        setItems((prev) => append ? dedupeById2([...prev, ...list]) : list);
-        cursorRef.current = page?.cursor ?? null;
-        hasMoreRef.current = page?.hasMore === true;
-        setHasMore(hasMoreRef.current);
-        setStatus("idle");
-        if (!append) {
-          pushRecentSearch(api, q).then((next) => setRecent(next)).catch(() => {
-          });
-        }
-      } catch (searchError) {
-        if (seq !== seqRef.current) return;
-        setError(searchError);
-        setStatus("error");
-      } finally {
-        if (seq === seqRef.current) busyRef.current = false;
-      }
-    },
-    [api, rpc]
+  }, [ctx.rpc, active, visible, retry]);
+  if (!visible) return null;
+  const { t } = ctx;
+  const guesses = state.data?.guesses || [];
+  const boards = state.data?.boards || [];
+  return h(
+    "div",
+    { className: "hg-search-explore" },
+    state.status === "loading" ? h(
+      "div",
+      { className: "hg-loading-line" },
+      h(Spinner, { label: t("search.hotLoading") }),
+      t("search.hotLoading")
+    ) : null,
+    state.error ? h(ErrorNotice, { ctx, error: state.error, compact: true, onRetry: () => setRetry((value) => value + 1) }) : null,
+    guesses.length ? h(
+      "section",
+      { className: "hg-search-section" },
+      h("div", { className: "hg-sec-head" }, t("search.guesses")),
+      h("div", { className: "hg-chips" }, guesses.map((item) => h("button", {
+        key: item.id,
+        type: "button",
+        className: "hg-chip",
+        title: item.title,
+        onClick: () => ctx.openSeries(item)
+      }, item.title)))
+    ) : null,
+    boards.map((board, index) => h(
+      "section",
+      { key: `${index}:${board.name}`, className: "hg-search-section" },
+      h("div", { className: "hg-sec-head" }, board.name),
+      h(
+        "div",
+        { className: "hg-hot-list" },
+        (board.items || []).map((item, position) => h(
+          "button",
+          {
+            key: item.id,
+            type: "button",
+            className: "hg-hot-row",
+            onClick: () => ctx.openSeries(item),
+            title: item.title
+          },
+          h("span", { className: `hg-hot-position${(item.position || position + 1) <= 3 ? " is-top" : ""}` }, item.position || position + 1),
+          h("span", { className: "hg-hot-title" }, item.title),
+          item.tag ? h("span", { className: "hg-hot-tag" }, item.tag) : null,
+          item.score ? h("span", { className: "hg-hot-score" }, item.score) : null
+        )),
+        (board.topics || []).map((topic) => h(
+          "button",
+          {
+            key: `topic:${topic.query}`,
+            type: "button",
+            className: "hg-hot-row hg-hot-topic",
+            onClick: () => onSearch(topic.query),
+            title: topic.title
+          },
+          h("span", { className: "hg-hot-position", "aria-hidden": true }, "#"),
+          h("span", { className: "hg-hot-title" }, topic.title),
+          topic.heat ? h("span", { className: "hg-hot-score" }, topic.heat) : null
+        ))
+      )
+    ))
   );
-  React.useEffect(() => {
-    const q = text.trim();
-    if (!q) {
-      seqRef.current += 1;
-      submittedRef.current = "";
-      setSubmitted("");
-      setItems([]);
-      setHasMore(false);
-      setError(null);
-      setStatus("idle");
-      cursorRef.current = null;
-      hasMoreRef.current = false;
-      return void 0;
-    }
-    if (q === submittedRef.current) return void 0;
-    const timer = setTimeout(() => {
-      debounceRef.current = null;
-      void runSearch(q, false);
-    }, DEBOUNCE_MS);
-    debounceRef.current = timer;
-    return () => {
-      clearTimeout(timer);
-      if (debounceRef.current === timer) debounceRef.current = null;
-    };
-  }, [text, runSearch]);
-  const submitNow = () => {
-    if (debounceRef.current) {
-      clearTimeout(debounceRef.current);
-      debounceRef.current = null;
-    }
-    const q = text.trim();
-    if (q) void runSearch(q, false);
+}
+
+// src/panel/pages/search.js
+var normalize = (value) => String(value || "").trim().slice(0, 80);
+var empty = () => ({ query: "", items: [], cursor: null, hasMore: false, status: "idle", error: null });
+var merge = (previous, incoming) => {
+  const seen = /* @__PURE__ */ new Set();
+  return [...previous, ...Array.isArray(incoming) ? incoming : []].filter((item) => {
+    if (!item?.id || seen.has(item.id)) return false;
+    seen.add(item.id);
+    return true;
+  });
+};
+function SearchPage({ ctx, active }) {
+  const React = getReact();
+  const { t, rpc, api } = ctx;
+  const [text, setText] = React.useState("");
+  const [list, setList] = React.useState(empty);
+  const [recent, setRecent] = React.useState([]);
+  const [suggestions, setSuggestions] = React.useState([]);
+  const [selected, setSelected] = React.useState(-1);
+  const [focused, setFocused] = React.useState(false);
+  const [composing, setComposing] = React.useState(false);
+  const [dismissed, setDismissed] = React.useState(false);
+  const input = React.useRef(null);
+  const scroll = React.useRef(null);
+  const sentinel = React.useRef(null);
+  const live = React.useRef(true);
+  const enabled = React.useRef(active);
+  enabled.current = active;
+  const composition = React.useRef(false);
+  const query = React.useRef("");
+  const current = React.useRef(list);
+  const generation = React.useRef(0);
+  const suggestionSeq = React.useRef(0);
+  const recentSeq = React.useRef(0);
+  const busy = React.useRef(false);
+  const timer = React.useRef(null);
+  const cursors = React.useRef(/* @__PURE__ */ new Set());
+  const popupId = React.useId();
+  const publish = (next) => {
+    current.current = next;
+    setList(next);
   };
-  const applyRecent = (query) => {
-    setText(query);
-    if (debounceRef.current) {
-      clearTimeout(debounceRef.current);
-      debounceRef.current = null;
+  const cancelDebounce = () => {
+    clearTimeout(timer.current);
+    timer.current = null;
+  };
+  React.useEffect(() => {
+    live.current = true;
+    const seq = ++recentSeq.current;
+    readRecentSearches(api).then((rows) => {
+      if (live.current && seq === recentSeq.current) setRecent(rows);
+    }).catch(() => {
+    });
+    return () => {
+      live.current = false;
+      generation.current += 1;
+      suggestionSeq.current += 1;
+      cancelDebounce();
+    };
+  }, [api]);
+  const changeText = (value) => {
+    cancelDebounce();
+    setText(value);
+    setDismissed(false);
+    setSelected(-1);
+    setSuggestions([]);
+    suggestionSeq.current += 1;
+    const q = normalize(value);
+    if (q !== query.current) {
+      query.current = q;
+      generation.current += 1;
+      busy.current = false;
+      cursors.current.clear();
+      publish(empty());
+      if (scroll.current) scroll.current.scrollTop = 0;
     }
-    void runSearch(query, false);
-    inputRef.current?.focus?.();
+  };
+  const load = React.useCallback(async (q, append = false) => {
+    if (!q || !enabled.current || composition.current || q !== query.current || busy.current) return;
+    const before = current.current;
+    if (append && (!before.hasMore || !before.cursor || before.query !== q)) return;
+    const seq = ++generation.current;
+    const recentVersion = recentSeq.current;
+    const cursor = append ? before.cursor : null;
+    if (!append) cursors.current.clear();
+    if (cursor) cursors.current.add(cursor);
+    busy.current = true;
+    publish({ ...append ? before : empty(), query: q, status: append ? "more" : "loading", error: null });
+    try {
+      const page = await rpc.search(q, cursor);
+      if (!live.current || seq !== generation.current) return;
+      const nextCursor = page?.cursor || null;
+      publish({
+        query: q,
+        items: merge(append ? before.items : [], page?.items),
+        cursor: nextCursor,
+        hasMore: page?.hasMore === true && Boolean(nextCursor) && !cursors.current.has(nextCursor),
+        status: "ready",
+        error: null
+      });
+      if (!append && recentVersion === recentSeq.current) {
+        const recordSeq = ++recentSeq.current;
+        pushRecentSearch(api, q).then((rows) => {
+          if (live.current && recordSeq === recentSeq.current) setRecent(rows);
+        }).catch(() => {
+        });
+      }
+    } catch (error) {
+      if (live.current && seq === generation.current) publish({ ...append ? before : empty(), query: q, status: "error", error });
+    } finally {
+      if (seq === generation.current) busy.current = false;
+    }
+  }, [rpc, api]);
+  React.useEffect(() => {
+    const q = normalize(text);
+    if (!active || composing || !q || current.current.query === q) return void 0;
+    timer.current = setTimeout(() => {
+      timer.current = null;
+      void load(q);
+    }, 300);
+    return cancelDebounce;
+  }, [text, composing, active, load]);
+  React.useEffect(() => {
+    const seq = ++suggestionSeq.current;
+    const q = normalize(text);
+    if (!active || !focused || composing || !q || dismissed) return void 0;
+    const timeout = setTimeout(() => {
+      Promise.resolve().then(() => rpc.suggest(q)).then((page) => {
+        if (live.current && seq === suggestionSeq.current) {
+          setSuggestions(Array.isArray(page?.items) ? page.items.slice(0, 6) : []);
+          setSelected(-1);
+        }
+      }).catch(() => {
+      });
+    }, 180);
+    return () => {
+      clearTimeout(timeout);
+      suggestionSeq.current += 1;
+    };
+  }, [rpc, text, active, focused, composing, dismissed]);
+  const submit = (value) => {
+    const q = normalize(value);
+    changeText(q);
+    setDismissed(true);
+    if (q) void load(q);
   };
   const clearRecent = () => {
-    clearRecentSearches(api).then(() => setRecent([])).catch(() => setRecent([]));
+    const seq = ++recentSeq.current;
+    clearRecentSearches(api).then(() => {
+      if (live.current && seq === recentSeq.current) setRecent([]);
+    }).catch(() => {
+    });
   };
-  const busy = status === "loading" || status === "more";
-  const showEmpty = status === "idle" && !error && Boolean(submitted) && items.length === 0;
+  const loadMore = React.useCallback(() => {
+    void load(query.current, true);
+  }, [load]);
+  useAutoLoadMore({
+    active,
+    ready: list.status === "ready",
+    hasMore: list.hasMore,
+    cursor: list.cursor,
+    scrollRef: scroll,
+    sentinelRef: sentinel,
+    load: loadMore
+  });
+  const showSuggestions = active && focused && !composing && !dismissed && suggestions.length > 0;
+  const showLanding = !normalize(text);
   return h(
     "div",
     { className: "hg-page hg-search" },
     h("div", { className: "hg-page-head" }, h("div", { className: "hg-page-title" }, t("tab.search"))),
     h(
       "div",
-      { className: "hg-searchbar" },
-      h("span", { className: "hg-searchbar-icon" }, h(Icon, { ctx, name: "Search", size: 15 })),
-      h("input", {
-        ref: inputRef,
-        className: "hg-input",
-        type: "search",
-        value: text,
-        placeholder: t("search.placeholder"),
-        maxLength: 80,
-        spellCheck: false,
-        onChange: (event) => setText(event.target.value),
-        onKeyDown: (event) => {
-          if (event.key === "Enter") {
-            event.preventDefault();
-            submitNow();
+      { className: "hg-search-entry" },
+      h(
+        "div",
+        { className: "hg-searchbar" },
+        h("span", { className: "hg-searchbar-icon" }, h(Icon, { ctx, name: "Search", size: 15 })),
+        h("input", {
+          ref: input,
+          className: "hg-input",
+          type: "search",
+          value: text,
+          placeholder: t("search.placeholder"),
+          "aria-label": t("search.placeholder"),
+          maxLength: 80,
+          spellCheck: false,
+          autoComplete: "off",
+          role: "combobox",
+          "aria-autocomplete": "list",
+          "aria-expanded": Boolean(showSuggestions),
+          "aria-controls": showSuggestions ? popupId : void 0,
+          "aria-activedescendant": showSuggestions && selected >= 0 ? `${popupId}-${selected}` : void 0,
+          onChange: (event) => changeText(event.target.value),
+          onFocus: () => {
+            setFocused(true);
+            setDismissed(false);
+          },
+          onBlur: () => setFocused(false),
+          onCompositionStart: () => {
+            composition.current = true;
+            setComposing(true);
+            cancelDebounce();
+            suggestionSeq.current += 1;
+          },
+          onCompositionEnd: (event) => {
+            composition.current = false;
+            setComposing(false);
+            changeText(event.target.value);
+          },
+          onKeyDown: (event) => {
+            if (composition.current || event.isComposing || event.nativeEvent?.isComposing || event.keyCode === 229) return;
+            if ((event.key === "ArrowDown" || event.key === "ArrowUp") && showSuggestions) {
+              event.preventDefault();
+              setSelected((prev) => event.key === "ArrowDown" ? (prev + 1) % suggestions.length : prev < 0 ? suggestions.length - 1 : (prev - 1 + suggestions.length) % suggestions.length);
+            } else if (event.key === "Enter") {
+              event.preventDefault();
+              submit(showSuggestions && selected >= 0 ? suggestions[selected].query : text);
+            } else if (event.key === "Escape") {
+              event.preventDefault();
+              if (showSuggestions) {
+                setDismissed(true);
+                setSelected(-1);
+              } else changeText("");
+            }
           }
-          if (event.key === "Escape") setText("");
-        }
-      }),
-      text ? h(
-        "button",
-        {
+        }),
+        text ? h("button", {
           type: "button",
           className: "hg-iconbtn",
           title: t("search.clearInput"),
           "aria-label": t("search.clearInput"),
           onClick: () => {
-            setText("");
-            inputRef.current?.focus?.();
+            changeText("");
+            input.current?.focus();
           }
-        },
-        h(Icon, { ctx, name: "X", size: 14 })
+        }, h(Icon, { ctx, name: "X", size: 14 })) : null
+      ),
+      showSuggestions ? h(
+        "div",
+        { id: popupId, className: "hg-suggestions", role: "listbox", "aria-label": t("search.suggestions") },
+        suggestions.map((item, index) => h("button", {
+          key: item.query,
+          id: `${popupId}-${index}`,
+          type: "button",
+          role: "option",
+          "aria-selected": index === selected,
+          tabIndex: -1,
+          className: `hg-suggestion${index === selected ? " is-selected" : ""}`,
+          onMouseDown: (event) => event.preventDefault(),
+          onClick: () => submit(item.query),
+          onMouseEnter: () => setSelected(index)
+        }, h(Icon, { ctx, name: "Search", size: 13 }), h("span", null, item.text)))
       ) : null
     ),
     h(
       "div",
-      { className: "hg-scroll" },
-      !submitted ? h(
+      { className: "hg-scroll", ref: scroll },
+      showLanding ? h(
         "div",
         { className: "hg-recent" },
         h(
           "div",
           { className: "hg-sec-head" },
           h("span", null, t("search.recent")),
-          recent.length > 0 ? h(
-            "button",
-            { type: "button", className: "hg-linkbtn", onClick: clearRecent },
-            t("search.clearRecent")
-          ) : null
+          recent.length ? h("button", { type: "button", className: "hg-linkbtn", onClick: clearRecent }, t("search.clearRecent")) : null
         ),
-        recent.length > 0 ? h(
-          "div",
-          { className: "hg-chips" },
-          recent.map(
-            (query) => h(
-              "button",
-              {
-                key: query,
-                type: "button",
-                className: "hg-chip",
-                onClick: () => applyRecent(query)
-              },
-              query
-            )
-          )
-        ) : h("div", { className: "hg-muted" }, t("search.noRecent")),
-        h("div", { className: "hg-hint" }, t("search.hint"))
+        recent.length ? h("div", { className: "hg-chips" }, recent.map((q) => h("button", {
+          key: q,
+          type: "button",
+          className: "hg-chip",
+          onClick: () => submit(q)
+        }, q))) : h("div", { className: "hg-muted" }, t("search.noRecent"))
       ) : null,
-      submitted && status === "loading" ? h(
-        "div",
-        { className: "hg-loading-line" },
-        h(Spinner, { label: t("search.searching") }),
-        h("span", null, t("search.searching"))
-      ) : null,
-      error && items.length > 0 ? h(ErrorNotice, { ctx, error, compact: true, onRetry: () => void runSearch(submittedRef.current, false) }) : null,
-      error && items.length === 0 ? h(ErrorNotice, { ctx, error, onRetry: () => void runSearch(submittedRef.current, false) }) : null,
-      showEmpty ? h(EmptyState, {
+      h(SearchExplore, { ctx, active, visible: showLanding, onSearch: submit }),
+      list.status === "loading" ? h("div", { className: "hg-loading-line" }, h(Spinner, { label: t("search.searching") }), t("search.searching")) : null,
+      list.error ? h(ErrorNotice, {
+        ctx,
+        error: list.error,
+        compact: list.items.length > 0,
+        onRetry: () => void load(query.current, list.hasMore && list.error.code !== "CURSOR_EXPIRED")
+      }) : null,
+      list.status === "ready" && !list.items.length && !list.hasMore ? h(EmptyState, {
         ctx,
         icon: "SearchX",
         title: t("search.empty"),
         hint: t("search.emptyHint")
       }) : null,
-      items.length > 0 ? h("div", { className: "hg-result-count" }, t("search.results", { count: items.length })) : null,
-      items.length > 0 ? h(
-        "div",
-        { className: "hg-results" },
-        items.map(
-          (item) => h(
-            "button",
-            {
-              key: item.id,
-              type: "button",
-              className: "hg-result",
-              onClick: () => ctx.openSeries(item)
-            },
-            h(Cover, { ctx, path: item.cover, className: "hg-result-cover" }),
-            h(
-              "div",
-              { className: "hg-result-main" },
-              h("div", { className: "hg-result-title" }, item.title || t("unit.untitled")),
-              h(
-                "div",
-                { className: "hg-result-meta" },
-                item.count != null ? t("unit.episodes", { count: item.count }) : ""
-              ),
-              item.description ? h("div", { className: "hg-result-desc" }, item.description) : null
-            )
-          )
-        )
-      ) : null,
-      items.length > 0 && hasMore ? h(
+      list.items.length ? h("div", { className: "hg-result-count", role: "status" }, t("search.results", { count: list.items.length })) : null,
+      list.items.length ? h("div", { className: "hg-results" }, list.items.map((item) => h(
         "button",
         {
+          key: item.id,
           type: "button",
-          className: "hg-btn hg-loadmore",
-          disabled: status === "more",
-          onClick: () => void runSearch(submittedRef.current, true)
+          className: "hg-result",
+          onClick: () => ctx.openSeries(item)
         },
-        status === "more" ? h(Spinner, { label: t("search.loadingMore") }) : null,
-        status === "more" ? t("search.loadingMore") : t("search.loadMore")
+        h(Cover, { ctx, path: item.cover, className: "hg-result-cover" }),
+        h(
+          "div",
+          { className: "hg-result-main" },
+          h("div", { className: "hg-result-title" }, item.title || t("unit.untitled")),
+          h("div", { className: "hg-result-meta" }, item.count != null ? t("unit.episodes", { count: item.count }) : ""),
+          item.description ? h("div", { className: "hg-result-desc" }, item.description) : null
+        )
+      ))) : null,
+      list.items.length || list.hasMore ? h(
+        "div",
+        { className: "hg-list-foot", ref: sentinel },
+        list.status === "more" ? h(Spinner, { label: t("search.loadingMore") }) : list.hasMore ? !list.error ? t("action.loadMore") : null : t("discover.end")
       ) : null
     )
   );
@@ -4306,6 +4502,30 @@ function createTempoRenderer(context, sourceBuffer) {
   return { getBuffer, cancel, destroy };
 }
 
+// src/panel/player/segments.js
+async function* readSegments({ rpc, episodeId, quality, count, cancelled, concurrency = 3 }) {
+  const pending = /* @__PURE__ */ new Map();
+  let next = 1;
+  const fill = () => {
+    while (!cancelled() && next <= count && pending.size < concurrency) {
+      const seq = next++;
+      pending.set(seq, Promise.resolve().then(() => cancelled() ? null : rpc.getStreamSegment(episodeId, quality, seq)).then((payload) => ({ payload }), (error) => ({ error })));
+    }
+  };
+  fill();
+  for (let seq = 1; seq <= count; seq += 1) {
+    if (cancelled()) return;
+    const result = await pending.get(seq);
+    if (cancelled()) return;
+    pending.delete(seq);
+    if (result.error) throw result.error;
+    const bytes = decodeBase64(result.payload?.base64);
+    if (!bytes.length) throw new PanelError("PROTOCOL", `分片 ${seq} 内容为空`);
+    yield { seq, bytes };
+    fill();
+  }
+}
+
 // src/panel/player/webcodecs-play.js
 var MAX_DECODE_PER_TICK = 16;
 var MAX_BUFFERED_FRAMES = 40;
@@ -4818,14 +5038,15 @@ var createWebCodecsPlayer = ({ canvas, getRpc, onState = () => {
     if (rafId) cancelAnimationFrame(rafId);
     rafId = 0;
   };
-  const load = async ({ episodeId, quality, segmentCount, resumeMs = 0 }) => {
+  const load = async ({ episodeId, quality, segmentCount, initPayload: preparedInit, resumeMs = 0 }) => {
     if (disposed) return;
+    const startedAt = performance.now();
     const rpc = getRpc();
     state.phase = "loading";
     state.error = "";
     emit(true);
     onProgress(`load: init q=${quality}`);
-    const initPayload = await rpc.getStreamInit(episodeId, quality);
+    const initPayload = preparedInit || await rpc.getStreamInit(episodeId, quality);
     if (disposed) return;
     const initBytes = decodeBase64(initPayload?.base64);
     if (!initBytes.length) throw new PanelError("PROTOCOL", "init 段为空");
@@ -4846,13 +5067,9 @@ var createWebCodecsPlayer = ({ canvas, getRpc, onState = () => {
       throw new PanelError("SEGMENT_LIMIT", `本集共 ${declared} 段，超过本机解码上限 ${MAX_LOCAL_SEGMENTS} 段`);
     }
     samples = [];
+    audioSamples = [];
     const total = declared;
-    for (let seq = 1; seq <= total; seq += 1) {
-      if (disposed) return;
-      const payload = await rpc.getStreamSegment(episodeId, quality, seq);
-      if (disposed) return;
-      const bytes = decodeBase64(payload?.base64);
-      if (!bytes.length) throw new PanelError("PROTOCOL", `分片 ${seq} 内容为空`);
+    for await (const { seq, bytes } of readSegments({ rpc, episodeId, quality, count: total, cancelled: () => disposed })) {
       const buckets = parseSegment(bytes, parsed.tracks, parsed.trex);
       const list = buckets.get(track.id) || [];
       const videoShift = Number(track.mediaTime) || 0;
@@ -4879,6 +5096,7 @@ var createWebCodecsPlayer = ({ canvas, getRpc, onState = () => {
       emit(true);
       onProgress(`seg ${seq}/${total}: ${bytes.length}B samples=${samples.length}`);
     }
+    if (disposed) return;
     if (!samples.length) throw new PanelError("PROTOCOL", "没有解析到视频样本");
     state.durationMs = Math.round(samples.reduce((end, sample) => Math.max(end, sample.ctsUs + sample.durationUs), 0) / 1e3);
     const timestamps = [...new Set(samples.map((sample) => sample.ctsUs))].sort((a, b) => a - b);
@@ -4900,17 +5118,15 @@ var createWebCodecsPlayer = ({ canvas, getRpc, onState = () => {
     anchored = true;
     resetVideoAt(anchorTimeMs);
     pump();
-    await new Promise((resolve) => setTimeout(resolve, 350));
+    await prepareAudio();
     if (disposed || state.phase === "error") return;
     draw(anchorTimeMs);
     pump();
-    await prepareAudio();
-    if (disposed || state.phase === "error") return;
     anchorWall = performance.now();
     state.phase = "ready";
     previewing = true;
     rafId = requestAnimationFrame(tick);
-    log(`[wvc] 就绪 ${track.codec} ${canvas.width}x${canvas.height} 样本=${samples.length} 时长=${state.durationMs}ms`);
+    log(`[wvc] 就绪 ${track.codec} ${canvas.width}x${canvas.height} 样本=${samples.length} 时长=${state.durationMs}ms 准备=${Math.round(performance.now() - startedAt)}ms`);
     onProgress(`ready ${samples.length} 帧 / ${state.durationMs}ms`);
     emit(true);
   };
@@ -5010,6 +5226,76 @@ var createWebCodecsPlayer = ({ canvas, getRpc, onState = () => {
   };
 };
 
+// src/panel/player/prefetch.js
+function createNextPrefetch({ getRpc, now = Date.now, makeToken = () => globalThis.crypto.randomUUID() }) {
+  let lease = null;
+  let disposed = false;
+  let current = "";
+  const attempts = /* @__PURE__ */ new Map();
+  const handoffs = /* @__PURE__ */ new Set();
+  const release = (entry) => {
+    if (!entry || entry.released) return;
+    entry.released = true;
+    Promise.resolve().then(() => entry.rpc.cancelPrefetch(entry.token)).catch(() => {
+    });
+  };
+  const cancel = () => {
+    release(lease);
+    lease = null;
+  };
+  return {
+    cancel,
+    activate(episodeId, quality) {
+      const key = `${episodeId}:${quality}`;
+      if (current !== key) {
+        current = key;
+        attempts.clear();
+      }
+      const matching = lease?.key === key ? lease : null;
+      if (matching) {
+        lease = null;
+        handoffs.add(matching);
+      } else cancel();
+      return () => {
+        if (matching) {
+          handoffs.delete(matching);
+          release(matching);
+        }
+      };
+    },
+    update({ episodeId, next, quality, playing, buffering, timeMs, durationMs, playbackRate = 1, enabled = true }) {
+      if (disposed) return;
+      const eligible = enabled && playing && !buffering && next?.id && next.playable !== false && next.id !== episodeId && durationMs > 0 && timeMs >= 5e3 && timeMs >= durationMs * 0.6 && (durationMs - timeMs) / Math.max(0.5, playbackRate) <= 3e4 && timeMs < durationMs;
+      if (!eligible) {
+        cancel();
+        return;
+      }
+      const key = `${next.id}:${quality}`;
+      if (lease?.key === key) return;
+      cancel();
+      const attempt = attempts.get(key);
+      if (attempt && (attempt.count >= 2 || now() - attempt.at < 5e3)) return;
+      const rpc = getRpc();
+      if (!rpc?.prefetchStream || !rpc?.cancelPrefetch) return;
+      const entry = { key, token: makeToken(), rpc, released: false };
+      lease = entry;
+      attempts.set(key, { count: (attempt?.count || 0) + 1, at: now() });
+      Promise.resolve().then(() => entry.released ? null : rpc.prefetchStream(next.id, quality, entry.token)).then((result) => {
+        if (result?.accepted !== true && lease === entry) cancel();
+      }).catch(() => {
+        if (lease === entry) cancel();
+      });
+    },
+    destroy() {
+      disposed = true;
+      cancel();
+      for (const entry of handoffs) release(entry);
+      handoffs.clear();
+      attempts.clear();
+    }
+  };
+}
+
 // src/panel/player/controller.js
 var HIDE_DELAY_MS = 2600;
 var SEEK_STEP_SECONDS = 5;
@@ -5040,6 +5326,7 @@ function createPlayer(slot, initialProps) {
     }
   };
   let disposed = false;
+  const prefetch = createNextPrefetch({ getRpc: () => props.rpc });
   let state = { state: MSE_STATE.IDLE, quality: "", info: null, appended: 0, segmentCount: 0 };
   let playing = false;
   let waiting = false;
@@ -5462,6 +5749,22 @@ function createPlayer(slot, initialProps) {
     } catch (error) {
       log("[player] 切集回调异常", String(error?.message || error));
     }
+  }
+  function syncPrefetch() {
+    const snapshot = wvc?.getState();
+    const enabled = props.autoNext !== false && !disposed && !miniHidden && !document.hidden;
+    if ((snapshot?.phase === "ended" || !wvc && video.ended) && enabled && hasNext()) return;
+    prefetch.update({
+      episodeId: props.episode?.id,
+      next: props.episodes?.[props.episodeIndex + 1],
+      quality: wvc ? wvcQuality : currentQuality(),
+      enabled: enabled && !overlayKind,
+      playing: snapshot ? snapshot.phase === "playing" : playing && !video.ended,
+      buffering: snapshot ? snapshot.buffering || !(snapshot.output > 0) : waiting || state.state !== MSE_STATE.READY,
+      timeMs: currentMs(),
+      durationMs: durationOf() * 1e3,
+      playbackRate: currentPlaybackRate()
+    });
   }
   const seekTo = (seconds, options = {}) => {
     const duration = durationOf();
@@ -6461,7 +6764,8 @@ function createPlayer(slot, initialProps) {
       autoplay: true,
       reason: "initial"
     };
-    void engine.load(loadOptions);
+    const releasePrefetch = prefetch.activate(loadOptions.episodeId, loadOptions.quality);
+    void engine.load(loadOptions).finally(releasePrefetch);
   };
   const playWebCodecs = async (options) => {
     if (!canDecodeLocally()) {
@@ -6479,15 +6783,13 @@ function createPlayer(slot, initialProps) {
       if (!episodeId) return;
       const quality = options?.quality || wvcQuality || DEFAULT_QUALITY;
       const resumeMs = Number.isFinite(options?.resumeMs) ? Math.max(0, options.resumeMs) : Math.max(0, Number(props.positionMs) || 0);
-      let segmentCount = 0;
-      let actualQuality = "";
-      try {
-        const info = await props.rpc?.getStreamInfo?.(episodeId, quality);
-        segmentCount = Number(info?.segmentCount) || 0;
-        actualQuality = String(info?.definition || "");
-      } catch (error) {
-        log("[wvc] 取流信息失败", String(error?.message || error));
-      }
+      const releasePrefetch = prefetch.activate(episodeId, quality);
+      const [info, initPayload] = await Promise.all([
+        props.rpc.getStreamInfo(episodeId, quality),
+        props.rpc.getStreamInit(episodeId, quality)
+      ]).finally(releasePrefetch);
+      const segmentCount = Number(info?.segmentCount) || 0;
+      const actualQuality = String(info?.definition || "");
       if (seq !== wvcSeq || disposed) return;
       if (actualQuality) {
         wvcQuality = actualQuality;
@@ -6532,6 +6834,7 @@ function createPlayer(slot, initialProps) {
           syncSpeed();
           updateBigPlay();
           updateLoading();
+          syncPrefetch();
         }
       });
       wvc = player;
@@ -6544,6 +6847,7 @@ function createPlayer(slot, initialProps) {
         episodeId,
         quality,
         segmentCount,
+        initPayload,
         resumeMs
       });
       if (seq !== wvcSeq || wvc !== player) return;
@@ -6600,7 +6904,8 @@ function createPlayer(slot, initialProps) {
       void playWebCodecs();
       return;
     }
-    void engine.load(loadOptions);
+    const releasePrefetch = prefetch.activate(loadOptions.episodeId, loadOptions.quality);
+    void engine.load(loadOptions).finally(releasePrefetch);
   };
   const applyProps = (next) => {
     const prev = {
@@ -6623,6 +6928,7 @@ function createPlayer(slot, initialProps) {
       }, 1e3);
     }
     Object.assign(props, next);
+    if (props.autoNext === false) prefetch.cancel();
     const playback = normalizePlaybackPrefs(props);
     if (props.playbackRate !== prev.playbackRate && playback.playbackRate !== desiredPlaybackRate) {
       setSpeed(playback.playbackRate);
@@ -6673,10 +6979,12 @@ function createPlayer(slot, initialProps) {
   if (typeof video.requestPictureInPicture !== "function") pipBtn.hidden = true;
   loadEpisode();
   const progressTimer = setInterval(() => {
+    if (!disposed) syncPrefetch();
     if (disposed || !wvc || dragging) return;
     syncProgressBar();
     if (wvc.getState().phase === "playing") report(false);
   }, 500);
+  document.addEventListener("visibilitychange", syncPrefetch);
   const watchdog = setInterval(() => {
     if (disposed || stallReported || overlayKind || wvc) return;
     const phase = state.state;
@@ -6695,6 +7003,8 @@ function createPlayer(slot, initialProps) {
       if (disposed) return;
       report(true);
       disposed = true;
+      prefetch.destroy();
+      document.removeEventListener("visibilitychange", syncPrefetch);
       qualityControl.destroy();
       speedControl.destroy();
       try {
@@ -6792,6 +7102,7 @@ function PlayerMount(props) {
     playbackRate: props.ctx.prefs?.playbackRate,
     volume: props.ctx.prefs?.volume,
     muted: props.ctx.prefs?.muted,
+    autoNext: props.ctx.prefs?.autoNext,
     miniWindow: props.ctx.prefs?.miniWindow,
     series: props.series,
     episodes: props.episodes,
@@ -8280,7 +8591,7 @@ function PanelApp({ api, React, locale }) {
     visited.search ? h(
       "div",
       { className: "hg-tabpane", hidden: activeTab !== "search" },
-      h(SearchPage, { ctx, active: activeTab === "search" })
+      h(SearchPage, { ctx, active: activeTab === "search" && !covered })
     ) : null,
     visited.watchlist ? h(
       "div",

@@ -302,7 +302,7 @@ function PanelApp({ api, React, locale }) {
       ? h(
           "div",
           { className: "hg-tabpane", hidden: activeTab !== "search" },
-          h(SearchPage, { ctx, active: activeTab === "search" })
+          h(SearchPage, { ctx, active: activeTab === "search" && !covered })
         )
       : null,
     visited.watchlist

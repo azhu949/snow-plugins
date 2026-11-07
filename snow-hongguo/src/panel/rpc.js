@@ -19,6 +19,8 @@ export const PANEL_ROUTES = {
   filterPanel: "/filter-panel",
   filter: "/filter",
   search: "/search",
+  suggest: "/search/suggest",
+  hotSearch: "/search/hot",
   series: "/series",
   episodes: "/episodes",
   playback: "/playback",
@@ -27,6 +29,8 @@ export const PANEL_ROUTES = {
   streamInfo: "/stream/info",
   streamInit: "/stream/init",
   streamSegment: "/stream/segment",
+  streamPrefetch: "/stream/prefetch",
+  streamPrefetchCancel: "/stream/prefetch/cancel",
   h264Info: "/h264/info",
   h264Start: "/h264/start",
   h264Chunk: "/h264/chunk",
@@ -347,6 +351,8 @@ export function createRpc(api, { log = () => {} } = {}) {
         query: { q, cursor },
         timeoutMs: TIMEOUTS.search,
       }),
+    suggest: (q) => call(PANEL_ROUTES.suggest, { query: { q }, timeoutMs: TIMEOUTS.list }),
+    hotSearch: () => call(PANEL_ROUTES.hotSearch, { timeoutMs: TIMEOUTS.list }),
     getSeries: (id) =>
       call(PANEL_ROUTES.series, {
         query: { id },
@@ -378,6 +384,12 @@ export function createRpc(api, { log = () => {} } = {}) {
         query: { episodeId, quality, seq },
         timeoutMs: TIMEOUTS.media,
       }),
+    prefetchStream: (episodeId, quality, token) => call(PANEL_ROUTES.streamPrefetch, {
+      method: "POST", query: { episodeId, quality, token }, timeoutMs: TIMEOUTS.media,
+    }),
+    cancelPrefetch: (token) => call(PANEL_ROUTES.streamPrefetchCancel, {
+      method: "POST", query: { token }, timeoutMs: TIMEOUTS.action,
+    }),
     /** 转码兜底：查询进度 / 启动 / 分块读取成品（宿主没有 HEVC 解码器时使用）。 */
     h264Info: (episodeId, quality) =>
       call(PANEL_ROUTES.h264Info, {

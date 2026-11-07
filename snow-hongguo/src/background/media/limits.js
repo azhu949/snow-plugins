@@ -4,6 +4,8 @@ export const MEDIA_ROUTES = {
   streamInfo: "/stream/info",
   streamInit: "/stream/init",
   streamSegment: "/stream/segment",
+  streamPrefetch: "/stream/prefetch",
+  streamPrefetchCancel: "/stream/prefetch/cancel",
   cacheClear: "/cache/clear",
   /** H.264 转码兜底：宿主没有 HEVC 解码器时使用，产物是普通 MP4。 */
   h264Info: "/h264/info",
@@ -30,10 +32,14 @@ export const MEDIA_LIMITS = {
   /** 同一个源的下载失败重试次数（配合 .part 续传）。 */
   rangeRetries: 2,
   rangeRetryDelayMs: 400,
-  /** 等某个分段落盘的最长时间。 */
+  /** 等分段时允许连续没有新分段落盘的最长时间。 */
   segmentWaitMs: 30000,
   /** 同时保留的播放任务数（按 LRU 淘汰）。 */
   maxJobs: 6,
+  /** 下一集只预取开头，最多 4MB / 两个面板，租约到期自动停止。 */
+  prefetchMaxBytes: 4 * 1024 * 1024,
+  prefetchMaxJobs: 2,
+  prefetchTtlMs: 60 * 1000,
   /** 转码任务保留数：只保留少量已完成任务，其余按 LRU 淘汰；实际执行始终串行。 */
   transcodeMaxJobs: 4,
   coverTimeoutMs: 8000,

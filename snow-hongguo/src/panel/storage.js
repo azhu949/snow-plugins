@@ -239,13 +239,12 @@ export const writePrefs = (api, prefs) => mutate(api, async () => {
   return next;
 });
 
-export const readRecentSearches = async (api) => {
-  const raw = await api.storage.getJson(RECENT_SEARCH_KEY, []);
+const normalizeRecentSearches = (raw) => {
   if (!Array.isArray(raw)) return [];
   const seen = new Set();
   const list = [];
   for (const item of raw) {
-    const text = typeof item === "string" ? item.trim() : "";
+    const text = typeof item === "string" ? item.trim().slice(0, 80) : "";
     if (!text || seen.has(text)) continue;
     seen.add(text);
     list.push(text);
@@ -254,15 +253,19 @@ export const readRecentSearches = async (api) => {
   return list;
 };
 
+export const readRecentSearches = async (api) => normalizeRecentSearches(await readStored(api, RECENT_SEARCH_KEY, []));
+
 export const pushRecentSearch = async (api, query) => {
   const text = String(query || "").trim().slice(0, 80);
   if (!text) return readRecentSearches(api);
-  const list = await readRecentSearches(api);
-  const next = [text, ...list.filter((item) => item !== text)].slice(0, RECENT_SEARCH_LIMIT);
-  await api.storage.setJson(RECENT_SEARCH_KEY, next);
-  return next;
+  return mutate(api, async () => {
+    const list = normalizeRecentSearches(await api.storage.getJson(RECENT_SEARCH_KEY, []));
+    const next = [text, ...list.filter((item) => item !== text)].slice(0, RECENT_SEARCH_LIMIT);
+    await api.storage.setJson(RECENT_SEARCH_KEY, next);
+    return next;
+  });
 };
 
-export const clearRecentSearches = async (api) => {
+export const clearRecentSearches = (api) => mutate(api, async () => {
   await api.storage.setJson(RECENT_SEARCH_KEY, []);
-};
+});

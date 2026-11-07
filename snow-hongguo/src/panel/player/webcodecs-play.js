@@ -11,6 +11,7 @@ import { PanelError } from "../rpc.js";
 import { parseMp4, parseSegment, toMicros } from "./mp4.js";
 import { decodeBase64 } from "./util.js";
 import { createTempoRenderer } from "./tempo-audio.js";
+import { readSegments } from "./segments.js";
 
 import { PLAYBACK_RATES } from "../playback-prefs.js";
 export { PLAYBACK_RATES } from "../playback-prefs.js";
@@ -597,15 +598,16 @@ export const createWebCodecsPlayer = ({ canvas, getRpc, onState = () => {}, onPr
     rafId = 0;
   };
 
-  const load = async ({ episodeId, quality, segmentCount, resumeMs = 0 }) => {
+  const load = async ({ episodeId, quality, segmentCount, initPayload: preparedInit, resumeMs = 0 }) => {
     if (disposed) return;
+    const startedAt = performance.now();
     const rpc = getRpc();
     state.phase = "loading";
     state.error = "";
     emit(true);
     onProgress(`load: init q=${quality}`);
 
-    const initPayload = await rpc.getStreamInit(episodeId, quality);
+    const initPayload = preparedInit || await rpc.getStreamInit(episodeId, quality);
     if (disposed) return;
     const initBytes = decodeBase64(initPayload?.base64);
     if (!initBytes.length) throw new PanelError("PROTOCOL", "init 段为空");
@@ -628,15 +630,11 @@ export const createWebCodecsPlayer = ({ canvas, getRpc, onState = () => {}, onPr
     if (declared > MAX_LOCAL_SEGMENTS) {
       throw new PanelError("SEGMENT_LIMIT", `本集共 ${declared} 段，超过本机解码上限 ${MAX_LOCAL_SEGMENTS} 段`);
     }
-    // 整集拉进内存换实现简单：seek 时不必回后台重取。
+    // 最多三段同时跨进程读取，按原顺序解析；整集样本仍用于保调音频和任意位置 seek。
     samples = [];
+    audioSamples = [];
     const total = declared;
-    for (let seq = 1; seq <= total; seq += 1) {
-      if (disposed) return;
-      const payload = await rpc.getStreamSegment(episodeId, quality, seq);
-      if (disposed) return;
-      const bytes = decodeBase64(payload?.base64);
-      if (!bytes.length) throw new PanelError("PROTOCOL", `分片 ${seq} 内容为空`);
+    for await (const { seq, bytes } of readSegments({ rpc, episodeId, quality, count: total, cancelled: () => disposed })) {
       const buckets = parseSegment(bytes, parsed.tracks, parsed.trex);
       const list = buckets.get(track.id) || [];
       const videoShift = Number(track.mediaTime) || 0;
@@ -664,6 +662,7 @@ export const createWebCodecsPlayer = ({ canvas, getRpc, onState = () => {}, onPr
       onProgress(`seg ${seq}/${total}: ${bytes.length}B samples=${samples.length}`);
     }
 
+    if (disposed) return;
     if (!samples.length) throw new PanelError("PROTOCOL", "没有解析到视频样本");
 
     // 解码顺序不一定是显示顺序，片尾取所有帧的最大显示结束时间。
@@ -691,19 +690,17 @@ export const createWebCodecsPlayer = ({ canvas, getRpc, onState = () => {}, onPr
     // 续播与切清晰度直接从目标附近预热，不让旧起点的画面追赶已经续播的声音。
     resetVideoAt(anchorTimeMs);
     pump();
-    await new Promise((resolve) => setTimeout(resolve, 350));
+    // 视频解码与音频准备并行；首帧是否就绪由 tick 的缓冲状态判断，不固定睡眠。
+    await prepareAudio();
     if (disposed || state.phase === "error") return;
     draw(anchorTimeMs);
     pump();
-
-    await prepareAudio();
-    if (disposed || state.phase === "error") return;
 
     anchorWall = performance.now();
     state.phase = "ready";
     previewing = true;
     rafId = requestAnimationFrame(tick);
-    log(`[wvc] 就绪 ${track.codec} ${canvas.width}x${canvas.height} 样本=${samples.length} 时长=${state.durationMs}ms`);
+    log(`[wvc] 就绪 ${track.codec} ${canvas.width}x${canvas.height} 样本=${samples.length} 时长=${state.durationMs}ms 准备=${Math.round(performance.now() - startedAt)}ms`);
     onProgress(`ready ${samples.length} 帧 / ${state.durationMs}ms`);
     emit(true);
   };
