@@ -1,14 +1,15 @@
-// 面板入口：推荐 / 搜索 / 历史 / 设置四个页签，详情页作为覆盖层；播放器由 player.js 挂载。
+// 面板入口：推荐 / 搜索 / 追剧 / 历史 / 设置，详情页作为覆盖层。
 import { bindReact, h } from "./ui/runtime.js";
 import { createTranslator } from "./i18n.js";
 import { createRpc } from "./rpc.js";
 import { createCoverStore } from "./cover.js";
-import { DEFAULT_MINI_WINDOW, readPrefs, writePrefs } from "./storage.js";
+import { normalizePrefs, readPrefs, writePrefs } from "./storage.js";
 import { Icon, Spinner, describeError } from "./ui/common.js";
 import { DiscoverPage } from "./pages/discover.js";
 import { SearchPage } from "./pages/search.js";
 import { DetailPage } from "./pages/detail.js";
 import { HistoryPage } from "./pages/history.js";
+import { WatchlistPage } from "./pages/watchlist.js";
 import { SettingsPage } from "./pages/settings.js";
 
 // 播放器挂载契约对外导出：下一个节点可直接 import 这些符号，或替换 player.js 的实现。
@@ -17,6 +18,7 @@ export { PLAYER_SLOT_ID, PlayerMount, renderPlayer } from "./player.js";
 const TABS = [
   { id: "discover", icon: "Sparkles", labelKey: "tab.discover" },
   { id: "search", icon: "Search", labelKey: "tab.search" },
+  { id: "watchlist", icon: "Bookmark", labelKey: "tab.watchlist" },
   { id: "history", icon: "History", labelKey: "tab.history" },
   { id: "settings", icon: "Settings", labelKey: "tab.settings" },
 ];
@@ -51,8 +53,9 @@ function PanelApp({ api, React, locale }) {
   const [detailVisible, setDetailVisible] = React.useState(false);
   const [miniActive, setMiniActive] = React.useState(false);
   const [visited, setVisited] = React.useState(() => ({ discover: true }));
-  const [prefs, setPrefs] = React.useState({ quality: "720p", miniWindow: { ...DEFAULT_MINI_WINDOW } });
+  const [prefs, setPrefs] = React.useState(() => normalizePrefs(null));
   const [historyVersion, setHistoryVersion] = React.useState(0);
+  const [watchlistVersion, setWatchlistVersion] = React.useState(0);
   const [notices, setNotices] = React.useState([]);
 
   const prefsRef = React.useRef(prefs);
@@ -123,7 +126,7 @@ function PanelApp({ api, React, locale }) {
 
   const updatePrefs = React.useCallback(
     (patch) => {
-      const next = { ...prefsRef.current, ...patch };
+      const next = normalizePrefs({ ...prefsRef.current, ...patch });
       prefsRef.current = next;
       setPrefs(next);
       writePrefs(api, next).catch((error) => {
@@ -137,36 +140,27 @@ function PanelApp({ api, React, locale }) {
     const seq = bootSeqRef.current + 1;
     bootSeqRef.current = seq;
     setBoot({ status: "loading", error: null, health: null });
-    rpc
-      .ensureReady()
-      .then((health) => {
+    // 先恢复静音等偏好再允许进入播放器，避免冷启动短暂使用默认音量。
+    Promise.all([rpc.ensureReady(), readPrefs(api).catch((error) => {
+      log("[panel] 读取播放偏好失败", String(error?.message || error));
+      notify("error", t("settings.loadFailed"));
+      return normalizePrefs({ muted: true });
+    })])
+      .then(([health, savedPrefs]) => {
         if (!aliveRef.current || seq !== bootSeqRef.current) return;
+        prefsRef.current = savedPrefs;
+        setPrefs(savedPrefs);
         setBoot({ status: "ready", error: null, health });
       })
       .catch((error) => {
         if (!aliveRef.current || seq !== bootSeqRef.current) return;
         setBoot({ status: "failed", error, health: null });
       });
-  }, [rpc]);
+  }, [rpc, api, log, notify, t]);
 
   React.useEffect(() => {
     startBoot();
   }, [startBoot]);
-
-  React.useEffect(() => {
-    if (boot.status !== "ready") return undefined;
-    let alive = true;
-    readPrefs(api)
-      .then((value) => {
-        if (!alive || !value) return;
-        prefsRef.current = value;
-        setPrefs(value);
-      })
-      .catch(() => {});
-    return () => {
-      alive = false;
-    };
-  }, [api, boot.status]);
 
   const ctx = React.useMemo(
     () => ({
@@ -179,7 +173,9 @@ function PanelApp({ api, React, locale }) {
       updatePrefs,
       notify,
       log,
-      bumpHistory: () => setHistoryVersion((value) => value + 1),
+      bumpHistory: () => { if (aliveRef.current) setHistoryVersion((value) => value + 1); },
+      bumpWatchlist: () => { if (aliveRef.current) setWatchlistVersion((value) => value + 1); },
+      watchlistVersion,
       onMiniChange: (active) => {
         setMiniActive(active);
         // 小窗按钮的语义是“返回详情页”：即使从其它底部菜单退出，也重新露出原详情层。
@@ -205,7 +201,7 @@ function PanelApp({ api, React, locale }) {
         setDetailVisible(false);
       },
     }),
-    [api, rpc, t, resolvedLocale, cover, prefs, updatePrefs, notify, log, miniActive]
+    [api, rpc, t, resolvedLocale, cover, prefs, updatePrefs, notify, log, miniActive, watchlistVersion]
   );
 
   // 渲染期异常兜底：保留页签与底部导航，只替换出错区域。
@@ -307,6 +303,13 @@ function PanelApp({ api, React, locale }) {
           "div",
           { className: "hg-tabpane", hidden: activeTab !== "search" },
           h(SearchPage, { ctx, active: activeTab === "search" })
+        )
+      : null,
+    visited.watchlist
+      ? h(
+          "div",
+          { className: "hg-tabpane", hidden: activeTab !== "watchlist" },
+          h(WatchlistPage, { ctx, active: activeTab === "watchlist" && !covered, historyVersion, watchlistVersion })
         )
       : null,
     visited.history

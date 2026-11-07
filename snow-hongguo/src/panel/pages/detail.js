@@ -8,7 +8,8 @@ import {
   formatDuration,
 } from "../ui/common.js";
 import { PlayerMount } from "../player.js";
-import { readHistory, upsertHistory } from "../storage.js";
+import { getEpisodeProgress, markWatching, readHistory, resumeEpisodeIndex, resumePosition, upsertHistory } from "../storage.js";
+import { WatchlistControls } from "./watchlist.js";
 
 const normalizeEpisodes = (page) => {
   const rows = Array.isArray(page?.items) ? page.items : [];
@@ -46,6 +47,7 @@ export function DetailPage({ ctx, seed, onBack }) {
   });
   const [selectedIndex, setSelectedIndex] = React.useState(0);
   const [positionMs, setPositionMs] = React.useState(0);
+  const [seekRequest, setSeekRequest] = React.useState(0);
   const [historyEntry, setHistoryEntry] = React.useState(null);
   const [expanded, setExpanded] = React.useState(false);
 
@@ -55,6 +57,10 @@ export function DetailPage({ ctx, seed, onBack }) {
   const episodesRef = React.useRef([]);
   const selectedRef = React.useRef(0);
   const positionRef = React.useRef(0);
+  const durationRef = React.useRef(0);
+  const historyRef = React.useRef(null);
+  const progressRef = React.useRef(new Map());
+  const watchingCheckRef = React.useRef(null);
   const lastSaveRef = React.useRef(0);
   // 5 秒节流的尾随补写：暂停 / 关闭面板时把最后一次进度落盘。
   const pendingSaveRef = React.useRef(null);
@@ -71,7 +77,7 @@ export function DetailPage({ ctx, seed, onBack }) {
       }
       const pending = pendingSaveRef.current;
       pendingSaveRef.current = null;
-      if (pending) void persistRef.current?.(pending.index, pending.position);
+      if (pending) void persistRef.current?.(pending.index, pending.position, { durationMs: pending.durationMs });
     };
   }, []);
 
@@ -83,10 +89,6 @@ export function DetailPage({ ctx, seed, onBack }) {
   React.useEffect(() => {
     selectedRef.current = selectedIndex;
   }, [selectedIndex]);
-
-  React.useEffect(() => {
-    positionRef.current = positionMs;
-  }, [positionMs]);
 
   const load = React.useCallback(async () => {
     const seq = seqRef.current + 1;
@@ -123,11 +125,15 @@ export function DetailPage({ ctx, seed, onBack }) {
       const entry = Array.isArray(historyList)
         ? historyList.find((item) => item.seriesId === seriesId) || null
         : null;
-      const resumed =
-        entry && Number.isInteger(entry.episodeIndex) && entry.episodeIndex < episodes.length
-          ? entry.episodeIndex
-          : 0;
-      const position = entry && resumed === entry.episodeIndex ? entry.positionMs : 0;
+      const resumed = resumeEpisodeIndex(entry, episodes);
+      const record = getEpisodeProgress(entry, episodes[resumed], resumed);
+      const position = resumePosition(record);
+      seriesRef.current = series;
+      episodesRef.current = episodes;
+      historyRef.current = entry;
+      selectedRef.current = resumed;
+      positionRef.current = position;
+      durationRef.current = record?.durationMs || 0;
 
       setState({
         status: "idle",
@@ -160,19 +166,24 @@ export function DetailPage({ ctx, seed, onBack }) {
   }, [load]);
 
   const persist = React.useCallback(
-    async (index, position) => {
+    async (index, position, extra = {}) => {
       const series = seriesRef.current;
-      if (!series) return;
+      const episode = episodesRef.current[index];
+      if (!series || !episode) return;
       try {
         const list = await upsertHistory(api, {
           seriesId: series.id,
           title: series.title,
           cover: series.cover,
           episodeIndex: index,
+          episodeId: episode.id,
+          episodeNumber: episode.number,
           positionMs: position,
+          ...extra,
         });
-        if (!aliveRef.current) return;
-        setHistoryEntry(list.find((item) => item.seriesId === series.id) || null);
+        const entry = list.find((item) => item.seriesId === series.id) || null;
+        historyRef.current = entry;
+        if (aliveRef.current) setHistoryEntry(entry);
         ctx.bumpHistory();
       } catch (error) {
         ctx.notify("error", t("detail.recordFailed"));
@@ -192,8 +203,11 @@ export function DetailPage({ ctx, seed, onBack }) {
         ctx.notify("info", t("detail.unplayable"));
         return;
       }
-      const nextPosition = Number.isFinite(Number(position)) && Number(position) > 0 ? Math.floor(Number(position)) : 0;
-      // 主动选集优先于播放器的 5 秒补写，避免旧集位置把刚选的集号覆盖掉。
+      const saved = progressRef.current.get(episodes[index].id) || getEpisodeProgress(historyRef.current, episodes[index], index);
+      const nextPosition = position == null ? resumePosition(saved) : Math.max(0, Math.floor(Number(position) || 0));
+      // 先补写上一集最后几秒，再保存新集；存储层串行合并，避免快速切集丢记录。
+      const pending = pendingSaveRef.current;
+      if (pending) void persistRef.current?.(pending.index, pending.position, { durationMs: pending.durationMs });
       pendingSaveRef.current = null;
       if (flushTimerRef.current) {
         clearTimeout(flushTimerRef.current);
@@ -201,9 +215,11 @@ export function DetailPage({ ctx, seed, onBack }) {
       }
       selectedRef.current = index;
       positionRef.current = nextPosition;
+      durationRef.current = saved?.durationMs || 0;
       setSelectedIndex(index);
       setPositionMs(nextPosition);
-      void persist(index, nextPosition);
+      setSeekRequest((value) => value + 1);
+      void persist(index, nextPosition, { durationMs: durationRef.current });
     },
     [ctx, persist, t]
   );
@@ -212,34 +228,48 @@ export function DetailPage({ ctx, seed, onBack }) {
     (payload) => {
       const episodes = episodesRef.current;
       const index = Number.isInteger(payload?.episodeIndex) ? payload.episodeIndex : selectedRef.current;
-      if (index < 0 || index >= episodes.length) return;
+      if (index < 0 || index >= episodes.length || index !== selectedRef.current) return;
+      if (payload?.episodeId && payload.episodeId !== episodes[index].id) return;
       const position = Math.max(0, Math.floor(Number(payload?.positionMs) || 0));
-      // 续播时播放器可能先报 0，再 seek 到目标位置；不要用这个 0 覆盖已保存的进度。
-      if (position <= 0 && positionRef.current > 0 && index === selectedRef.current) return;
+      const durationMs = Math.max(0, Math.floor(Number(payload?.durationMs) || 0));
+      // 拉流/切档期间的占位 0 不是观看进度；真正 seek 到 0 时已有有效时长。
+      if (!durationMs) return;
+      positionRef.current = position;
+      durationRef.current = durationMs;
+      // 重试通过 PlayerMount 的 positionMs 续播，不能只更新 ref 和磁盘记录。
+      if (aliveRef.current) setPositionMs(position);
+      const old = progressRef.current.get(episodes[index].id) || getEpisodeProgress(historyRef.current, episodes[index], index);
+      progressRef.current.set(episodes[index].id, { ...old, positionMs: position, durationMs });
 
-      const apply = (targetIndex, targetPosition) => {
-        selectedRef.current = targetIndex;
-        positionRef.current = targetPosition;
-        setSelectedIndex(targetIndex);
-        setPositionMs(targetPosition);
-        void persistRef.current?.(targetIndex, targetPosition);
+      if (position > 0 && watchingCheckRef.current !== ctx.watchlistVersion) {
+        watchingCheckRef.current = ctx.watchlistVersion;
+        markWatching(api, seriesId).then((changed) => {
+          if (changed) ctx.bumpWatchlist();
+        }).catch((error) => {
+          watchingCheckRef.current = null;
+          ctx.log?.("[watchlist] 更新状态失败", String(error?.message || error));
+        });
+      }
+
+      const apply = (targetIndex, targetPosition, duration) => {
+        void persistRef.current?.(targetIndex, targetPosition, { durationMs: duration });
       };
 
       const now = Date.now();
       const elapsed = now - lastSaveRef.current;
-      if (elapsed >= 5000) {
+      if (elapsed >= 5000 || payload?.flush || !aliveRef.current) {
         lastSaveRef.current = now;
         pendingSaveRef.current = null;
         if (flushTimerRef.current) {
           clearTimeout(flushTimerRef.current);
           flushTimerRef.current = 0;
         }
-        apply(index, position);
+        apply(index, position, durationMs);
         return;
       }
 
       // 节流窗口内的最后一次进度先记下，窗口结束时补写；暂停/关闭面板时也会落盘。
-      pendingSaveRef.current = { index, position };
+      pendingSaveRef.current = { index, position, durationMs };
       if (flushTimerRef.current) return;
       flushTimerRef.current = setTimeout(() => {
         flushTimerRef.current = 0;
@@ -247,27 +277,31 @@ export function DetailPage({ ctx, seed, onBack }) {
         pendingSaveRef.current = null;
         if (!pending || !aliveRef.current) return;
         lastSaveRef.current = Date.now();
-        apply(pending.index, pending.position);
+        apply(pending.index, pending.position, pending.durationMs);
       }, 5000 - elapsed);
     },
-    [persist]
+    [api, seriesId, ctx]
   );
 
   const handleEnded = React.useCallback(
     (payload) => {
       const episodes = episodesRef.current;
       const index = Number.isInteger(payload?.episodeIndex) ? payload.episodeIndex : selectedRef.current;
+      if (index !== selectedRef.current || !episodes[index]) return;
+      if (payload?.episodeId && payload.episodeId !== episodes[index].id) return;
       const duration = Number(payload?.durationMs);
+      const endPosition = Number.isFinite(duration) && duration > 0 ? Math.floor(duration) : positionRef.current;
+      pendingSaveRef.current = null;
+      if (flushTimerRef.current) clearTimeout(flushTimerRef.current);
+      flushTimerRef.current = 0;
+      progressRef.current.set(episodes[index].id, { positionMs: endPosition, durationMs: endPosition, completed: true });
+      void persist(index, endPosition, { durationMs: endPosition, completed: true });
       const next = index + 1;
-      if (next >= 0 && next < episodes.length) {
+      if (ctx.prefs?.autoNext !== false && episodes[next]?.playable) {
         selectEpisode(next, 0);
-      } else if (index >= 0 && index < episodes.length) {
-        const endPosition =
-          Number.isFinite(duration) && duration > 0 ? Math.floor(duration) : positionRef.current;
-        void persist(index, endPosition);
       }
     },
-    [persist, selectEpisode]
+    [persist, selectEpisode, ctx.prefs?.autoNext]
   );
 
   const handlePlayerError = React.useCallback(
@@ -302,15 +336,9 @@ export function DetailPage({ ctx, seed, onBack }) {
   const description = series?.description || "";
   const canExpand = description.length > 140;
 
-  const historyIndex =
-    historyEntry && historyEntry.episodeIndex >= 0 && historyEntry.episodeIndex < episodes.length
-      ? historyEntry.episodeIndex
-      : -1;
-  const historyEpisode = historyIndex >= 0 ? episodes[historyIndex] : null;
-  const resumeIndex =
-    historyEntry && historyEntry.episodeIndex >= 0 && historyEntry.episodeIndex < episodes.length
-      ? historyEntry.episodeIndex
-      : 0;
+  const resumeIndex = resumeEpisodeIndex(historyEntry, episodes);
+  const historyEpisode = episodes[resumeIndex];
+  const resumeRecord = getEpisodeProgress(historyEntry, historyEpisode, resumeIndex);
   const resumeNumber = historyEpisode?.number ?? (historyEntry ? historyEntry.episodeIndex + 1 : 1);
 
   const tags = Array.isArray(series?.tags) ? series.tags : [];
@@ -368,9 +396,10 @@ export function DetailPage({ ctx, seed, onBack }) {
                   episodes,
                   episodeIndex: selectedIndex,
                   positionMs,
+                  seekRequest,
                   onProgress: handleProgress,
                   onEnded: handleEnded,
-                  onSelectEpisode: (index) => selectEpisode(index, 0),
+                  onSelectEpisode: (index) => selectEpisode(index),
                   onError: handlePlayerError,
                   onMiniChange: ctx.onMiniChange,
                 })
@@ -395,6 +424,7 @@ export function DetailPage({ ctx, seed, onBack }) {
                   : null
               )
             ),
+            h(WatchlistControls, { ctx, series, hasProgress: historyEntry?.episodes?.some((entry) => entry.positionMs > 0) }),
             h(
               "button",
               {
@@ -404,7 +434,7 @@ export function DetailPage({ ctx, seed, onBack }) {
                 onClick: () =>
                   selectEpisode(
                     resumeIndex,
-                    historyEntry && resumeIndex === historyEntry.episodeIndex ? historyEntry.positionMs : 0
+                    resumePosition(resumeRecord)
                   ),
               },
               h(
@@ -473,12 +503,15 @@ export function DetailPage({ ctx, seed, onBack }) {
                     "div",
                     { className: "hg-episodes" },
                     episodes.map((episode, index) => {
-                      const watched = historyIndex >= 0 && index <= historyIndex;
+                      const record = getEpisodeProgress(historyEntry, episode, index);
+                      const watched = record?.completed === true;
+                      const partial = !watched && record?.positionMs > 0;
                       const current = index === selectedIndex;
                       const label = episode.title || t("unit.episodeShort", { number: episode.number });
                       const titleText = [
                         label,
                         watched ? t("detail.watched") : "",
+                        partial ? t("detail.partialAt", { time: formatDuration(record.positionMs) }) : "",
                         episode.playable ? "" : t("detail.unplayable"),
                       ]
                         .filter(Boolean)
@@ -488,15 +521,15 @@ export function DetailPage({ ctx, seed, onBack }) {
                         {
                           key: episode.id || `${index}`,
                           type: "button",
-                          className: `hg-ep${watched ? " is-watched" : ""}${current ? " is-current" : ""}`,
+                          className: `hg-ep${watched ? " is-watched" : ""}${partial ? " is-partial" : ""}${current ? " is-current" : ""}`,
                           disabled: !episode.playable,
                           "aria-current": current ? "true" : undefined,
                           title: titleText,
-                          onClick: () =>
-                            selectEpisode(index, index === selectedRef.current ? positionRef.current : 0),
+                          onClick: () => selectEpisode(index),
                         },
                         h("span", { className: "hg-ep-num" }, String(episode.number)),
                         episode.title ? h("span", { className: "hg-ep-name" }, episode.title) : null,
+                        watched || partial ? h("span", { className: "hg-ep-status" }, watched ? "✓" : formatDuration(record.positionMs)) : null,
                         current ? h("span", { className: "hg-sr-only" }, t("detail.current")) : null
                       );
                     })

@@ -2,6 +2,7 @@
 import { getReact, h } from "../ui/runtime.js";
 import { ErrorNotice, Icon, Spinner, describeError, formatUptime } from "../ui/common.js";
 import { QUALITY_OPTIONS } from "../storage.js";
+import { PLAYBACK_RATES } from "../playback-prefs.js";
 
 export function SettingsPage({ ctx, active }) {
   const React = getReact();
@@ -127,6 +128,38 @@ export function SettingsPage({ ctx, active }) {
           )
         ),
         h("div", { className: "hg-hint" }, t("settings.qualityHint")),
+        h("div", { className: "hg-field" },
+          h("label", { className: "hg-field-label", htmlFor: "hg-playback-rate" }, t("player.speed")),
+          h("select", {
+            id: "hg-playback-rate", className: "hg-select", value: ctx.prefs.playbackRate,
+            onChange: (event) => ctx.updatePrefs({ playbackRate: Number(event.target.value) }),
+          }, PLAYBACK_RATES.map((rate) => h("option", { key: rate, value: rate }, `${rate}x`)))
+        ),
+        h("div", { className: "hg-field hg-range-field" },
+          h("label", { className: "hg-field-label", htmlFor: "hg-volume" }, t("player.volume")),
+          h("div", { className: "hg-range-control" },
+            h("input", {
+              id: "hg-volume", className: "hg-range", type: "range", min: 0, max: 100, step: 1,
+              value: Math.round(ctx.prefs.volume * 100),
+              onChange: (event) => ctx.updatePrefs({ volume: Number(event.target.value) / 100 }),
+            }), h("span", { className: "hg-range-value" }, `${Math.round(ctx.prefs.volume * 100)}%`)
+          )
+        ),
+        h("div", { className: "hg-field" },
+          h("label", { className: "hg-field-label", htmlFor: "hg-muted" }, t("player.mute")),
+          h("input", {
+            id: "hg-muted", className: "hg-toggle", type: "checkbox", role: "switch", checked: ctx.prefs.muted,
+            onChange: (event) => ctx.updatePrefs({ muted: event.target.checked }),
+          })
+        ),
+        h("div", { className: "hg-field" },
+          h("label", { className: "hg-field-label", htmlFor: "hg-auto-next" }, t("settings.autoNext")),
+          h("input", {
+            id: "hg-auto-next", className: "hg-toggle", type: "checkbox", role: "switch", checked: ctx.prefs.autoNext,
+            onChange: (event) => ctx.updatePrefs({ autoNext: event.target.checked }),
+          })
+        ),
+        h("div", { className: "hg-hint" }, t("settings.playbackRemembered")),
         h(
           "div",
           { className: "hg-field hg-range-field" },

@@ -72,7 +72,7 @@ var zh_CN_default = {
   "detail.continue": "继续观看",
   "detail.continueAt": "第{{number}}集 · {{time}}",
   "detail.start": "从第 1 集开始",
-  "detail.watched": "已看",
+  "detail.watched": "已看完",
   "detail.current": "当前",
   "detail.loading": "正在加载详情…",
   "detail.missingId": "剧集标识无效",
@@ -198,7 +198,27 @@ var zh_CN_default = {
   "error.renderTitle": "界面渲染出错",
   "error.retryPanel": "重新加载界面",
   "detail.noEpisodes": "暂无分集",
-  "settings.cacheClearedCount": "缓存已清理（{{count}} 个文件）"
+  "settings.cacheClearedCount": "缓存已清理（{{count}} 个文件）",
+  "tab.watchlist": "追剧",
+  "watchlist.heading": "我的追剧",
+  "watchlist.loading": "正在读取追剧记录",
+  "watchlist.all": "全部",
+  "watchlist.planned": "想看",
+  "watchlist.watching": "在看",
+  "watchlist.completed": "已看完",
+  "watchlist.status": "追剧状态",
+  "watchlist.filter": "筛选追剧状态",
+  "watchlist.add": "加入追剧",
+  "watchlist.saved": "已收藏",
+  "watchlist.remove": "取消收藏",
+  "watchlist.empty": "还没有收藏的剧",
+  "watchlist.filterEmpty": "这个分类还没有剧",
+  "watchlist.emptyHint": "在详情页点“加入追剧”，好剧随时接着看",
+  "watchlist.saveFailed": "保存追剧记录失败，请重试",
+  "detail.partialAt": "已看到 {{time}}",
+  "settings.autoNext": "自动播放下一集",
+  "settings.playbackRemembered": "倍速、音量、静音及连播设置自动保存，下次打开仍然生效；关闭连播后，本集播完即停止",
+  "settings.loadFailed": "读取播放偏好失败，已暂时静音；可在设置中重新调整"
 };
 
 // locales/zh-TW.json
@@ -249,7 +269,7 @@ var zh_TW_default = {
   "detail.continue": "繼續觀看",
   "detail.continueAt": "第{{number}}集 · {{time}}",
   "detail.start": "從第 1 集開始",
-  "detail.watched": "已看",
+  "detail.watched": "已看完",
   "detail.current": "目前",
   "detail.loading": "正在載入詳情…",
   "detail.missingId": "劇集識別碼無效",
@@ -375,7 +395,27 @@ var zh_TW_default = {
   "error.renderTitle": "介面渲染出錯",
   "error.retryPanel": "重新載入介面",
   "detail.noEpisodes": "暫無分集",
-  "settings.cacheClearedCount": "快取已清理（{{count}} 個檔案）"
+  "settings.cacheClearedCount": "快取已清理（{{count}} 個檔案）",
+  "tab.watchlist": "追劇",
+  "watchlist.heading": "我的追劇",
+  "watchlist.loading": "正在讀取追劇記錄",
+  "watchlist.all": "全部",
+  "watchlist.planned": "想看",
+  "watchlist.watching": "在看",
+  "watchlist.completed": "已看完",
+  "watchlist.status": "追劇狀態",
+  "watchlist.filter": "篩選追劇狀態",
+  "watchlist.add": "加入追劇",
+  "watchlist.saved": "已收藏",
+  "watchlist.remove": "取消收藏",
+  "watchlist.empty": "還沒有收藏的劇",
+  "watchlist.filterEmpty": "這個分類還沒有劇",
+  "watchlist.emptyHint": "在詳情頁點「加入追劇」，好劇隨時接著看",
+  "watchlist.saveFailed": "儲存追劇記錄失敗，請重試",
+  "detail.partialAt": "已看到 {{time}}",
+  "settings.autoNext": "自動播放下一集",
+  "settings.playbackRemembered": "倍速、音量、靜音及連播設定自動儲存，下次開啟仍然生效；關閉連播後，本集播完即停止",
+  "settings.loadFailed": "讀取播放偏好失敗，已暫時靜音；可在設定中重新調整"
 };
 
 // locales/en.json
@@ -552,7 +592,27 @@ var en_default = {
   "error.renderTitle": "The interface failed to render",
   "error.retryPanel": "Reload interface",
   "detail.noEpisodes": "No episodes available",
-  "settings.cacheClearedCount": "Cache cleared ({{count}} files)"
+  "settings.cacheClearedCount": "Cache cleared ({{count}} files)",
+  "tab.watchlist": "Watchlist",
+  "watchlist.heading": "My watchlist",
+  "watchlist.loading": "Loading watchlist",
+  "watchlist.all": "All",
+  "watchlist.planned": "To watch",
+  "watchlist.watching": "Watching",
+  "watchlist.completed": "Finished",
+  "watchlist.status": "Watch status",
+  "watchlist.filter": "Filter watch status",
+  "watchlist.add": "Add to watchlist",
+  "watchlist.saved": "Saved",
+  "watchlist.remove": "Remove",
+  "watchlist.empty": "Your watchlist is empty",
+  "watchlist.filterEmpty": "No series in this category",
+  "watchlist.emptyHint": "Save a series from its details page to find it here.",
+  "watchlist.saveFailed": "Could not save your watchlist. Please retry.",
+  "detail.partialAt": "Watched up to {{time}}",
+  "settings.autoNext": "Play next episode automatically",
+  "settings.playbackRemembered": "Speed, volume, mute and autoplay settings are saved for next time. Turn autoplay off to stop at the end of an episode.",
+  "settings.loadFailed": "Could not load playback settings. Playback is muted for now; adjust it in Settings."
 };
 
 // src/panel/i18n.js
@@ -1011,11 +1071,24 @@ function createCoverStore(rpc, { max = MAX_ENTRIES, log = () => {
   return { load, dispose };
 }
 
+// src/panel/playback-prefs.js
+var PLAYBACK_RATES = Object.freeze([0.75, 1, 1.25, 1.5, 1.75, 2, 2.5, 3]);
+var normalizePlaybackPrefs = (raw) => ({
+  playbackRate: PLAYBACK_RATES.includes(Number(raw?.playbackRate)) ? Number(raw.playbackRate) : 1,
+  volume: raw?.volume != null && Number.isFinite(Number(raw.volume)) ? Math.min(1, Math.max(0, Number(raw.volume))) : 1,
+  muted: raw?.muted === true,
+  autoNext: raw?.autoNext !== false
+});
+
 // src/panel/storage.js
 var HISTORY_KEY = "history";
+var WATCHLIST_KEY = "watchlist";
 var PREFS_KEY = "prefs";
 var RECENT_SEARCH_KEY = "search.recent";
 var HISTORY_LIMIT = 100;
+var EPISODE_HISTORY_LIMIT = 2e3;
+var WATCHLIST_LIMIT = 500;
+var WATCH_STATUSES = ["planned", "watching", "completed"];
 var RECENT_SEARCH_LIMIT = 10;
 var QUALITY_OPTIONS = ["1080p", "720p", "540p", "480p", "360p"];
 var DEFAULT_QUALITY = "720p";
@@ -1040,24 +1113,60 @@ var normalizeMiniWindow = (raw) => ({
   opacity: normalizeNumber(raw?.opacity, DEFAULT_MINI_WINDOW.opacity, 0.05, 1),
   autoHide: raw?.autoHide === true
 });
+var writes = /* @__PURE__ */ new WeakMap();
+var mutate = (api, task) => {
+  const previous = writes.get(api.storage) || Promise.resolve();
+  const result = previous.then(task);
+  const settled = result.catch(() => {
+  });
+  writes.set(api.storage, settled);
+  settled.then(() => {
+    if (writes.get(api.storage) === settled) writes.delete(api.storage);
+  });
+  return result;
+};
+var readStored = async (api, key, fallback) => {
+  await writes.get(api.storage);
+  return api.storage.getJson(key, fallback);
+};
+var nonnegative = (value) => Number.isFinite(Number(value)) ? Math.max(0, Math.floor(Number(value))) : 0;
+var normalizeEpisode = (raw) => {
+  if (!raw || typeof raw !== "object") return null;
+  const episodeIndex = nonnegative(raw.episodeIndex);
+  const durationMs = nonnegative(raw.durationMs);
+  const positionMs = nonnegative(raw.positionMs);
+  return {
+    episodeId: typeof raw.episodeId === "string" ? raw.episodeId : "",
+    episodeIndex,
+    episodeNumber: nonnegative(raw.episodeNumber) || episodeIndex + 1,
+    positionMs: durationMs ? Math.min(positionMs, durationMs) : positionMs,
+    durationMs,
+    completed: raw.completed === true,
+    updatedAt: nonnegative(raw.updatedAt)
+  };
+};
 var normalizeHistoryEntry = (raw) => {
   if (!raw || typeof raw !== "object") return null;
   const seriesId = String(raw.seriesId ?? "").trim();
   if (!seriesId) return null;
-  const episodeIndex = Number.isFinite(Number(raw.episodeIndex)) && Number(raw.episodeIndex) >= 0 ? Math.floor(Number(raw.episodeIndex)) : 0;
-  const positionMs = Number.isFinite(Number(raw.positionMs)) && Number(raw.positionMs) > 0 ? Math.floor(Number(raw.positionMs)) : 0;
-  const updatedAt = Number.isFinite(Number(raw.updatedAt)) ? Number(raw.updatedAt) : 0;
+  const latest = normalizeEpisode(raw);
+  const records = Array.isArray(raw.episodes) ? raw.episodes : [raw];
+  const seen = /* @__PURE__ */ new Set();
+  const episodes = records.map(normalizeEpisode).filter(Boolean).sort((a, b) => b.updatedAt - a.updatedAt).filter((entry) => {
+    const key = entry.episodeId ? `id:${entry.episodeId}` : `index:${entry.episodeIndex}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  }).slice(0, EPISODE_HISTORY_LIMIT);
   return {
     seriesId,
     title: typeof raw.title === "string" ? raw.title : "",
     cover: typeof raw.cover === "string" && raw.cover ? raw.cover : null,
-    episodeIndex,
-    positionMs,
-    updatedAt
+    ...latest,
+    episodes
   };
 };
-var readHistory = async (api) => {
-  const raw = await api.storage.getJson(HISTORY_KEY, []);
+var normalizeHistory = (raw) => {
   if (!Array.isArray(raw)) return [];
   const normalized = raw.map(normalizeHistoryEntry).filter(Boolean).sort((a, b) => b.updatedAt - a.updatedAt);
   const seen = /* @__PURE__ */ new Set();
@@ -1067,37 +1176,105 @@ var readHistory = async (api) => {
     seen.add(entry.seriesId);
     list.push(entry);
   }
-  return list;
+  return list.slice(0, HISTORY_LIMIT);
 };
-var upsertHistory = async (api, input) => {
+var readHistory = async (api) => normalizeHistory(await readStored(api, HISTORY_KEY, []));
+var getEpisodeProgress = (entry, episode, index) => entry?.episodes?.find((item) => item.episodeId && item.episodeId === episode?.id) || entry?.episodes?.find((item) => !item.episodeId && item.episodeIndex === index) || null;
+var resumePosition = (record) => {
+  if (!record) return 0;
+  if (record.completed && record.durationMs > 0 && record.positionMs >= record.durationMs - 1e3) return 0;
+  return record.positionMs || 0;
+};
+var resumeEpisodeIndex = (entry, episodes) => {
+  if (!entry) return 0;
+  if (entry.episodeId) {
+    const index = episodes.findIndex((episode) => episode.id === entry.episodeId);
+    return index >= 0 ? index : 0;
+  }
+  return entry.episodeIndex < episodes.length ? entry.episodeIndex : 0;
+};
+var upsertHistory = (api, input) => mutate(api, async () => {
   const entry = normalizeHistoryEntry({ ...input, updatedAt: Date.now() });
   if (!entry) throw new Error("无效的观看记录");
-  const list = await readHistory(api);
+  const list = normalizeHistory(await api.storage.getJson(HISTORY_KEY, []));
+  const previous = list.find((item) => item.seriesId === entry.seriesId);
+  const oldRecord = getEpisodeProgress(previous, { id: entry.episodeId }, entry.episodeIndex);
+  const record = {
+    ...normalizeEpisode(entry),
+    durationMs: entry.durationMs || oldRecord?.durationMs || 0,
+    completed: entry.completed || oldRecord?.completed || false
+  };
+  entry.episodes = [record, ...(previous?.episodes || []).filter((item) => item !== oldRecord)].slice(0, EPISODE_HISTORY_LIMIT);
+  Object.assign(entry, record);
   const next = [entry, ...list.filter((item) => item.seriesId !== entry.seriesId)].slice(0, HISTORY_LIMIT);
   await api.storage.setJson(HISTORY_KEY, next);
   return next;
-};
-var removeHistory = async (api, seriesId) => {
-  const list = await readHistory(api);
+});
+var removeHistory = (api, seriesId) => mutate(api, async () => {
+  const list = normalizeHistory(await api.storage.getJson(HISTORY_KEY, []));
   const next = list.filter((item) => item.seriesId !== seriesId);
   await api.storage.setJson(HISTORY_KEY, next);
   return next;
-};
-var clearHistory = async (api) => {
+});
+var clearHistory = (api) => mutate(api, async () => {
   await api.storage.setJson(HISTORY_KEY, []);
+});
+var normalizeWatchlist = (raw) => {
+  if (!Array.isArray(raw)) return [];
+  const seen = /* @__PURE__ */ new Set();
+  return raw.filter((entry) => entry && typeof entry.seriesId === "string" && entry.seriesId.trim()).map((entry) => ({
+    seriesId: entry.seriesId.trim(),
+    title: typeof entry.title === "string" ? entry.title : "",
+    cover: typeof entry.cover === "string" ? entry.cover : null,
+    count: nonnegative(entry.count),
+    status: WATCH_STATUSES.includes(entry.status) ? entry.status : "planned",
+    updatedAt: nonnegative(entry.updatedAt)
+  })).sort((a, b) => b.updatedAt - a.updatedAt).filter((entry) => {
+    if (seen.has(entry.seriesId)) return false;
+    seen.add(entry.seriesId);
+    return true;
+  }).slice(0, WATCHLIST_LIMIT);
 };
+var readWatchlist = async (api) => normalizeWatchlist(await readStored(api, WATCHLIST_KEY, []));
+var saveWatchlistEntry = (api, input) => mutate(api, async () => {
+  const list = normalizeWatchlist(await api.storage.getJson(WATCHLIST_KEY, []));
+  const previous = list.find((item) => item.seriesId === input.seriesId);
+  if (!previous && list.length >= WATCHLIST_LIMIT) throw new Error(`最多收藏 ${WATCHLIST_LIMIT} 部剧`);
+  const entry = normalizeWatchlist([{ ...previous, ...input, updatedAt: Date.now() }])[0];
+  if (!entry) throw new Error("无效的收藏记录");
+  const next = [entry, ...list.filter((item) => item.seriesId !== entry.seriesId)];
+  await api.storage.setJson(WATCHLIST_KEY, next);
+  return next;
+});
+var removeWatchlistEntry = (api, seriesId) => mutate(api, async () => {
+  const list = normalizeWatchlist(await api.storage.getJson(WATCHLIST_KEY, []));
+  const next = list.filter((item) => item.seriesId !== seriesId);
+  await api.storage.setJson(WATCHLIST_KEY, next);
+  return next;
+});
+var markWatching = (api, seriesId) => mutate(api, async () => {
+  const list = normalizeWatchlist(await api.storage.getJson(WATCHLIST_KEY, []));
+  const entry = list.find((item) => item.seriesId === seriesId);
+  if (!entry || entry.status !== "planned") return false;
+  entry.status = "watching";
+  entry.updatedAt = Date.now();
+  await api.storage.setJson(WATCHLIST_KEY, list);
+  return true;
+});
+var normalizePrefs = (raw) => ({
+  quality: QUALITY_OPTIONS.includes(raw?.quality) ? raw.quality : DEFAULT_QUALITY,
+  miniWindow: normalizeMiniWindow(raw?.miniWindow),
+  ...normalizePlaybackPrefs(raw)
+});
 var readPrefs = async (api) => {
+  return normalizePrefs(await readStored(api, PREFS_KEY, null));
+};
+var writePrefs = (api, prefs) => mutate(api, async () => {
   const raw = await api.storage.getJson(PREFS_KEY, null);
-  const quality = raw && QUALITY_OPTIONS.includes(raw.quality) ? raw.quality : DEFAULT_QUALITY;
-  const miniWindow = normalizeMiniWindow(raw?.miniWindow);
-  return { quality, miniWindow };
-};
-var writePrefs = async (api, prefs) => {
-  const quality = prefs && QUALITY_OPTIONS.includes(prefs.quality) ? prefs.quality : DEFAULT_QUALITY;
-  const miniWindow = normalizeMiniWindow(prefs?.miniWindow);
-  await api.storage.setJson(PREFS_KEY, { quality, miniWindow });
-  return { quality, miniWindow };
-};
+  const next = normalizePrefs({ ...raw, ...prefs, miniWindow: { ...raw?.miniWindow, ...prefs?.miniWindow } });
+  await api.storage.setJson(PREFS_KEY, next);
+  return next;
+});
 var readRecentSearches = async (api) => {
   const raw = await api.storage.getJson(RECENT_SEARCH_KEY, []);
   if (!Array.isArray(raw)) return [];
@@ -3436,7 +3613,6 @@ function createTempoRenderer(context, sourceBuffer) {
 }
 
 // src/panel/player/webcodecs-play.js
-var PLAYBACK_RATES = Object.freeze([0.75, 1, 1.25, 1.5, 1.75, 2, 2.5, 3]);
 var MAX_DECODE_PER_TICK = 16;
 var MAX_BUFFERED_FRAMES = 40;
 var MAX_VIDEO_LAG_US = 1e5;
@@ -4176,7 +4352,8 @@ function createPlayer(slot, initialProps) {
   let autoPlayPending = false;
   let userPaused = false;
   let desiredQuality = QUALITY_OPTIONS.includes(props.quality) ? props.quality : DEFAULT_QUALITY;
-  let desiredPlaybackRate = 1;
+  const savedPlayback = normalizePlaybackPrefs(props);
+  let desiredPlaybackRate = savedPlayback.playbackRate;
   let overlayKind = "";
   let dragging = false;
   let fill = false;
@@ -4248,7 +4425,10 @@ function createPlayer(slot, initialProps) {
   video.setAttribute("playsinline", "");
   video.setAttribute("webkit-playsinline", "");
   video.preload = "auto";
-  video.volume = 1;
+  video.volume = savedPlayback.volume;
+  video.muted = savedPlayback.muted;
+  video.defaultPlaybackRate = desiredPlaybackRate;
+  video.playbackRate = desiredPlaybackRate;
   let wvc = null;
   let endedReported = false;
   const canDecodeLocally = () => typeof VideoDecoder !== "undefined" && typeof AudioDecoder !== "undefined";
@@ -4359,7 +4539,7 @@ function createPlayer(slot, initialProps) {
     speedSelect.append(option);
   }
   speedSelect.value = String(desiredPlaybackRate);
-  speedSelect.addEventListener("change", () => setSpeed(speedSelect.value));
+  speedSelect.addEventListener("change", () => setSpeed(speedSelect.value, true));
   speedSelect.addEventListener("click", (event) => event.stopPropagation());
   const pipBtn = button("pip", () => void togglePip());
   pipBtn.classList.add("hg-player-pip");
@@ -4489,6 +4669,9 @@ function createPlayer(slot, initialProps) {
   };
   const report = (force) => {
     if (disposed) return;
+    if (wvc) {
+      if (["idle", "loading", "error"].includes(wvc.getState().phase)) return;
+    } else if (video.readyState < 1) return;
     const now = Date.now();
     if (!force && now - lastReportAt < 1e3) return;
     lastReportAt = now;
@@ -4498,8 +4681,10 @@ function createPlayer(slot, initialProps) {
     try {
       props.onProgress?.({
         episodeIndex: props.episodeIndex,
+        episodeId: props.episode?.id,
         positionMs,
-        durationMs: Math.round(durationOf() * 1e3)
+        durationMs: Math.round(durationOf() * 1e3),
+        flush: force === true
       });
     } catch (error) {
       log("[player] onProgress 回调异常", String(error?.message || error));
@@ -4610,19 +4795,21 @@ function createPlayer(slot, initialProps) {
     video.muted = next <= 1e-3;
     if (wvc) wvc.setVolume(next);
     syncVolume();
+    props.onPlaybackPrefsChange?.({ volume: video.volume, muted: video.muted });
   };
   const toggleMute = () => {
     video.muted = !video.muted;
     if (!video.muted && video.volume <= 1e-3) video.volume = 0.5;
     if (wvc) wvc.setVolume(video.muted ? 0 : video.volume);
     syncVolume();
+    props.onPlaybackPrefsChange?.({ volume: video.volume, muted: video.muted });
   };
   const applyVideoPlaybackRate = () => {
     video.preservesPitch = true;
     if (video.defaultPlaybackRate !== desiredPlaybackRate) video.defaultPlaybackRate = desiredPlaybackRate;
     if (video.playbackRate !== desiredPlaybackRate) video.playbackRate = desiredPlaybackRate;
   };
-  const setSpeed = (value) => {
+  const setSpeed = (value, persist = false) => {
     if (disposed) return;
     const next = Number(value);
     if (!PLAYBACK_RATES.includes(next)) {
@@ -4634,6 +4821,7 @@ function createPlayer(slot, initialProps) {
     applyVideoPlaybackRate();
     syncSpeed();
     showControls();
+    if (persist) props.onPlaybackPrefsChange?.({ playbackRate: desiredPlaybackRate });
   };
   const cycleSpeed = (direction) => {
     const current = currentPlaybackRate();
@@ -4647,7 +4835,7 @@ function createPlayer(slot, initialProps) {
       }
     });
     const next = PLAYBACK_RATES[clamp(index + direction, 0, PLAYBACK_RATES.length - 1)];
-    setSpeed(next);
+    setSpeed(next, true);
   };
   const setQuality = (quality, persist) => {
     const next = String(quality || "");
@@ -5527,7 +5715,7 @@ function createPlayer(slot, initialProps) {
     report(true);
     const durationMs = Math.round(durationOf() * 1e3);
     try {
-      props.onEnded?.({ episodeIndex: props.episodeIndex, durationMs });
+      props.onEnded?.({ episodeIndex: props.episodeIndex, episodeId: props.episode?.id, durationMs });
     } catch (error) {
       log("[player] onEnded 回调异常", String(error?.message || error));
     }
@@ -5728,7 +5916,11 @@ function createPlayer(slot, initialProps) {
       seriesTitle: props.series?.title || "",
       quality: props.quality || "",
       locale: props.locale || "",
-      positionMs: Number(props.positionMs) || 0
+      positionMs: Number(props.positionMs) || 0,
+      playbackRate: props.playbackRate,
+      volume: props.volume,
+      muted: props.muted,
+      seekRequest: props.seekRequest
     };
     const episodeChanged = (next?.episode?.id || "") !== prev.episodeId;
     if (episodeChanged) {
@@ -5738,6 +5930,16 @@ function createPlayer(slot, initialProps) {
       }, 1e3);
     }
     Object.assign(props, next);
+    const playback = normalizePlaybackPrefs(props);
+    if (props.playbackRate !== prev.playbackRate && playback.playbackRate !== desiredPlaybackRate) {
+      setSpeed(playback.playbackRate);
+    }
+    if (props.volume !== prev.volume || props.muted !== prev.muted) {
+      video.volume = playback.volume;
+      video.muted = playback.muted;
+      if (wvc) wvc.setVolume(video.muted ? 0 : video.volume);
+      syncVolume();
+    }
     if (next.miniWindow) adoptMiniWindow(next.miniWindow);
     if ((next.locale || "") !== prev.locale) applyLabels();
     else if (episodeChanged || (props.series?.title || "") !== prev.seriesTitle) syncMiniAppearance();
@@ -5747,6 +5949,13 @@ function createPlayer(slot, initialProps) {
       return;
     }
     if (props.episodeIndex !== prev.episodeIndex) updateNextButton();
+    if (props.seekRequest !== prev.seekRequest && durationOf() > 0) {
+      if (["degraded", "error", "notice"].includes(overlayKind)) return;
+      seekTo(Math.max(0, Number(props.positionMs) || 0) / 1e3);
+      hideOverlay();
+      safePlay();
+      return;
+    }
     const nextQuality = props.quality || "";
     if (nextQuality && nextQuality !== prev.quality && nextQuality !== desiredQuality) {
       if (wvc && wvcQuality === nextQuality) {
@@ -5885,14 +6094,19 @@ function PlayerMount(props) {
     notify: props.ctx.notify,
     log: props.ctx.log,
     quality: props.ctx.prefs?.quality || "720p",
+    playbackRate: props.ctx.prefs?.playbackRate,
+    volume: props.ctx.prefs?.volume,
+    muted: props.ctx.prefs?.muted,
     miniWindow: props.ctx.prefs?.miniWindow,
     series: props.series,
     episodes: props.episodes,
     episodeIndex: props.episodeIndex,
     episode: props.episodes?.[props.episodeIndex] || null,
     positionMs: props.positionMs,
+    seekRequest: props.seekRequest,
     onQualityChange: (quality) => props.ctx.updatePrefs?.({ quality }),
     onMiniWindowChange: (miniWindow) => props.ctx.updatePrefs?.({ miniWindow }),
+    onPlaybackPrefsChange: (patch) => props.ctx.updatePrefs?.(patch),
     onProgress: (state) => handlersRef.current.onProgress?.(state),
     onEnded: (state) => handlersRef.current.onEnded?.(state),
     onSelectEpisode: (index) => handlersRef.current.onSelectEpisode?.(index),
@@ -5927,6 +6141,211 @@ function PlayerMount(props) {
       "data-series-id": props.series?.id || "",
       "data-episode-id": props.episodes?.[props.episodeIndex]?.id || ""
     })
+  );
+}
+
+// src/panel/pages/watchlist.js
+var seedOf = (entry) => ({ id: entry.seriesId, title: entry.title, cover: entry.cover });
+function StatusSelect({ ctx, value, disabled, onChange, title }) {
+  return h("select", {
+    className: "hg-select hg-watch-status",
+    value,
+    disabled,
+    "aria-label": `${ctx.t("watchlist.status")} · ${title || ctx.t("unit.untitled")}`,
+    onChange: (event) => onChange(event.target.value)
+  }, WATCH_STATUSES.map((status) => h("option", { key: status, value: status }, ctx.t(`watchlist.${status}`))));
+}
+function WatchlistControls({ ctx, series, hasProgress }) {
+  const React = getReact();
+  const [entry, setEntry] = React.useState(null);
+  const [busy, setBusy] = React.useState(true);
+  const [error, setError] = React.useState(null);
+  const [reload, setReload] = React.useState(0);
+  const sequence = React.useRef(0);
+  const busyRef = React.useRef(false);
+  React.useEffect(() => {
+    const seq = ++sequence.current;
+    setBusy(true);
+    readWatchlist(ctx.api).then((list) => {
+      if (seq !== sequence.current) return;
+      setEntry(list.find((item) => item.seriesId === series.id) || null);
+      setError(null);
+    }).catch((err) => {
+      if (seq === sequence.current) setError(err);
+    }).finally(() => {
+      if (seq === sequence.current) setBusy(false);
+    });
+    return () => {
+      sequence.current += 1;
+    };
+  }, [ctx.api, series.id, ctx.watchlistVersion, reload]);
+  const change = async (status) => {
+    if (busyRef.current || busy) return;
+    busyRef.current = true;
+    setBusy(true);
+    const seq = ++sequence.current;
+    try {
+      const list = status === null ? await removeWatchlistEntry(ctx.api, series.id) : await saveWatchlistEntry(ctx.api, {
+        seriesId: series.id,
+        title: series.title,
+        cover: series.cover,
+        count: series.count,
+        status
+      });
+      if (seq === sequence.current) setEntry(list.find((item) => item.seriesId === series.id) || null);
+      ctx.bumpWatchlist();
+    } catch (err) {
+      if (seq === sequence.current) ctx.notify("error", ctx.t("watchlist.saveFailed"));
+      ctx.log?.("[watchlist] 保存失败", String(err?.message || err));
+    } finally {
+      busyRef.current = false;
+      if (seq === sequence.current) setBusy(false);
+    }
+  };
+  if (error) return h(ErrorNotice, { ctx, error, compact: true, onRetry: () => setReload((value) => value + 1) });
+  return h(
+    "div",
+    { className: "hg-watch-actions" },
+    h(
+      "button",
+      {
+        type: "button",
+        className: `hg-btn${entry ? " is-saved" : ""}`,
+        disabled: busy,
+        "aria-pressed": Boolean(entry),
+        onClick: () => void change(entry ? null : hasProgress ? "watching" : "planned")
+      },
+      h(Icon, { ctx, name: entry ? "BookmarkCheck" : "Bookmark", size: 14 }),
+      ctx.t(entry ? "watchlist.saved" : "watchlist.add")
+    ),
+    entry ? h(StatusSelect, {
+      ctx,
+      title: series.title,
+      value: entry.status,
+      disabled: busy,
+      onChange: (status) => void change(status)
+    }) : null
+  );
+}
+function WatchlistPage({ ctx, active, historyVersion, watchlistVersion }) {
+  const React = getReact();
+  const t = ctx.t;
+  const [list, setList] = React.useState([]);
+  const [history, setHistory] = React.useState([]);
+  const [filter, setFilter] = React.useState("all");
+  const [loading, setLoading] = React.useState(true);
+  const [error, setError] = React.useState(null);
+  const [busy, setBusy] = React.useState(false);
+  const [reload, setReload] = React.useState(0);
+  const sequence = React.useRef(0);
+  const busyRef = React.useRef(false);
+  React.useEffect(() => {
+    if (!active) return void 0;
+    const seq = ++sequence.current;
+    setLoading(true);
+    Promise.all([readWatchlist(ctx.api), readHistory(ctx.api)]).then(([saved, records]) => {
+      if (seq !== sequence.current) return;
+      setList(saved);
+      setHistory(records);
+      setError(null);
+    }).catch((err) => {
+      if (seq === sequence.current) setError(err);
+    }).finally(() => {
+      if (seq === sequence.current) setLoading(false);
+    });
+    return () => {
+      sequence.current += 1;
+    };
+  }, [ctx.api, active, historyVersion, watchlistVersion, reload]);
+  const change = async (entry, status) => {
+    if (busyRef.current) return;
+    busyRef.current = true;
+    setBusy(true);
+    const seq = ++sequence.current;
+    try {
+      const saved = status === null ? await removeWatchlistEntry(ctx.api, entry.seriesId) : await saveWatchlistEntry(ctx.api, { ...entry, status });
+      if (seq === sequence.current) {
+        setList(saved);
+        setLoading(false);
+        setError(null);
+      }
+      ctx.bumpWatchlist();
+    } catch (err) {
+      if (seq === sequence.current) ctx.notify("error", t("watchlist.saveFailed"));
+      ctx.log?.("[watchlist] 保存失败", String(err?.message || err));
+    } finally {
+      busyRef.current = false;
+      setBusy(false);
+    }
+  };
+  const visible = list.filter((entry) => filter === "all" || entry.status === filter);
+  return h(
+    "div",
+    { className: "hg-page hg-watchlist" },
+    h(
+      "div",
+      { className: "hg-page-head" },
+      h("div", { className: "hg-page-title" }, t("watchlist.heading")),
+      loading ? h(Spinner, { label: t("watchlist.loading") }) : h("span", { className: "hg-count" }, String(list.length))
+    ),
+    h(
+      "div",
+      { className: "hg-scroll" },
+      error ? h(ErrorNotice, { ctx, error, onRetry: () => setReload((value) => value + 1) }) : null,
+      h(
+        "div",
+        { className: "hg-watch-filters", role: "group", "aria-label": t("watchlist.filter") },
+        ["all", ...WATCH_STATUSES].map((status) => h("button", {
+          key: status,
+          type: "button",
+          className: `hg-watch-filter${filter === status ? " is-active" : ""}`,
+          "aria-pressed": filter === status,
+          onClick: () => setFilter(status)
+        }, t(`watchlist.${status}`), h("span", { className: "hg-count" }, String(
+          status === "all" ? list.length : list.filter((entry) => entry.status === status).length
+        ))))
+      ),
+      !loading && !error && visible.length === 0 ? h(EmptyState, {
+        ctx,
+        icon: "Bookmark",
+        title: t(list.length ? "watchlist.filterEmpty" : "watchlist.empty"),
+        hint: t("watchlist.emptyHint"),
+        action: h("button", { type: "button", className: "hg-btn", onClick: () => ctx.openTab("discover") }, t("action.browse"))
+      }) : null,
+      h("div", { className: "hg-watch-list" }, visible.map((entry) => {
+        const record = history.find((item) => item.seriesId === entry.seriesId);
+        return h(
+          "article",
+          { key: entry.seriesId, className: "hg-watch-card" },
+          h(
+            "button",
+            { type: "button", className: "hg-history-main", onClick: () => ctx.openSeries(seedOf(entry)) },
+            h(Cover, { ctx, path: entry.cover, className: "hg-history-cover" }),
+            h(
+              "span",
+              { className: "hg-history-text" },
+              h("span", { className: "hg-history-title" }, entry.title || t("unit.untitled")),
+              h("span", { className: "hg-history-meta" }, record ? t("detail.continueAt", {
+                number: record.episodeNumber,
+                time: formatDuration(record.positionMs)
+              }) : entry.count ? t("unit.episodes", { count: entry.count }) : t(`watchlist.${entry.status}`))
+            )
+          ),
+          h(
+            "div",
+            { className: "hg-watch-card-actions" },
+            h(StatusSelect, { ctx, title: entry.title, value: entry.status, disabled: busy, onChange: (status) => void change(entry, status) }),
+            h("button", {
+              type: "button",
+              className: "hg-linkbtn",
+              disabled: busy,
+              "aria-label": `${t("watchlist.remove")} · ${entry.title}`,
+              onClick: () => void change(entry, null)
+            }, t("watchlist.remove"))
+          )
+        );
+      }))
+    )
   );
 }
 
@@ -5965,6 +6384,7 @@ function DetailPage({ ctx, seed, onBack }) {
   });
   const [selectedIndex, setSelectedIndex] = React.useState(0);
   const [positionMs, setPositionMs] = React.useState(0);
+  const [seekRequest, setSeekRequest] = React.useState(0);
   const [historyEntry, setHistoryEntry] = React.useState(null);
   const [expanded, setExpanded] = React.useState(false);
   const seqRef = React.useRef(0);
@@ -5973,6 +6393,10 @@ function DetailPage({ ctx, seed, onBack }) {
   const episodesRef = React.useRef([]);
   const selectedRef = React.useRef(0);
   const positionRef = React.useRef(0);
+  const durationRef = React.useRef(0);
+  const historyRef = React.useRef(null);
+  const progressRef = React.useRef(/* @__PURE__ */ new Map());
+  const watchingCheckRef = React.useRef(null);
   const lastSaveRef = React.useRef(0);
   const pendingSaveRef = React.useRef(null);
   const flushTimerRef = React.useRef(0);
@@ -5987,7 +6411,7 @@ function DetailPage({ ctx, seed, onBack }) {
       }
       const pending = pendingSaveRef.current;
       pendingSaveRef.current = null;
-      if (pending) void persistRef.current?.(pending.index, pending.position);
+      if (pending) void persistRef.current?.(pending.index, pending.position, { durationMs: pending.durationMs });
     };
   }, []);
   React.useEffect(() => {
@@ -5997,9 +6421,6 @@ function DetailPage({ ctx, seed, onBack }) {
   React.useEffect(() => {
     selectedRef.current = selectedIndex;
   }, [selectedIndex]);
-  React.useEffect(() => {
-    positionRef.current = positionMs;
-  }, [positionMs]);
   const load = React.useCallback(async () => {
     const seq = seqRef.current + 1;
     seqRef.current = seq;
@@ -6027,8 +6448,15 @@ function DetailPage({ ctx, seed, onBack }) {
       if (seq !== seqRef.current || !aliveRef.current) return;
       const episodes2 = episodesResult.ok ? normalizeEpisodes(episodesResult.page) : [];
       const entry = Array.isArray(historyList) ? historyList.find((item) => item.seriesId === seriesId) || null : null;
-      const resumed = entry && Number.isInteger(entry.episodeIndex) && entry.episodeIndex < episodes2.length ? entry.episodeIndex : 0;
-      const position = entry && resumed === entry.episodeIndex ? entry.positionMs : 0;
+      const resumed = resumeEpisodeIndex(entry, episodes2);
+      const record = getEpisodeProgress(entry, episodes2[resumed], resumed);
+      const position = resumePosition(record);
+      seriesRef.current = series2;
+      episodesRef.current = episodes2;
+      historyRef.current = entry;
+      selectedRef.current = resumed;
+      positionRef.current = position;
+      durationRef.current = record?.durationMs || 0;
       setState({
         status: "idle",
         error: null,
@@ -6058,19 +6486,24 @@ function DetailPage({ ctx, seed, onBack }) {
     void load();
   }, [load]);
   const persist = React.useCallback(
-    async (index, position) => {
+    async (index, position, extra = {}) => {
       const series2 = seriesRef.current;
-      if (!series2) return;
+      const episode = episodesRef.current[index];
+      if (!series2 || !episode) return;
       try {
         const list = await upsertHistory(api, {
           seriesId: series2.id,
           title: series2.title,
           cover: series2.cover,
           episodeIndex: index,
-          positionMs: position
+          episodeId: episode.id,
+          episodeNumber: episode.number,
+          positionMs: position,
+          ...extra
         });
-        if (!aliveRef.current) return;
-        setHistoryEntry(list.find((item) => item.seriesId === series2.id) || null);
+        const entry = list.find((item) => item.seriesId === series2.id) || null;
+        historyRef.current = entry;
+        if (aliveRef.current) setHistoryEntry(entry);
         ctx.bumpHistory();
       } catch (error) {
         ctx.notify("error", t("detail.recordFailed"));
@@ -6088,7 +6521,10 @@ function DetailPage({ ctx, seed, onBack }) {
         ctx.notify("info", t("detail.unplayable"));
         return;
       }
-      const nextPosition = Number.isFinite(Number(position)) && Number(position) > 0 ? Math.floor(Number(position)) : 0;
+      const saved = progressRef.current.get(episodes2[index].id) || getEpisodeProgress(historyRef.current, episodes2[index], index);
+      const nextPosition = position == null ? resumePosition(saved) : Math.max(0, Math.floor(Number(position) || 0));
+      const pending = pendingSaveRef.current;
+      if (pending) void persistRef.current?.(pending.index, pending.position, { durationMs: pending.durationMs });
       pendingSaveRef.current = null;
       if (flushTimerRef.current) {
         clearTimeout(flushTimerRef.current);
@@ -6096,9 +6532,11 @@ function DetailPage({ ctx, seed, onBack }) {
       }
       selectedRef.current = index;
       positionRef.current = nextPosition;
+      durationRef.current = saved?.durationMs || 0;
       setSelectedIndex(index);
       setPositionMs(nextPosition);
-      void persist(index, nextPosition);
+      setSeekRequest((value) => value + 1);
+      void persist(index, nextPosition, { durationMs: durationRef.current });
     },
     [ctx, persist, t]
   );
@@ -6106,29 +6544,41 @@ function DetailPage({ ctx, seed, onBack }) {
     (payload) => {
       const episodes2 = episodesRef.current;
       const index = Number.isInteger(payload?.episodeIndex) ? payload.episodeIndex : selectedRef.current;
-      if (index < 0 || index >= episodes2.length) return;
+      if (index < 0 || index >= episodes2.length || index !== selectedRef.current) return;
+      if (payload?.episodeId && payload.episodeId !== episodes2[index].id) return;
       const position = Math.max(0, Math.floor(Number(payload?.positionMs) || 0));
-      if (position <= 0 && positionRef.current > 0 && index === selectedRef.current) return;
-      const apply = (targetIndex, targetPosition) => {
-        selectedRef.current = targetIndex;
-        positionRef.current = targetPosition;
-        setSelectedIndex(targetIndex);
-        setPositionMs(targetPosition);
-        void persistRef.current?.(targetIndex, targetPosition);
+      const durationMs = Math.max(0, Math.floor(Number(payload?.durationMs) || 0));
+      if (!durationMs) return;
+      positionRef.current = position;
+      durationRef.current = durationMs;
+      if (aliveRef.current) setPositionMs(position);
+      const old = progressRef.current.get(episodes2[index].id) || getEpisodeProgress(historyRef.current, episodes2[index], index);
+      progressRef.current.set(episodes2[index].id, { ...old, positionMs: position, durationMs });
+      if (position > 0 && watchingCheckRef.current !== ctx.watchlistVersion) {
+        watchingCheckRef.current = ctx.watchlistVersion;
+        markWatching(api, seriesId).then((changed) => {
+          if (changed) ctx.bumpWatchlist();
+        }).catch((error) => {
+          watchingCheckRef.current = null;
+          ctx.log?.("[watchlist] 更新状态失败", String(error?.message || error));
+        });
+      }
+      const apply = (targetIndex, targetPosition, duration) => {
+        void persistRef.current?.(targetIndex, targetPosition, { durationMs: duration });
       };
       const now = Date.now();
       const elapsed = now - lastSaveRef.current;
-      if (elapsed >= 5e3) {
+      if (elapsed >= 5e3 || payload?.flush || !aliveRef.current) {
         lastSaveRef.current = now;
         pendingSaveRef.current = null;
         if (flushTimerRef.current) {
           clearTimeout(flushTimerRef.current);
           flushTimerRef.current = 0;
         }
-        apply(index, position);
+        apply(index, position, durationMs);
         return;
       }
-      pendingSaveRef.current = { index, position };
+      pendingSaveRef.current = { index, position, durationMs };
       if (flushTimerRef.current) return;
       flushTimerRef.current = setTimeout(() => {
         flushTimerRef.current = 0;
@@ -6136,25 +6586,30 @@ function DetailPage({ ctx, seed, onBack }) {
         pendingSaveRef.current = null;
         if (!pending || !aliveRef.current) return;
         lastSaveRef.current = Date.now();
-        apply(pending.index, pending.position);
+        apply(pending.index, pending.position, pending.durationMs);
       }, 5e3 - elapsed);
     },
-    [persist]
+    [api, seriesId, ctx]
   );
   const handleEnded = React.useCallback(
     (payload) => {
       const episodes2 = episodesRef.current;
       const index = Number.isInteger(payload?.episodeIndex) ? payload.episodeIndex : selectedRef.current;
+      if (index !== selectedRef.current || !episodes2[index]) return;
+      if (payload?.episodeId && payload.episodeId !== episodes2[index].id) return;
       const duration = Number(payload?.durationMs);
+      const endPosition = Number.isFinite(duration) && duration > 0 ? Math.floor(duration) : positionRef.current;
+      pendingSaveRef.current = null;
+      if (flushTimerRef.current) clearTimeout(flushTimerRef.current);
+      flushTimerRef.current = 0;
+      progressRef.current.set(episodes2[index].id, { positionMs: endPosition, durationMs: endPosition, completed: true });
+      void persist(index, endPosition, { durationMs: endPosition, completed: true });
       const next = index + 1;
-      if (next >= 0 && next < episodes2.length) {
+      if (ctx.prefs?.autoNext !== false && episodes2[next]?.playable) {
         selectEpisode(next, 0);
-      } else if (index >= 0 && index < episodes2.length) {
-        const endPosition = Number.isFinite(duration) && duration > 0 ? Math.floor(duration) : positionRef.current;
-        void persist(index, endPosition);
       }
     },
-    [persist, selectEpisode]
+    [persist, selectEpisode, ctx.prefs?.autoNext]
   );
   const handlePlayerError = React.useCallback(
     (error) => {
@@ -6185,9 +6640,9 @@ function DetailPage({ ctx, seed, onBack }) {
   const episodes = state.episodes;
   const description = series?.description || "";
   const canExpand = description.length > 140;
-  const historyIndex = historyEntry && historyEntry.episodeIndex >= 0 && historyEntry.episodeIndex < episodes.length ? historyEntry.episodeIndex : -1;
-  const historyEpisode = historyIndex >= 0 ? episodes[historyIndex] : null;
-  const resumeIndex = historyEntry && historyEntry.episodeIndex >= 0 && historyEntry.episodeIndex < episodes.length ? historyEntry.episodeIndex : 0;
+  const resumeIndex = resumeEpisodeIndex(historyEntry, episodes);
+  const historyEpisode = episodes[resumeIndex];
+  const resumeRecord = getEpisodeProgress(historyEntry, historyEpisode, resumeIndex);
   const resumeNumber = historyEpisode?.number ?? (historyEntry ? historyEntry.episodeIndex + 1 : 1);
   const tags = Array.isArray(series?.tags) ? series.tags : [];
   const meta = [];
@@ -6236,9 +6691,10 @@ function DetailPage({ ctx, seed, onBack }) {
           episodes,
           episodeIndex: selectedIndex,
           positionMs,
+          seekRequest,
           onProgress: handleProgress,
           onEnded: handleEnded,
-          onSelectEpisode: (index) => selectEpisode(index, 0),
+          onSelectEpisode: (index) => selectEpisode(index),
           onError: handlePlayerError,
           onMiniChange: ctx.onMiniChange
         }) : null,
@@ -6260,6 +6716,7 @@ function DetailPage({ ctx, seed, onBack }) {
             ) : null
           )
         ),
+        h(WatchlistControls, { ctx, series, hasProgress: historyEntry?.episodes?.some((entry) => entry.positionMs > 0) }),
         h(
           "button",
           {
@@ -6268,7 +6725,7 @@ function DetailPage({ ctx, seed, onBack }) {
             disabled: episodes.length === 0,
             onClick: () => selectEpisode(
               resumeIndex,
-              historyEntry && resumeIndex === historyEntry.episodeIndex ? historyEntry.positionMs : 0
+              resumePosition(resumeRecord)
             )
           },
           h(
@@ -6324,12 +6781,15 @@ function DetailPage({ ctx, seed, onBack }) {
             "div",
             { className: "hg-episodes" },
             episodes.map((episode, index) => {
-              const watched = historyIndex >= 0 && index <= historyIndex;
+              const record = getEpisodeProgress(historyEntry, episode, index);
+              const watched = record?.completed === true;
+              const partial = !watched && record?.positionMs > 0;
               const current = index === selectedIndex;
               const label = episode.title || t("unit.episodeShort", { number: episode.number });
               const titleText = [
                 label,
                 watched ? t("detail.watched") : "",
+                partial ? t("detail.partialAt", { time: formatDuration(record.positionMs) }) : "",
                 episode.playable ? "" : t("detail.unplayable")
               ].filter(Boolean).join(" · ");
               return h(
@@ -6337,14 +6797,15 @@ function DetailPage({ ctx, seed, onBack }) {
                 {
                   key: episode.id || `${index}`,
                   type: "button",
-                  className: `hg-ep${watched ? " is-watched" : ""}${current ? " is-current" : ""}`,
+                  className: `hg-ep${watched ? " is-watched" : ""}${partial ? " is-partial" : ""}${current ? " is-current" : ""}`,
                   disabled: !episode.playable,
                   "aria-current": current ? "true" : void 0,
                   title: titleText,
-                  onClick: () => selectEpisode(index, index === selectedRef.current ? positionRef.current : 0)
+                  onClick: () => selectEpisode(index)
                 },
                 h("span", { className: "hg-ep-num" }, String(episode.number)),
                 episode.title ? h("span", { className: "hg-ep-name" }, episode.title) : null,
+                watched || partial ? h("span", { className: "hg-ep-status" }, watched ? "✓" : formatDuration(record.positionMs)) : null,
                 current ? h("span", { className: "hg-sr-only" }, t("detail.current")) : null
               );
             })
@@ -6521,7 +6982,7 @@ function HistoryPage({ ctx, active, historyVersion }) {
                   "div",
                   { className: "hg-history-meta" },
                   t("history.lastWatched", {
-                    number: entry.episodeIndex + 1,
+                    number: entry.episodeNumber,
                     time: formatDuration(entry.positionMs)
                   })
                 )
@@ -6664,6 +7125,64 @@ function SettingsPage({ ctx, active }) {
           )
         ),
         h("div", { className: "hg-hint" }, t("settings.qualityHint")),
+        h(
+          "div",
+          { className: "hg-field" },
+          h("label", { className: "hg-field-label", htmlFor: "hg-playback-rate" }, t("player.speed")),
+          h("select", {
+            id: "hg-playback-rate",
+            className: "hg-select",
+            value: ctx.prefs.playbackRate,
+            onChange: (event) => ctx.updatePrefs({ playbackRate: Number(event.target.value) })
+          }, PLAYBACK_RATES.map((rate) => h("option", { key: rate, value: rate }, `${rate}x`)))
+        ),
+        h(
+          "div",
+          { className: "hg-field hg-range-field" },
+          h("label", { className: "hg-field-label", htmlFor: "hg-volume" }, t("player.volume")),
+          h(
+            "div",
+            { className: "hg-range-control" },
+            h("input", {
+              id: "hg-volume",
+              className: "hg-range",
+              type: "range",
+              min: 0,
+              max: 100,
+              step: 1,
+              value: Math.round(ctx.prefs.volume * 100),
+              onChange: (event) => ctx.updatePrefs({ volume: Number(event.target.value) / 100 })
+            }),
+            h("span", { className: "hg-range-value" }, `${Math.round(ctx.prefs.volume * 100)}%`)
+          )
+        ),
+        h(
+          "div",
+          { className: "hg-field" },
+          h("label", { className: "hg-field-label", htmlFor: "hg-muted" }, t("player.mute")),
+          h("input", {
+            id: "hg-muted",
+            className: "hg-toggle",
+            type: "checkbox",
+            role: "switch",
+            checked: ctx.prefs.muted,
+            onChange: (event) => ctx.updatePrefs({ muted: event.target.checked })
+          })
+        ),
+        h(
+          "div",
+          { className: "hg-field" },
+          h("label", { className: "hg-field-label", htmlFor: "hg-auto-next" }, t("settings.autoNext")),
+          h("input", {
+            id: "hg-auto-next",
+            className: "hg-toggle",
+            type: "checkbox",
+            role: "switch",
+            checked: ctx.prefs.autoNext,
+            onChange: (event) => ctx.updatePrefs({ autoNext: event.target.checked })
+          })
+        ),
+        h("div", { className: "hg-hint" }, t("settings.playbackRemembered")),
         h(
           "div",
           { className: "hg-field hg-range-field" },
@@ -6809,6 +7328,7 @@ function SettingsPage({ ctx, active }) {
 var TABS = [
   { id: "discover", icon: "Sparkles", labelKey: "tab.discover" },
   { id: "search", icon: "Search", labelKey: "tab.search" },
+  { id: "watchlist", icon: "Bookmark", labelKey: "tab.watchlist" },
   { id: "history", icon: "History", labelKey: "tab.history" },
   { id: "settings", icon: "Settings", labelKey: "tab.settings" }
 ];
@@ -6835,8 +7355,9 @@ function PanelApp({ api, React, locale }) {
   const [detailVisible, setDetailVisible] = React.useState(false);
   const [miniActive, setMiniActive] = React.useState(false);
   const [visited, setVisited] = React.useState(() => ({ discover: true }));
-  const [prefs, setPrefs] = React.useState({ quality: "720p", miniWindow: { ...DEFAULT_MINI_WINDOW } });
+  const [prefs, setPrefs] = React.useState(() => normalizePrefs(null));
   const [historyVersion, setHistoryVersion] = React.useState(0);
+  const [watchlistVersion, setWatchlistVersion] = React.useState(0);
   const [notices, setNotices] = React.useState([]);
   const prefsRef = React.useRef(prefs);
   const aliveRef = React.useRef(true);
@@ -6899,7 +7420,7 @@ function PanelApp({ api, React, locale }) {
   }, []);
   const updatePrefs = React.useCallback(
     (patch) => {
-      const next = { ...prefsRef.current, ...patch };
+      const next = normalizePrefs({ ...prefsRef.current, ...patch });
       prefsRef.current = next;
       setPrefs(next);
       writePrefs(api, next).catch((error) => {
@@ -6912,30 +7433,23 @@ function PanelApp({ api, React, locale }) {
     const seq = bootSeqRef.current + 1;
     bootSeqRef.current = seq;
     setBoot({ status: "loading", error: null, health: null });
-    rpc.ensureReady().then((health) => {
+    Promise.all([rpc.ensureReady(), readPrefs(api).catch((error) => {
+      log("[panel] 读取播放偏好失败", String(error?.message || error));
+      notify("error", t("settings.loadFailed"));
+      return normalizePrefs({ muted: true });
+    })]).then(([health, savedPrefs]) => {
       if (!aliveRef.current || seq !== bootSeqRef.current) return;
+      prefsRef.current = savedPrefs;
+      setPrefs(savedPrefs);
       setBoot({ status: "ready", error: null, health });
     }).catch((error) => {
       if (!aliveRef.current || seq !== bootSeqRef.current) return;
       setBoot({ status: "failed", error, health: null });
     });
-  }, [rpc]);
+  }, [rpc, api, log, notify, t]);
   React.useEffect(() => {
     startBoot();
   }, [startBoot]);
-  React.useEffect(() => {
-    if (boot.status !== "ready") return void 0;
-    let alive = true;
-    readPrefs(api).then((value) => {
-      if (!alive || !value) return;
-      prefsRef.current = value;
-      setPrefs(value);
-    }).catch(() => {
-    });
-    return () => {
-      alive = false;
-    };
-  }, [api, boot.status]);
   const ctx = React.useMemo(
     () => ({
       api,
@@ -6947,7 +7461,13 @@ function PanelApp({ api, React, locale }) {
       updatePrefs,
       notify,
       log,
-      bumpHistory: () => setHistoryVersion((value) => value + 1),
+      bumpHistory: () => {
+        if (aliveRef.current) setHistoryVersion((value) => value + 1);
+      },
+      bumpWatchlist: () => {
+        if (aliveRef.current) setWatchlistVersion((value) => value + 1);
+      },
+      watchlistVersion,
       onMiniChange: (active) => {
         setMiniActive(active);
         if (!active) setDetailVisible(true);
@@ -6970,7 +7490,7 @@ function PanelApp({ api, React, locale }) {
         setDetailVisible(false);
       }
     }),
-    [api, rpc, t, resolvedLocale, cover, prefs, updatePrefs, notify, log, miniActive]
+    [api, rpc, t, resolvedLocale, cover, prefs, updatePrefs, notify, log, miniActive, watchlistVersion]
   );
   const ErrorBoundary = React.useMemo(() => {
     class Boundary extends React.Component {
@@ -7058,6 +7578,11 @@ function PanelApp({ api, React, locale }) {
       "div",
       { className: "hg-tabpane", hidden: activeTab !== "search" },
       h(SearchPage, { ctx, active: activeTab === "search" })
+    ) : null,
+    visited.watchlist ? h(
+      "div",
+      { className: "hg-tabpane", hidden: activeTab !== "watchlist" },
+      h(WatchlistPage, { ctx, active: activeTab === "watchlist" && !covered, historyVersion, watchlistVersion })
     ) : null,
     visited.history ? h(
       "div",

@@ -6,6 +6,7 @@
 // - 本文件负责 DOM、交互、快捷键、覆盖层、进度上报（detail 页负责落盘 history）。
 import { describeError } from "../ui/common.js";
 import { DEFAULT_QUALITY, QUALITY_OPTIONS, normalizeMiniWindow } from "../storage.js";
+import { normalizePlaybackPrefs } from "../playback-prefs.js";
 import { MSE_STATE, createMseEngine } from "./engine.js";
 import { icon } from "./icons.js";
 import { PLAYBACK_RATES, createWebCodecsPlayer } from "./webcodecs-play.js";
@@ -60,8 +61,9 @@ export function createPlayer(slot, initialProps) {
   let userPaused = false;
   // 目标档位取已保存的清晰度偏好；旧数据里的非法值退回默认档，避免下拉出现空值。
   let desiredQuality = QUALITY_OPTIONS.includes(props.quality) ? props.quality : DEFAULT_QUALITY;
-  // 倍速只在当前播放器会话内保持，切集、切清晰度与引擎回退都沿用最新选择。
-  let desiredPlaybackRate = 1;
+  const savedPlayback = normalizePlaybackPrefs(props);
+  // 从持久化偏好初始化，切集、切清晰度与引擎回退都沿用最新选择。
+  let desiredPlaybackRate = savedPlayback.playbackRate;
   let overlayKind = "";
   let dragging = false;
   let fill = false;
@@ -145,7 +147,10 @@ export function createPlayer(slot, initialProps) {
   video.setAttribute("playsinline", "");
   video.setAttribute("webkit-playsinline", "");
   video.preload = "auto";
-  video.volume = 1;
+  video.volume = savedPlayback.volume;
+  video.muted = savedPlayback.muted;
+  video.defaultPlaybackRate = desiredPlaybackRate;
+  video.playbackRate = desiredPlaybackRate;
 
   // WebCodecs 播放层：宿主 CSP 没有 media-src，<video> 连 blob: 都加载不了，
   // 唯一能出画面的通道是自己解码后画到 canvas，所以默认就走这条。
@@ -286,7 +291,7 @@ export function createPlayer(slot, initialProps) {
     speedSelect.append(option);
   }
   speedSelect.value = String(desiredPlaybackRate);
-  speedSelect.addEventListener("change", () => setSpeed(speedSelect.value));
+  speedSelect.addEventListener("change", () => setSpeed(speedSelect.value, true));
   speedSelect.addEventListener("click", (event) => event.stopPropagation());
 
   const pipBtn = button("pip", () => void togglePip());
@@ -444,6 +449,10 @@ export function createPlayer(slot, initialProps) {
 
   const report = (force) => {
     if (disposed) return;
+    // 拉流中的占位时间、兼容路径未加载的 video 不能覆盖真实续播位置。
+    if (wvc) {
+      if (["idle", "loading", "error"].includes(wvc.getState().phase)) return;
+    } else if (video.readyState < 1) return;
     const now = Date.now();
     if (!force && now - lastReportAt < 1000) return;
     lastReportAt = now;
@@ -453,8 +462,10 @@ export function createPlayer(slot, initialProps) {
     try {
       props.onProgress?.({
         episodeIndex: props.episodeIndex,
+        episodeId: props.episode?.id,
         positionMs,
         durationMs: Math.round(durationOf() * 1000),
+        flush: force === true,
       });
     } catch (error) {
       log("[player] onProgress 回调异常", String(error?.message || error));
@@ -573,6 +584,7 @@ export function createPlayer(slot, initialProps) {
     video.muted = next <= 0.001;
     if (wvc) wvc.setVolume(next);
     syncVolume();
+    props.onPlaybackPrefsChange?.({ volume: video.volume, muted: video.muted });
   };
 
   const toggleMute = () => {
@@ -580,6 +592,7 @@ export function createPlayer(slot, initialProps) {
     if (!video.muted && video.volume <= 0.001) video.volume = 0.5;
     if (wvc) wvc.setVolume(video.muted ? 0 : video.volume);
     syncVolume();
+    props.onPlaybackPrefsChange?.({ volume: video.volume, muted: video.muted });
   };
 
   const applyVideoPlaybackRate = () => {
@@ -590,7 +603,7 @@ export function createPlayer(slot, initialProps) {
     if (video.playbackRate !== desiredPlaybackRate) video.playbackRate = desiredPlaybackRate;
   };
 
-  const setSpeed = (value) => {
+  const setSpeed = (value, persist = false) => {
     if (disposed) return;
     const next = Number(value);
     if (!PLAYBACK_RATES.includes(next)) {
@@ -603,6 +616,7 @@ export function createPlayer(slot, initialProps) {
     applyVideoPlaybackRate();
     syncSpeed();
     showControls();
+    if (persist) props.onPlaybackPrefsChange?.({ playbackRate: desiredPlaybackRate });
   };
 
   const cycleSpeed = (direction) => {
@@ -617,7 +631,7 @@ export function createPlayer(slot, initialProps) {
       }
     });
     const next = PLAYBACK_RATES[clamp(index + direction, 0, PLAYBACK_RATES.length - 1)];
-    setSpeed(next);
+    setSpeed(next, true);
   };
 
   const setQuality = (quality, persist) => {
@@ -1610,7 +1624,7 @@ export function createPlayer(slot, initialProps) {
     report(true);
     const durationMs = Math.round(durationOf() * 1000);
     try {
-      props.onEnded?.({ episodeIndex: props.episodeIndex, durationMs });
+      props.onEnded?.({ episodeIndex: props.episodeIndex, episodeId: props.episode?.id, durationMs });
     } catch (error) {
       log("[player] onEnded 回调异常", String(error?.message || error));
     }
@@ -1860,6 +1874,10 @@ export function createPlayer(slot, initialProps) {
       quality: props.quality || "",
       locale: props.locale || "",
       positionMs: Number(props.positionMs) || 0,
+      playbackRate: props.playbackRate,
+      volume: props.volume,
+      muted: props.muted,
+      seekRequest: props.seekRequest,
     };
     const episodeChanged = (next?.episode?.id || "") !== prev.episodeId;
     if (episodeChanged) {
@@ -1872,6 +1890,17 @@ export function createPlayer(slot, initialProps) {
 
     Object.assign(props, next);
 
+    const playback = normalizePlaybackPrefs(props);
+    if (props.playbackRate !== prev.playbackRate && playback.playbackRate !== desiredPlaybackRate) {
+      setSpeed(playback.playbackRate);
+    }
+    if (props.volume !== prev.volume || props.muted !== prev.muted) {
+      video.volume = playback.volume;
+      video.muted = playback.muted;
+      if (wvc) wvc.setVolume(video.muted ? 0 : video.volume);
+      syncVolume();
+    }
+
     if (next.miniWindow) adoptMiniWindow(next.miniWindow);
     if ((next.locale || "") !== prev.locale) applyLabels();
     else if (episodeChanged || (props.series?.title || "") !== prev.seriesTitle) syncMiniAppearance();
@@ -1883,6 +1912,15 @@ export function createPlayer(slot, initialProps) {
     }
 
     if (props.episodeIndex !== prev.episodeIndex) updateNextButton();
+
+    if (props.seekRequest !== prev.seekRequest && durationOf() > 0) {
+      // 失败的取流信息也可能含时长；保留恢复入口，不能把 seek 当作重建播放器。
+      if (["degraded", "error", "notice"].includes(overlayKind)) return;
+      seekTo(Math.max(0, Number(props.positionMs) || 0) / 1000);
+      hideOverlay();
+      safePlay();
+      return;
+    }
 
     const nextQuality = props.quality || "";
     if (nextQuality && nextQuality !== prev.quality && nextQuality !== desiredQuality) {

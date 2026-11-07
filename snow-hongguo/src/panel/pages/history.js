@@ -189,7 +189,7 @@ export function HistoryPage({ ctx, active, historyVersion }) {
                       "div",
                       { className: "hg-history-meta" },
                       t("history.lastWatched", {
-                        number: entry.episodeIndex + 1,
+                        number: entry.episodeNumber,
                         time: formatDuration(entry.positionMs),
                       })
                     )

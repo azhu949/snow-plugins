@@ -12,7 +12,8 @@ import { parseMp4, parseSegment, toMicros } from "./mp4.js";
 import { decodeBase64 } from "./util.js";
 import { createTempoRenderer } from "./tempo-audio.js";
 
-export const PLAYBACK_RATES = Object.freeze([0.75, 1, 1.25, 1.5, 1.75, 2, 2.5, 3]);
+import { PLAYBACK_RATES } from "../playback-prefs.js";
+export { PLAYBACK_RATES } from "../playback-prefs.js";
 
 const MAX_DECODE_PER_TICK = 16;
 // 720x1280 的 VideoFrame 单帧约 3.7MB，囤太多会撑爆显存反过来拖慢解码器。
