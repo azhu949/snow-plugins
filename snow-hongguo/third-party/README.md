@@ -1,4 +1,14 @@
-# 第三方软件与离线保调实现说明
+# 第三方软件、封面解码与离线保调实现说明
+
+## HEIC 封面解码
+
+- `libheif-js@1.23.5`（LGPL-3.0），上游：[libheif-js 1.23.5](https://github.com/catdad-experiments/libheif-js/tree/1.23.5)。`libheif/libheif-bundle.cjs` 是 npm 包 `libheif-wasm/libheif-bundle.js` 的原样副本，只把扩展名改为 `.cjs`，兼容有无 `type: module` 的插件安装目录。WASM 已包含在文件中，运行时不会下载组件。
+- 上述包使用 [libheif-emscripten v1.23.5](https://github.com/catdad-experiments/libheif-emscripten/tree/v1.23.5) 的构建，libheif 子模块提交为 `413e2a87e6a70b3eccc3a3adc5801179dd2d9e00`，构建脚本默认带 `libde265 1.0.15` HEVC 解码器。对应许可分别保存在 `libheif/LICENSE`、`libheif/LIBHEIF-LICENSE`、`libheif/LIBDE265-LICENSE`；后两份包含完整 GPL/LGPL 文本。
+- 对应源码不参与运行，作为独立的 `com.snow.hongguo-<插件版本>-sources.zip` 附件放在**安装包所在的同一 [GitHub Release](https://github.com/azhu949/snow-plugins/releases)**，可免费单独下载，无需安装。附件包括 `libheif-js-1.23.5-source.tar.gz`、`libheif-emscripten-1.23.5-source.tar.gz`、`libheif-source.tar.gz` 与 `libde265-1.0.15-source.tar.gz`，均对应上述固定 tag/commit；仓库副本位于 `third-party-sources/snow-hongguo/`。重建步骤见附件的 README、npm 包的 `scripts/install.js`/`scripts/bundle.js`、构建仓库的 `.github/workflows/emscripten.yml`（Emscripten 3.1.61）与 libheif 的 `build-emscripten.sh`。
+- 插件通过 CommonJS `require` 加载独立的 `libheif/libheif-bundle.cjs`，未把库合并进后台入口；可以原位替换成接口兼容的修改版本，不要求签名或校验。使用者可以修改库，并为调试修改版本而进行逆向工程。
+- `jpeg-js@0.4.4`（BSD-3-Clause），上游：[jpeg-js](https://github.com/jpeg-js/jpeg-js)。`jpeg-js/encoder.cjs` 是 npm 包 `lib/encoder.js` 的原样源码，保留 Adobe 的版权及许可头；包级版权及许可保存在 `jpeg-js/LICENSE`。编码器打包进 `cover-worker.cjs`，不依赖系统 JPEG 工具。
+
+本插件的适配代码位于 `src/background/media/cover-worker.js` 和 `cover-wasm.js`。每张图在独立 Node Worker 内解码，最长边缩小到 320 像素，以质量 60 输出 JPEG；透明像素合成到白底。最多两个 Worker 并发，排队与解码合计 8 秒超时；成功、异常、提前退出及超时都会终止 Worker、释放队列名额。输入通过独立字节副本传递，不转移或修改缓存持有的 Buffer。解码库原样文件与本节列出的许可随安装包保留；对应源码以同一 Release 下的独立附件提供，Release 说明须给出该附件的下载入口。
 
 ## SoundTouchJS Core
 

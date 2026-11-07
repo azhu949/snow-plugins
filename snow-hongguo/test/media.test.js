@@ -11,7 +11,7 @@ import { fileURLToPath } from "node:url";
 import { createCache } from "../src/background/cache.js";
 import { createSdk } from "../src/background/sdk.js";
 import { createMedia, fetchHead, pickStream, requestRange } from "../src/background/media/download.js";
-import { createCoverResolver, detectImageConverter, isBrowserImage } from "../src/background/media/cover.js";
+import { createCoverResolver, isBrowserImage } from "../src/background/media/cover.js";
 import { MEDIA_LIMITS, base64Length } from "../src/background/media/limits.js";
 import { Remuxer, decryptSample, parseBoxes, scanHead } from "../src/background/media/remux.js";
 import { createRequestHandler, startServer } from "../src/background/server.js";
@@ -728,12 +728,7 @@ test("真实网络：一集完整跑通 下载 -> 解密 -> 分段", liveGate, a
   }
 });
 
-test("真实封面：HEIC 转 JPEG（无转换器时 skip）", liveGate, async (t) => {
-  if (!detectImageConverter()) {
-    t.skip("本机没有 sips/ffmpeg，无法验证 HEIC 转码");
-    return;
-  }
-
+test("真实封面：HEIC 转 JPEG（包含内置解码兜底）", liveGate, async (t) => {
   const dataDir = await mkdtemp(join(tmpdir(), "hongguo-cover-live-"));
   const { createClient } = await import("openhongguo");
   const sdk = createSdk({
@@ -755,10 +750,6 @@ test("真实封面：HEIC 转 JPEG（无转换器时 skip）", liveGate, async (
     const cache = await makeCacheInstance(dataDir);
     const resolver = createCoverResolver({ cache });
     const result = await resolver.resolve(coverUrl);
-    if (!result.converted && result.contentType === "image/heic") {
-      t.skip("本机转换器都不支持 HEIC（ffmpeg 缺 libheif、无 WIC），按约定回退原图");
-      return;
-    }
     assert.equal(result.converted, true);
     assert.equal(result.contentType, "image/jpeg");
     assert.deepEqual([...result.bytes.subarray(0, 2)], [0xff, 0xd8], "JPEG 魔数应为 FF D8");

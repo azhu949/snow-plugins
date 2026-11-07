@@ -1,4 +1,4 @@
-// 构建入口：双产物单文件打包。
+// 构建入口：面板、后台入口与封面 Worker 打包。
 // - src/panel/main.js      -> index.js       （渲染层 ESM，React 由宿主注入，不打进包）
 // - src/background/main.js -> background.mjs （Electron 主进程 ESM，Node 全权限）
 // openhongguo 的 wasm 无法内联，按官方包内部约定复制到 <插件目录>/dist/。
@@ -26,6 +26,7 @@ const panelEntry = join(root, "src", "panel", "main.js");
 const panelOut = join(root, manifest.entry || "index.js");
 const backgroundOut = join(root, "background.mjs");
 const backgroundEntry = join(root, "src", "background", "main.js");
+const coverWorkerOut = join(root, "cover-worker.cjs");
 
 const SDK_DIST = join(root, "node_modules", "openhongguo", "dist");
 const WASM_ASSET = join(SDK_DIST, "openhongguo.wasm");
@@ -154,7 +155,10 @@ try {
     platform: "node",
     target: "node22",
     banner: BACKGROUND_BANNER,
-    extra: { external: ["electron"] },
+    extra: {
+      external: ["electron"],
+      define: { __HONGGUO_COVER_WORKER_PATH__: JSON.stringify("./cover-worker.cjs") },
+    },
   });
   const hasStartExport =
     /export\s+function\s+start\b/.test(backgroundBuilt) ||
@@ -164,7 +168,41 @@ try {
     throw new Error("后台产物缺少 start 导出（宿主需要 export async function start(ctx)）");
   }
 
+  // HEIC 在 Node Worker 内解码；libheif 保持独立且可替换，不把 WASM 塞进主进程入口。
+  const coverWorkerBuilt = await buildOne({
+    entry: join(root, "src", "background", "media", "cover-worker.js"),
+    outfile: coverWorkerOut,
+    platform: "node",
+    target: "node22",
+    banner: "// 构建产物：HEIC 封面解码 Worker；第三方归属见 third-party/README.md。",
+    extra: {
+      format: "cjs",
+      legalComments: "inline",
+      plugins: [{
+        name: "external-heic-decoder",
+        setup(build) {
+          build.onResolve({ filter: /^libheif-js\/libheif-wasm\/libheif-bundle\.js$/ }, () => ({
+            path: "./third-party/libheif/libheif-bundle.cjs", external: true,
+          }));
+        },
+      }],
+    },
+  });
+  const libheifDir = join(root, "third-party", "libheif");
+  const jpegDir = join(root, "third-party", "jpeg-js");
+  await requireReadable(join(libheifDir, "LIBDE265-LICENSE"), "内置解码器的许可必须随包保留");
+  await mkdir(libheifDir, { recursive: true });
+  await mkdir(jpegDir, { recursive: true });
+  await copyFile(join(root, "node_modules", "libheif-js", "libheif-wasm", "libheif-bundle.js"), join(libheifDir, "libheif-bundle.cjs"));
+  await copyFile(join(root, "node_modules", "libheif-js", "LICENSE"), join(libheifDir, "LICENSE"));
+  await copyFile(join(root, "node_modules", "libheif-js", "libheif-wasm", "LICENSE"), join(libheifDir, "LIBHEIF-LICENSE"));
+  await copyFile(join(root, "node_modules", "jpeg-js", "LICENSE"), join(jpegDir, "LICENSE"));
+  // 保留编码器的 Adobe 版权块与完整原样源码。
+  await copyFile(join(root, "node_modules", "jpeg-js", "lib", "encoder.js"), join(jpegDir, "encoder.cjs"));
+
   // 真正落盘：写临时文件再 rename，保持「旧入口可用直到新入口就绪」。
+  await writeFile(`${coverWorkerOut}.next`, coverWorkerBuilt, "utf8");
+  await rename(`${coverWorkerOut}.next`, coverWorkerOut);
   await writeFile(`${panelOut}.next`, panelBuilt, "utf8");
   await rename(`${panelOut}.next`, panelOut);
   await writeFile(`${backgroundOut}.next`, backgroundBuilt, "utf8");
@@ -186,6 +224,7 @@ try {
 
   console.log(`构建完成：${panelOut}`);
   console.log(`构建完成：${backgroundOut}`);
+  console.log(`构建完成：${coverWorkerOut}（内置 HEIC 解码器随 third-party/ 分发）`);
   console.log(`资源已复制：dist/openhongguo.wasm (${wasmSize} 字节)、dist/wasm_exec.js (${wasmExecSize} 字节)`);
 } catch (error) {
   console.error("构建失败：", error?.message || error);

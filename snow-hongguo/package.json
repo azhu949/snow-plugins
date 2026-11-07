@@ -1,17 +1,19 @@
 {
   "name": "snow-hongguo",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "private": true,
   "type": "module",
   "license": "MIT",
   "description": "红果短剧 Snow App 面板插件（openhongguo 匿名 SDK，本机 WebCodecs 解码播放）",
   "scripts": {
     "build": "node build.mjs",
-    "check": "node --check index.js && node --check background.mjs",
+    "check": "node --check index.js && node --check background.mjs && node --check cover-worker.cjs",
     "test": "node --test"
   },
   "dependencies": {
     "@soundtouchjs/core": "2.1.1",
+    "jpeg-js": "0.4.4",
+    "libheif-js": "1.23.5",
     "openhongguo": "0.2.0"
   },
   "devDependencies": {

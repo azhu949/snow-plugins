@@ -9,7 +9,8 @@
 
 param(
   [Parameter(Mandatory = $true)]
-  [string]$Plugin
+  [string]$Plugin,
+  [string]$OutputDir
 )
 
 $ErrorActionPreference = "Stop"
@@ -33,9 +34,23 @@ if (-not $version) { $version = "1.0.0" }
 $tagPrefix = $id.Split('.') | Where-Object { $_ -ne "" } | Select-Object -Last 1
 if (-not $tagPrefix) { throw "无法从插件 id 推导 tag 前缀：$id（id 末段为空）" }
 
-$distDir = Join-Path $repoRoot "dist"
+$distDir = if ($OutputDir) { [System.IO.Path]::GetFullPath($OutputDir) } else { Join-Path $repoRoot "dist" }
 if (-not (Test-Path -LiteralPath $distDir)) {
   New-Item -ItemType Directory -Path $distDir -Force | Out-Null
+}
+
+# HEIC 对应源码作为同一 Release 的独立附件，不安装到用户机器。
+$sourceZipPath = $null
+if ($id -eq "com.snow.hongguo") {
+  $sourceRoot = Join-Path $repoRoot "third-party-sources\snow-hongguo"
+  $sourceNames = @("README.md", "libheif-js-1.23.5-source.tar.gz", "libheif-emscripten-1.23.5-source.tar.gz", "libheif-source.tar.gz", "libde265-1.0.15-source.tar.gz")
+  $sourceFiles = @($sourceNames | ForEach-Object {
+    $sourceFile = Join-Path $sourceRoot $_
+    if (-not (Test-Path -LiteralPath $sourceFile -PathType Leaf)) { throw "HEIC 源码附件缺少文件：$sourceFile" }
+    Get-Item -LiteralPath $sourceFile
+  })
+  $sourceZipPath = Join-Path $distDir ("{0}-{1}-sources.zip" -f $id, $version)
+  Compress-Archive -LiteralPath ($sourceFiles | ForEach-Object { $_.FullName }) -DestinationPath $sourceZipPath -CompressionLevel Optimal -Force
 }
 
 $zipPath = Join-Path $distDir ("{0}-{1}.zip" -f $id, $version)
@@ -116,7 +131,13 @@ try {
   throw
 } finally {
   if (Test-Path -LiteralPath $stagingDir) {
-    Remove-Item -LiteralPath $stagingDir -Recurse -Force -ErrorAction SilentlyContinue
+    $resolvedStaging = [System.IO.Path]::GetFullPath($stagingDir)
+    $tempRoot = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath()).TrimEnd([char[]]@('\', '/'))
+    if (-not $resolvedStaging.StartsWith($tempRoot + [System.IO.Path]::DirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase) -or
+        [System.IO.Path]::GetFileName($resolvedStaging) -notmatch '^snow-pack-[0-9a-f]{32}$') {
+      throw "拒绝清理非打包临时目录：$resolvedStaging"
+    }
+    Remove-Item -LiteralPath $resolvedStaging -Recurse -Force -ErrorAction SilentlyContinue
   }
 }
 
@@ -166,6 +187,10 @@ if ($forbiddenEntries.Count -gt 0) {
   throw "压缩包包含依赖或开发文件：$($forbiddenEntries -join ', ')"
 }
 
+if ($id -eq "com.snow.hongguo" -and @($zipEntries | Where-Object { $_ -match '^third-party/libheif/.*-source\.tar\.gz$' }).Count -gt 0) {
+  throw "HEIC 源码归档应放在独立 sources.zip 附件中，不能进入安装包"
+}
+
 $hash = (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash.ToLowerInvariant()
 $zipInfo = Get-Item -LiteralPath $zipPath
 
@@ -175,6 +200,11 @@ Write-Output ("版本      : {0}" -f $version)
 Write-Output ("压缩包    : {0}" -f $zipInfo.FullName)
 Write-Output ("体积      : {0} bytes" -f $zipInfo.Length)
 Write-Output ("SHA-256   : {0}" -f $hash)
+if ($sourceZipPath) {
+  $sourceZipInfo = Get-Item -LiteralPath $sourceZipPath
+  Write-Output ("源码附件  : {0} ({1} bytes)" -f $sourceZipInfo.FullName, $sourceZipInfo.Length)
+  Write-Output "发布时同时上传安装包和源码附件，在同一 Release 说明中给出源码下载链接。"
+}
 Write-Output ""
 Write-Output "下一步：在 GitHub 仓库创建 Release（tag 建议 <插件 id 末段>/v$version，如 $tagPrefix/v$version）并上传该 zip，"
 Write-Output "然后把 SHA-256 与资产文件名填入 snow-plugin-store 的 app/plugins/$id.json 索引条目并提 PR。"

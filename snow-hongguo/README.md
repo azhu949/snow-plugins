@@ -7,7 +7,7 @@ Snow App 右侧面板插件，用来看红果短剧的推荐、排行、分类�
 > **免责声明**：请以学习与研究为目的使用本插件。本插件仅供个人学习、技术研究与交流，禁止用于商业用途，也不得用于大规模数据采集或其他侵犯他人合法权益的行为。使用本插件即表示你已阅读并同意[文末的完整免责声明](#免责声明)的全部条款。
 
 - 插件 id：`com.snow.hongguo`
-- 当前版本：`0.1.6`
+- 当前版本：`0.1.7`
 - 技术报告：`docs/spike-report.md`
 
 ## 功能
@@ -25,7 +25,7 @@ Snow App 右侧面板插件，用来看红果短剧的推荐、排行、分类�
 - 自动下一集：默认开启，一集播完自动切到可播放的下一集；设置中关闭后停在本集片尾，可手动下一集或重播。
 - 起播与预加载：取流信息和 init 并行准备，最多三段并发读取，视频解码与音频准备并行；连播开启时在片尾预取下一集开头，切集复用同一媒体任务与缓存。
 - 缓存：封面与视频分段落盘缓存；设置页可一键清理。视频保留最近 6 集，封面保留最近 300 张。
-- 封面：红果返回 HEIC 时，后台优先转成 JPEG 再给面板；转换器不可用时回退原图，面板显示占位块，不影响列表与播放。
+- 封面：红果返回 HEIC 时，后台转成 JPEG 再给面板；系统转换器不可用时使用随包携带的解码器，Windows 无需额外安装 HEIF/HEVC 扩展。损坏或超限图片仍显示占位块，不影响列表与播放。
 - 下拉控件：排行、分类、设置和播放器统一采用宿主风格的自绘菜单，跟随主题配色，显示选中勾号；支持键盘选择和 Esc 收起，空间不足时向上展开，避免侧栏裁切。
 
 ## 安装
@@ -51,11 +51,14 @@ npm test
 | --- | --- |
 | `index.js` | 面板入口，单文件 ESM，React 由宿主注入 |
 | `background.mjs` | 常驻后台模块，单文件 ESM，由宿主在主进程内加载 |
+| `cover-worker.cjs` | 后台封面解码 Worker，按需启动，完成或超时后退出 |
+| `third-party/libheif/` | 内置 HEIC 解码器、许可与源码获取说明；不依赖系统扩展 |
+| `third-party/jpeg-js/` | JPEG 编码器原样源码与许可 |
 | `dist/openhongguo.wasm` | SDK 的 WebAssembly 主体，约 6.9 MB |
 | `dist/wasm_exec.js` | Go wasm 运行时胶水文件 |
 | `dist/package.json` | 把 `dist/` 标记为 CommonJS，保证 `wasm_exec.js` 能被 `require` |
 
-`dist/` 三个文件必须和 `background.mjs` 一起安装，缺一个时后台会在启动或首次调用 SDK 时失败；`server.mjs` 只在旧宿主或本地调试时用到。
+`dist/` 三个文件必须和 `background.mjs` 一起安装，缺一个时后台会在启动或首次调用 SDK 时失败；封面兜底还需要 `cover-worker.cjs` 与完整的 `third-party/`。`server.mjs` 只在旧宿主或本地调试时用到。
 
 ### 本地目录安装
 
@@ -251,8 +254,13 @@ Start-Process -FilePath "node" -ArgumentList "server.mjs" -WorkingDirectory $ins
 1. macOS：`/usr/bin/sips`
 2. PATH 中的 `ffmpeg`
 3. Windows：系统自带的 WPF/WIC（通过 PowerShell 调用）
+4. 随包携带的 `libheif-js` WASM 解码器与 `jpeg-js` 编码器（所有平台）
 
-三者都不可用或转换失败时，接口返回原图，面板显示占位块。`ffmpeg` 只是可选的封面转码器，不是视频播放或封面的硬依赖；没有它也能正常浏览和播放。转码结果会写成 `.jpg` 覆盖同一封面的缓存。封面转换会在系统临时目录创建 `hongguo-cover-*` 工作目录（`in.heic`、`out.jpg`、`wic-cover.ps1`），结束后递归删除；Windows 上的 PowerShell 以 `-ExecutionPolicy Bypass -File` 执行 WIC 解码脚本。
+WIC 需要系统具备相应 HEIF/HEVC 扩展，但内置解码器不依赖它们，也不需要 ffmpeg 或外网下载组件。内置解码在后台 Node Worker 内执行，最多两个线程并发，最多排队 80 项，排队与解码合计限时 8 秒；单张不超过 16,777,216 像素，缩小到最长边 320 像素后编码 JPEG。每张图完成或超时后终止线程，释放解码内存，不阻塞宿主主线程。成功的转换器会被优先复用。
+
+转码结果写成 `.jpg` 覆盖同一封面的缓存，旧 HEIC 缓存再次读取时会自动转换，无需手动清缓存。系统转换阶段会在系统临时目录创建 `hongguo-cover-*` 工作目录（`in.heic`、`out.jpg`、`wic-cover.ps1`），结束后递归删除；Windows 上的 PowerShell 以 `-ExecutionPolicy Bypass -File` 执行 WIC 解码脚本。内置兜底只在内存中处理图片。
+
+各转换器失败时，宿主日志会记录 `封面转换失败 [sips/ffmpeg/wic/bundled]` 与具体原因；全部失败后返回原图并记录回退原因，面板显示占位块。已检查的 Snow App 0.5.12 中，`index.html:330` 的 `script-src` 报错对应启动时恢复字体的内联脚本，与该图片解码链路无关，无需放宽 CSP。
 
 ## 已知限制
 
@@ -287,8 +295,8 @@ Start-Process -FilePath "node" -ArgumentList "server.mjs" -WorkingDirectory $ins
 
 ```powershell
 npm install
-npm run build     # 生成 index.js、background.mjs、dist/
-npm run check     # node --check 两个产物
+npm run build     # 生成 index.js、background.mjs、cover-worker.cjs、dist/ 与解码资源
+npm run check     # node --check 三个入口产物
 node --test       # 单元测试；真实网络用例（test/live.test.js、test/media.test.js）需要 HONGGUO_LIVE=1，默认跳过
 ```
 
@@ -309,7 +317,7 @@ node --test       # 单元测试；真实网络用例（test/live.test.js、test
 
 开发期间保留当前版本号，发布时再同步修改 `package.json`、`package-lock.json` 与 `plugin.json`，并更新本文版本记录。
 
-发布产物需要 `plugin.json`、`index.js`、`background.mjs`、`style.css`、`locales/`、`dist/` 和 `third-party/`，以及可选的 `README.md` 与 `server.mjs`（仅旧宿主/调试用）。`third-party/` 中的 SoundTouch 源码与许可必须随包保留；`src/`、`test/`、`node_modules/`、构建脚本与根目录依赖清单由打包脚本排除。
+发布产物需要 `plugin.json`、`index.js`、`background.mjs`、`cover-worker.cjs`、`style.css`、`locales/`、`dist/` 和 `third-party/`，以及可选的 `README.md` 与 `server.mjs`（仅旧宿主/调试用）。`third-party/` 中的解码器、SoundTouch 源码与各项许可随安装包保留；HEIC 解码器对应源码位于仓库根的 `third-party-sources/snow-hongguo/`，不进入安装目录。运行 `scripts/pack.ps1 -Plugin snow-hongguo` 会同时生成安装包与 `com.snow.hongguo-<版本>-sources.zip` 源码附件，发布时需上传到同一个 Release，并在说明中提供源码附件的下载链接。`src/`、`test/`、`node_modules/`、构建脚本与根目录依赖清单由打包脚本排除。
 
 ## 免责声明
 

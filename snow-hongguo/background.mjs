@@ -2095,7 +2095,7 @@ var spawnOnce = (bin, args) => new Promise((resolve, reject) => {
 function createTranscoder({ media, cache, log = () => {
 } }) {
   const jobs = /* @__PURE__ */ new Map();
-  const queue = [];
+  const queue2 = [];
   let queueRunning = false;
   let ffmpegBin = "";
   let ffmpegChecked = false;
@@ -2321,7 +2321,7 @@ function createTranscoder({ media, cache, log = () => {
   };
   const pumpQueue = () => {
     if (queueRunning) return;
-    const item = queue.shift();
+    const item = queue2.shift();
     if (!item) return;
     queueRunning = true;
     item.run().then(item.resolve, item.reject).finally(() => {
@@ -2330,7 +2330,7 @@ function createTranscoder({ media, cache, log = () => {
     });
   };
   const enqueue = (job) => new Promise((resolve, reject) => {
-    queue.push({ job, run: () => run2(job), resolve, reject });
+    queue2.push({ job, run: () => run2(job), resolve, reject });
     pumpQueue();
   });
   const start2 = async (episodeId, quality) => {
@@ -2393,14 +2393,14 @@ function createTranscoder({ media, cache, log = () => {
     }
   };
   const clear = async () => {
-    const waiting = queue.splice(0, queue.length);
+    const waiting = queue2.splice(0, queue2.length);
     for (const item of waiting) {
       item.reject(Object.assign(new Error("转码已取消"), { code: "CANCELLED" }));
     }
-    const active = [...jobs.values()];
-    for (const job of active) job.abort.abort();
-    await Promise.allSettled(active.map((job) => job.promise).filter(Boolean));
-    for (const job of active) cache.release?.(job.dir);
+    const active2 = [...jobs.values()];
+    for (const job of active2) job.abort.abort();
+    await Promise.allSettled(active2.map((job) => job.promise).filter(Boolean));
+    for (const job of active2) cache.release?.(job.dir);
     jobs.clear();
   };
   return { info, start: start2, chunk, clear, snapshot };
@@ -2903,6 +2903,77 @@ async function fetchCoverBytes(url, { timeoutMs = 1e4, maxBytes = LIMITS.coverMa
   return requestOnce(target, { timeoutMs, maxBytes, redirects });
 }
 
+// src/background/media/cover-wasm.js
+import { Worker } from "node:worker_threads";
+var WORKER_URL = new URL(
+  true ? "./cover-worker.cjs" : "./cover-worker.js",
+  import.meta.url
+);
+var MAX_WORKERS = 2;
+var MAX_PENDING = 80;
+var queue = [];
+var active = 0;
+var pump = () => {
+  while (active < MAX_WORKERS && queue.length) queue.shift().start();
+};
+function convertWithBundledDecoder(bytes, {
+  timeoutMs = MEDIA_LIMITS.coverTimeoutMs,
+  workerUrl = WORKER_URL
+} = {}) {
+  if (!bytes?.length || bytes.length > LIMITS.coverMaxBytes) {
+    return Promise.reject(new Error("封面字节数超出限制"));
+  }
+  if (queue.length >= MAX_PENDING) return Promise.reject(new Error("封面解码队列已满"));
+  return new Promise((resolve, reject) => {
+    let worker = null;
+    let started = false;
+    let settled = false;
+    const finish = async (error, jpeg) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      const index = queue.indexOf(job);
+      if (index >= 0) queue.splice(index, 1);
+      if (worker) await worker.terminate().catch(() => {
+      });
+      if (started) active -= 1;
+      pump();
+      if (error) reject(error);
+      else resolve(jpeg);
+    };
+    const job = {
+      start() {
+        started = true;
+        active += 1;
+        try {
+          worker = new Worker(workerUrl, {
+            execArgv: [],
+            resourceLimits: { maxOldGenerationSizeMb: 128 }
+          });
+          worker.once("message", (message) => {
+            if (message?.error) return void finish(new Error(message.error));
+            const data = message?.bytes;
+            if (!(data instanceof Uint8Array) || data.length < 3 || data.length > LIMITS.coverMaxBytes || data[0] !== 255 || data[1] !== 216) {
+              return void finish(new Error("内置解码器未返回有效 JPEG"));
+            }
+            void finish(null, Buffer.from(data));
+          });
+          worker.once("error", (error) => void finish(error));
+          worker.once("messageerror", (error) => void finish(error));
+          worker.once("exit", (code) => void finish(new Error(`封面解码线程提前退出：${code}`)));
+          const input = Uint8Array.from(bytes);
+          worker.postMessage(input, [input.buffer]);
+        } catch (error) {
+          void finish(error);
+        }
+      }
+    };
+    const timer = setTimeout(() => void finish(new Error("内置 HEIC 解码超时")), timeoutMs);
+    queue.push(job);
+    pump();
+  });
+}
+
 // src/background/media/cover.js
 var BROWSER_IMAGE_TYPES = /* @__PURE__ */ new Set(["image/jpeg", "image/png", "image/webp", "image/gif", "image/avif"]);
 var normalizeType = (value) => String(value ?? "").split(";")[0].trim().toLowerCase();
@@ -3024,53 +3095,63 @@ var runConverter = async (converter, { input, output, scriptPath }, timeoutMs) =
     Math.max(timeoutMs, 12e3)
   );
 };
-async function convertToJpeg(bytes, { timeoutMs = MEDIA_LIMITS.coverTimeoutMs } = {}) {
+async function convertToJpeg(bytes, {
+  timeoutMs = MEDIA_LIMITS.coverTimeoutMs,
+  log = () => {
+  },
+  converters = listImageConverters()
+} = {}) {
   if (!bytes || bytes.length === 0) return null;
-  const converters = listImageConverters();
-  if (converters.length === 0) return null;
-  const ordered = lastGoodKind ? [...converters.filter((item) => item.kind === lastGoodKind), ...converters.filter((item) => item.kind !== lastGoodKind)] : converters;
+  const available = [...converters, { kind: "bundled" }];
+  const ordered = lastGoodKind ? [...available.filter((item) => item.kind === lastGoodKind), ...available.filter((item) => item.kind !== lastGoodKind)] : available;
   let dir = null;
   try {
-    dir = await mkdtemp(join7(tmpdir2(), "hongguo-cover-"));
-    const input = join7(dir, "in.heic");
-    const output = join7(dir, "out.jpg");
-    const scriptPath = join7(dir, "wic-cover.ps1");
-    await writeFile6(input, bytes, { mode: 384 });
     for (const converter of ordered) {
       try {
-        await runConverter(converter, { input, output, scriptPath }, timeoutMs);
-        const jpeg = await readFile6(output);
-        if (isJpeg(jpeg)) {
-          lastGoodKind = converter.kind;
-          return jpeg;
+        let jpeg;
+        if (converter.kind === "bundled") {
+          jpeg = await convertWithBundledDecoder(bytes, { timeoutMs });
+        } else {
+          if (!dir) dir = await mkdtemp(join7(tmpdir2(), "hongguo-cover-"));
+          const input = join7(dir, "in.heic");
+          const output = join7(dir, "out.jpg");
+          const scriptPath = join7(dir, "wic-cover.ps1");
+          await writeFile6(input, bytes, { mode: 384 });
+          await rm6(output, { force: true });
+          await runConverter(converter, { input, output, scriptPath }, timeoutMs);
+          jpeg = await readFile6(output);
         }
-      } catch {
+        if (!isJpeg(jpeg)) throw new Error("转换结果不是 JPEG");
+        lastGoodKind = converter.kind;
+        return jpeg;
+      } catch (error) {
+        const reason = String(error?.message ?? error).replace(/\s+/g, " ").slice(0, 400);
+        log(`封面转换失败 [${converter.kind}]：${reason}`);
       }
     }
-    return null;
-  } catch {
+    log("封面转换器全部失败，回退原图（面板可能无法显示）");
     return null;
   } finally {
     if (dir) await rm6(dir, { recursive: true, force: true }).catch(() => {
     });
   }
 }
-var toBrowserImage = async (bytes, contentType) => {
+var toBrowserImage = async (bytes, contentType, convert, log) => {
   const type = normalizeType(contentType);
   if (BROWSER_IMAGE_TYPES.has(type)) return { bytes, contentType: type, converted: false };
-  const jpeg = await convertToJpeg(bytes);
+  const jpeg = await convert(bytes, { log });
   if (!jpeg) return null;
   return { bytes: jpeg, contentType: "image/jpeg", converted: true };
 };
 function createCoverResolver({ cache, log = () => {
-} } = {}) {
+}, convert = convertToJpeg } = {}) {
   if (!cache) throw new TypeError("createCoverResolver 需要 cache");
   return {
     async resolve(rawUrl) {
       const url = assertCoverUrl(rawUrl);
       const cached = await cache.readCover(url.href);
       if (cached) {
-        const converted2 = await toBrowserImage(cached.bytes, cached.contentType);
+        const converted2 = await toBrowserImage(cached.bytes, cached.contentType, convert, log);
         if (!converted2) {
           return { bytes: cached.bytes, contentType: cached.contentType, converted: false, cache: "hit" };
         }
@@ -3091,7 +3172,7 @@ function createCoverResolver({ cache, log = () => {
       if (!fetched.contentType.startsWith("image/")) {
         throw new HttpError(502, "COVER_NOT_IMAGE", "封面地址返回的不是图片");
       }
-      const converted = await toBrowserImage(fetched.bytes, fetched.contentType);
+      const converted = await toBrowserImage(fetched.bytes, fetched.contentType, convert, log);
       const result = converted ?? { bytes: fetched.bytes, contentType: fetched.contentType, converted: false };
       await cache.writeCover(url.href, result.bytes, result.contentType).catch((error) => {
         log(`封面缓存写入失败：${error?.message ?? error}`);

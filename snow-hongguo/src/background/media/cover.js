@@ -1,9 +1,9 @@
 // 封面解码：红果只给 HEIC，Chromium 不能解码。
 // 封面转码的降级思路参考 J3n5en/enso-hongguo（Apache-2.0）：
 //   https://github.com/J3n5en/enso-plugins/tree/main/packages/enso.hongguo
-// 转换器按平台依次尝试：macOS 的 /usr/bin/sips -> PATH 里的 ffmpeg -> Windows 自带的 WPF/WIC。
+// 转换器按平台依次尝试：sips -> ffmpeg -> WPF/WIC -> 随包携带的 HEIC WASM 解码器。
 // 全部失败时返回 null，接口降级为原图，让面板显示占位图，绝不让封面失败拖垮接口。
-// 注意：本机 ffmpeg 6.1 没有 HEIF 解码（只能读 avif），所以 Windows 上真正兜底的是 WIC。
+// WIC 依赖额外的 HEIF/HEVC 扩展；内置解码器使封面不再依赖用户机器的编解码环境。
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
@@ -13,6 +13,7 @@ import { assertCoverUrl, fetchCoverBytes } from "../cover.js";
 import { LIMITS } from "../../shared/contract.js";
 import { HttpError } from "../errors.js";
 import { MEDIA_LIMITS } from "./limits.js";
+import { convertWithBundledDecoder } from "./cover-wasm.js";
 
 const BROWSER_IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/webp", "image/gif", "image/avif"]);
 
@@ -52,7 +53,7 @@ const findPowerShell = () => {
   return which("powershell") ?? which("pwsh");
 };
 
-/** WPF/WIC 解码 HEIC 的脚本；默认带 10 年 HEIF 扩展的 Windows 10/11 可用。 */
+/** WPF/WIC 解码 HEIC 的脚本；需要系统已安装相应的 HEIF/HEVC 扩展。 */
 const WIC_SCRIPT = [
   "param([string]$InputPath, [string]$OutputPath)",
   "$ErrorActionPreference = 'Stop'",
@@ -182,36 +183,44 @@ const runConverter = async (converter, { input, output, scriptPath }, timeoutMs)
  * @param {Buffer} bytes 原图字节
  * @returns {Promise<Buffer|null>}
  */
-export async function convertToJpeg(bytes, { timeoutMs = MEDIA_LIMITS.coverTimeoutMs } = {}) {
+export async function convertToJpeg(bytes, {
+  timeoutMs = MEDIA_LIMITS.coverTimeoutMs,
+  log = () => {},
+  converters = listImageConverters(),
+} = {}) {
   if (!bytes || bytes.length === 0) return null;
-  const converters = listImageConverters();
-  if (converters.length === 0) return null;
+  const available = [...converters, { kind: "bundled" }];
   // 上次成功的转换器先试，省掉必然失败的探测。
   const ordered = lastGoodKind
-    ? [...converters.filter((item) => item.kind === lastGoodKind), ...converters.filter((item) => item.kind !== lastGoodKind)]
-    : converters;
+    ? [...available.filter((item) => item.kind === lastGoodKind), ...available.filter((item) => item.kind !== lastGoodKind)]
+    : available;
 
   let dir = null;
   try {
-    dir = await mkdtemp(join(tmpdir(), "hongguo-cover-"));
-    const input = join(dir, "in.heic");
-    const output = join(dir, "out.jpg");
-    const scriptPath = join(dir, "wic-cover.ps1");
-    await writeFile(input, bytes, { mode: 0o600 });
     for (const converter of ordered) {
       try {
-        await runConverter(converter, { input, output, scriptPath }, timeoutMs);
-        const jpeg = await readFile(output);
-        if (isJpeg(jpeg)) {
-          lastGoodKind = converter.kind;
-          return jpeg;
+        let jpeg;
+        if (converter.kind === "bundled") {
+          jpeg = await convertWithBundledDecoder(bytes, { timeoutMs });
+        } else {
+          if (!dir) dir = await mkdtemp(join(tmpdir(), "hongguo-cover-"));
+          const input = join(dir, "in.heic");
+          const output = join(dir, "out.jpg");
+          const scriptPath = join(dir, "wic-cover.ps1");
+          await writeFile(input, bytes, { mode: 0o600 });
+          await rm(output, { force: true });
+          await runConverter(converter, { input, output, scriptPath }, timeoutMs);
+          jpeg = await readFile(output);
         }
-      } catch {
-        // 换下一个转换器；全部失败时返回 null。
+        if (!isJpeg(jpeg)) throw new Error("转换结果不是 JPEG");
+        lastGoodKind = converter.kind;
+        return jpeg;
+      } catch (error) {
+        const reason = String(error?.message ?? error).replace(/\s+/g, " ").slice(0, 400);
+        log(`封面转换失败 [${converter.kind}]：${reason}`);
       }
     }
-    return null;
-  } catch {
+    log("封面转换器全部失败，回退原图（面板可能无法显示）");
     return null;
   } finally {
     if (dir) await rm(dir, { recursive: true, force: true }).catch(() => {});
@@ -219,10 +228,10 @@ export async function convertToJpeg(bytes, { timeoutMs = MEDIA_LIMITS.coverTimeo
 }
 
 /** 已经是浏览器能解的格式就原样返回；否则尽量转 JPEG。 */
-const toBrowserImage = async (bytes, contentType) => {
+const toBrowserImage = async (bytes, contentType, convert, log) => {
   const type = normalizeType(contentType);
   if (BROWSER_IMAGE_TYPES.has(type)) return { bytes, contentType: type, converted: false };
-  const jpeg = await convertToJpeg(bytes);
+  const jpeg = await convert(bytes, { log });
   if (!jpeg) return null;
   return { bytes: jpeg, contentType: "image/jpeg", converted: true };
 };
@@ -231,7 +240,7 @@ const toBrowserImage = async (bytes, contentType) => {
  * /cover 的取图逻辑：命中缓存优先，HEIC 转成 JPEG 后落盘覆盖原缓存。
  * 转换不可用时返回原图与原 content-type（面板显示占位），不抛错。
  */
-export function createCoverResolver({ cache, log = () => {} } = {}) {
+export function createCoverResolver({ cache, log = () => {}, convert = convertToJpeg } = {}) {
   if (!cache) throw new TypeError("createCoverResolver 需要 cache");
 
   return {
@@ -239,7 +248,7 @@ export function createCoverResolver({ cache, log = () => {} } = {}) {
       const url = assertCoverUrl(rawUrl);
       const cached = await cache.readCover(url.href);
       if (cached) {
-        const converted = await toBrowserImage(cached.bytes, cached.contentType);
+        const converted = await toBrowserImage(cached.bytes, cached.contentType, convert, log);
         if (!converted) {
           return { bytes: cached.bytes, contentType: cached.contentType, converted: false, cache: "hit" };
         }
@@ -262,7 +271,7 @@ export function createCoverResolver({ cache, log = () => {} } = {}) {
         throw new HttpError(502, "COVER_NOT_IMAGE", "封面地址返回的不是图片");
       }
 
-      const converted = await toBrowserImage(fetched.bytes, fetched.contentType);
+      const converted = await toBrowserImage(fetched.bytes, fetched.contentType, convert, log);
       const result = converted ?? { bytes: fetched.bytes, contentType: fetched.contentType, converted: false };
       await cache.writeCover(url.href, result.bytes, result.contentType).catch((error) => {
         log(`封面缓存写入失败：${error?.message ?? error}`);

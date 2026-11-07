@@ -1,2 +1,5 @@
 # Keep vendored SoundTouch files byte-identical to npm sources for build validation.
 /snow-hongguo/third-party/soundtouch/** text eol=lf
+/snow-hongguo/third-party/libheif/** text eol=lf
+/third-party-sources/snow-hongguo/*.tar.gz binary
+/snow-hongguo/third-party/jpeg-js/** text eol=lf
