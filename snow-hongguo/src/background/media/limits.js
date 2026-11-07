@@ -21,8 +21,10 @@ export const MEDIA_LIMITS = {
   maxHeadBytes: 64 * 1024 * 1024,
   /** 单次 Range 的原始字节上限 3MB（base64 后 4MB，仍在 5MB 面板上限内）。 */
   blockBytes: 3 * 1024 * 1024,
-  /** 分段聚合目标 1.5MB、硬上限 2MB（base64 后 2.67MB）。 */
+  /** 分段还有约 4 秒的时间窗口；字节聚合目标 1.5MB、硬上限 2MB（base64 后 2.67MB）。 */
   segmentTargetBytes: 1536 * 1024,
+  /** 首段单独收口，缩短首播与下一集预热所需的下载量。 */
+  firstSegmentTargetBytes: 256 * 1024,
   segmentMaxBytes: 2 * 1024 * 1024,
   /** api.net.fetch 单次响应上限 5MB：base64 长度不得超过。 */
   maxBase64Bytes: 5 * 1024 * 1024,

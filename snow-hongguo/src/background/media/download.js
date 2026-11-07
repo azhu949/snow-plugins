@@ -500,6 +500,7 @@ export function createMedia({ sdk, cache, log = () => {} }) {
     const remuxer = new Remuxer(head, keyHex, {
       segmentTargetBytes: MEDIA_LIMITS.segmentTargetBytes,
       segmentMaxBytes: MEDIA_LIMITS.segmentMaxBytes,
+      firstSegmentTargetBytes: MEDIA_LIMITS.firstSegmentTargetBytes,
     });
     // 已经用主源解析过 moov 时，备用源的分段结构必须一致，否则面板手里的 init/分段会错位。
     if (job.info?.segmentCount > 0 && job.info.segmentCount !== remuxer.segmentCount) {
@@ -558,7 +559,10 @@ export function createMedia({ sdk, cache, log = () => {} }) {
               job.state = "streaming";
             }
             const from = job.have;
+            // 每一段都及时交付，不能让后续小段等到 3MB 的 Range 整体完成后才可用。
+            const nextNeed = remuxer.segments[remuxer.nextSegment]?.need;
             const to = Math.min(from + MEDIA_LIMITS.blockBytes - 1, total - 1,
+              nextNeed > from ? nextNeed - 1 : Infinity,
               job.foreground ? total - 1 : MEDIA_LIMITS.prefetchMaxBytes - 1);
             const block = await requestRange(url, from, to, { signal });
             const chunk = block.bytes.length > to - from + 1 ? block.bytes.subarray(0, to - from + 1) : block.bytes;

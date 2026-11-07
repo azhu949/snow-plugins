@@ -8,6 +8,7 @@ import {
   formatDuration,
 } from "../ui/common.js";
 import { PlayerMount } from "../player.js";
+import { EpisodePicker } from "../ui/episode-picker.js";
 import { getEpisodeProgress, markWatching, readHistory, resumeEpisodeIndex, resumePosition, upsertHistory } from "../storage.js";
 import { WatchlistControls } from "./watchlist.js";
 
@@ -499,41 +500,7 @@ export function DetailPage({ ctx, seed, onBack }) {
                 ? h("div", { className: "hg-hint" }, t("detail.truncated", { count: episodes.length }))
                 : null,
               episodes.length > 0
-                ? h(
-                    "div",
-                    { className: "hg-episodes" },
-                    episodes.map((episode, index) => {
-                      const record = getEpisodeProgress(historyEntry, episode, index);
-                      const watched = record?.completed === true;
-                      const partial = !watched && record?.positionMs > 0;
-                      const current = index === selectedIndex;
-                      const label = episode.title || t("unit.episodeShort", { number: episode.number });
-                      const titleText = [
-                        label,
-                        watched ? t("detail.watched") : "",
-                        partial ? t("detail.partialAt", { time: formatDuration(record.positionMs) }) : "",
-                        episode.playable ? "" : t("detail.unplayable"),
-                      ]
-                        .filter(Boolean)
-                        .join(" · ");
-                      return h(
-                        "button",
-                        {
-                          key: episode.id || `${index}`,
-                          type: "button",
-                          className: `hg-ep${watched ? " is-watched" : ""}${partial ? " is-partial" : ""}${current ? " is-current" : ""}`,
-                          disabled: !episode.playable,
-                          "aria-current": current ? "true" : undefined,
-                          title: titleText,
-                          onClick: () => selectEpisode(index),
-                        },
-                        h("span", { className: "hg-ep-num" }, String(episode.number)),
-                        episode.title ? h("span", { className: "hg-ep-name" }, episode.title) : null,
-                        watched || partial ? h("span", { className: "hg-ep-status" }, watched ? "✓" : formatDuration(record.positionMs)) : null,
-                        current ? h("span", { className: "hg-sr-only" }, t("detail.current")) : null
-                      );
-                    })
-                  )
+                ? h(EpisodePicker, { key: seriesId, ctx, episodes, selectedIndex, historyEntry, onSelectEpisode: selectEpisode })
                 : !state.episodesError
                   ? h("div", { className: "hg-muted" }, t("detail.noEpisodes"))
                   : null

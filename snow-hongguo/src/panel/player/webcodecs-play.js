@@ -10,8 +10,9 @@
 import { PanelError } from "../rpc.js";
 import { parseMp4, parseSegment, toMicros } from "./mp4.js";
 import { decodeBase64 } from "./util.js";
-import { createTempoRenderer } from "./tempo-audio.js";
+import { createStreamingAudio } from "./stream-audio.js";
 import { readSegments } from "./segments.js";
+import { LIMITS } from "../../shared/contract.js";
 
 import { PLAYBACK_RATES } from "../playback-prefs.js";
 export { PLAYBACK_RATES } from "../playback-prefs.js";
@@ -21,11 +22,12 @@ const MAX_DECODE_PER_TICK = 16;
 const MAX_BUFFERED_FRAMES = 40;
 // 画面落后时冻结音画时钟；恢复前按当前倍速预留一小段真实播放时间。
 const MAX_VIDEO_LAG_US = 100_000;
-const RESUME_AHEAD_MS = 80;
+const RESUME_AHEAD_MS = 400;
+// 先留出三秒实际播放时间，避免小首段在高倍速下只够播放一两秒。
+const SOURCE_AHEAD_MS = 3000;
 const AUDIO_START_DELAY_SECONDS = 0.06;
-const AUDIO_FADE_SECONDS = 0.005;
 // 本机解码的内存护栏：单段上限 2MB，128 段约 256MB；正常单集远小于此值。
-const MAX_LOCAL_SEGMENTS = 128;
+const MAX_LOCAL_SEGMENTS = LIMITS.localSegmentsMax;
 
 /**
  * @param {object} options
@@ -58,18 +60,13 @@ export const createWebCodecsPlayer = ({ canvas, getRpc, onState = () => {}, onPr
   let lastDrawnEndUs = -1;
   let decoderFlushing = false;
   let decoderFlushed = false;
-  // 音频：整集解成一条 AudioBuffer，AudioContext 的硬件时钟同时充当播放主时钟。
+  let inputComplete = false;
+  let pendingVideoTarget = null;
+  let settleLoad = null;
+  // 音频随分段增量解码，声卡时钟仍是唯一的音画时间基准。
   let audioTrack = null;
-  let audioSamples = [];
-  let activeAudioDecoder = null;
   let audioCtx = null;
-  let audioBuffer = null;
-  let audioSource = null;
-  let audioSourceGain = null;
-  let audioGain = null;
-  let tempoRenderer = null;
-  let preparingAudio = false;
-  let audioStartSeq = 0;
+  let audio = null;
   // 音源始终1倍播放预处理的保调音频；时钟把输出时间换回原始媒体时间。
   let audioClock = null;
   let audioClockActive = false;
@@ -86,6 +83,8 @@ export const createWebCodecsPlayer = ({ canvas, getRpc, onState = () => {}, onPr
     height: 0,
     decoded: 0,
     buffered: 0,
+    bufferedEndMs: 0,
+    downloadComplete: false,
     dropped: 0,
     output: 0,
     picked: 0,
@@ -128,8 +127,8 @@ export const createWebCodecsPlayer = ({ canvas, getRpc, onState = () => {}, onPr
 
   const currentMs = () => {
     if (!anchored || !playing || state.buffering) return anchorTimeMs;
-    if (audioClockActive && audioSource && audioCtx) {
-      return Math.min(state.durationMs, audioMediaMs(audibleContextTime()));
+    if (audioClockActive && audioCtx) {
+      return Math.min(state.durationMs, audio?.ended ? Infinity : audio.scheduledEndMs, audioMediaMs(audibleContextTime()));
     }
     // 没有可播放音轨或自动播放被拦截时用同倍率墙钟；恢复音频时从此位置重新对齐。
     return Math.min(state.durationMs, anchorTimeMs + Math.max(0, performance.now() - anchorWall) * playbackRate);
@@ -158,6 +157,7 @@ export const createWebCodecsPlayer = ({ canvas, getRpc, onState = () => {}, onPr
     stopAudio();
     state.error = String(error?.message || error).slice(0, 120);
     state.phase = "error";
+    settleLoad?.(error);
     log(`[wvc] 播放失败：${state.error}`);
     emit(true);
   };
@@ -195,6 +195,7 @@ export const createWebCodecsPlayer = ({ canvas, getRpc, onState = () => {}, onPr
     decoderFlushing = false;
     decoderFlushed = false;
     nextIndex = 0;
+    pendingVideoTarget = !inputComplete && targetMs >= state.bufferedEndMs ? targetMs : null;
     // 按解码顺序提交，但只从目标显示时间之前最近的关键帧开始。
     for (let index = 0; index < samples.length; index += 1) {
       if (samples[index].key && samples[index].ctsUs <= targetMs * 1000) nextIndex = index;
@@ -203,6 +204,11 @@ export const createWebCodecsPlayer = ({ canvas, getRpc, onState = () => {}, onPr
 
   const pump = () => {
     if (disposed || state.phase === "error" || !decodeConfig || decoderFlushing || decoderFlushed) return;
+    if (pendingVideoTarget !== null) {
+      if (!inputComplete && pendingVideoTarget >= state.bufferedEndMs) return;
+      resetVideoAt(pendingVideoTarget);
+    }
+    if (!samples.length) return;
     const dec = ensureDecoder();
     let count = 0;
     while (nextIndex < samples.length && count < MAX_DECODE_PER_TICK) {
@@ -221,7 +227,7 @@ export const createWebCodecsPlayer = ({ canvas, getRpc, onState = () => {}, onPr
       state.decoded += 1;
       count += 1;
     }
-    if (nextIndex === samples.length) {
+    if (inputComplete && nextIndex === samples.length) {
       // HEVC 的尾部重排序帧必须 flush 出来，否则临近片尾可能一直等不到画面。
       decoderFlushing = true;
       void dec.flush().then(() => {
@@ -281,6 +287,8 @@ export const createWebCodecsPlayer = ({ canvas, getRpc, onState = () => {}, onPr
 
   const readyToResume = (timeMs) => {
     if (!videoCovers(timeMs)) return false;
+    const sourceTarget = Math.min(state.durationMs, timeMs + SOURCE_AHEAD_MS * playbackRate);
+    if (!inputComplete && state.bufferedEndMs + 1 < sourceTarget) return false;
     const targetUs = Math.min(state.durationMs, timeMs + RESUME_AHEAD_MS * playbackRate) * 1000;
     let endUs = lastDrawnEndUs;
     let coveredFrames = 0;
@@ -301,19 +309,22 @@ export const createWebCodecsPlayer = ({ canvas, getRpc, onState = () => {}, onPr
       const at = currentMs();
       draw(at);
       pump();
+      audio?.update();
       if (playing) {
         const videoBehind = lastDrawnTs < 0 || at * 1000 > lastDrawnEndUs + MAX_VIDEO_LAG_US;
         const tailPending = at >= state.durationMs && !videoCovers(at);
-        if (!state.buffering && (videoBehind || tailPending)) {
+        const audioBehind = audioClockActive && (audio.missed || (!audio.ended && at >= audio.scheduledEndMs));
+        if (!state.buffering && (videoBehind || tailPending || audioBehind)) {
           anchorTimeMs = at;
           state.buffering = true;
           stopAudio();
         }
-        if (state.buffering && !preparingAudio && readyToResume(at)) {
-          // 音频预处理期间保持buffering，不让墙钟先行，也不在每帧重复创建Worker。
-          void startAudio(at);
+        if (state.buffering) {
+          // 音频预处理与视频预热并行，但两边都攒够连续缓冲才启动时钟。
+          const audioReady = !audio || audio.prepare(at, playbackRate);
+          if (audioReady && readyToResume(at)) startAudio(at);
         }
-        if (!state.buffering && at >= state.durationMs) {
+        if (inputComplete && !state.buffering && at >= state.durationMs) {
           playing = false;
           anchorTimeMs = state.durationMs;
           state.phase = "ended";
@@ -330,96 +341,34 @@ export const createWebCodecsPlayer = ({ canvas, getRpc, onState = () => {}, onPr
       fail(error);
     }
   };
-
   const stopAudio = () => {
-    // 暂停、seek、连续改速、切集都作废异步音频任务，旧结果不能重新发声。
-    audioStartSeq += 1;
-    preparingAudio = false;
-    tempoRenderer?.cancel();
+    audio?.cancel();
     audioClockActive = false;
     audioClock = null;
-    const source = audioSource;
-    const gain = audioSourceGain;
-    audioSource = null;
-    audioSourceGain = null;
-    if (!source) return;
-    try {
-      if (!disposed && audioCtx?.state === "running" && gain) {
-        // 极短淡出消除暂停/切速时硬截波形的爆音；新音源在独立的确定时刻启动。
-        const now = audioCtx.currentTime;
-        gain.gain.cancelAndHoldAtTime(now);
-        gain.gain.linearRampToValueAtTime(0, now + AUDIO_FADE_SECONDS);
-        source.stop(now + AUDIO_FADE_SECONDS);
-      } else {
-        source.stop();
-        source.disconnect();
-        gain?.disconnect();
-      }
-    } catch {
-      source.disconnect();
-      gain?.disconnect();
-    }
   };
 
-  const startAudio = async (fromMs) => {
-    stopAudio();
-    const seq = audioStartSeq;
+  const startAudio = (fromMs) => {
     const at = Math.max(0, Math.min(Number(fromMs) || 0, state.durationMs));
-    const rate = playbackRate;
     anchorTimeMs = at;
     anchorWall = performance.now();
     if (disposed || !playing) return;
-    if (!audioCtx || !audioBuffer || !audioGain || at >= audioBuffer.duration * 1000 || at >= state.durationMs) {
+    if (!audio || (audio.complete && at >= audio.bufferedMs) || at >= state.durationMs) {
       state.buffering = false;
       return;
     }
-    const context = audioCtx;
-    state.buffering = true;
-    preparingAudio = true;
-    void context.resume().catch(() => {});
-    emit(true);
-    if (disposed || seq !== audioStartSeq || !playing) return;
-    try {
-      tempoRenderer ??= createTempoRenderer(context, audioBuffer);
-      const buffer = await tempoRenderer.getBuffer(rate);
-      if (disposed || seq !== audioStartSeq || !playing || context !== audioCtx) return;
-      preparingAudio = false;
-      anchorTimeMs = at;
-      anchorWall = performance.now();
-      // 被自动播放策略挂起时继续使用同倍率墙钟，用户手势恢复后再对齐音频。
-      if (context.state !== "running") {
-        state.buffering = false;
-        emit(true);
-        return;
-      }
-      const quantum = 128 / context.sampleRate;
-      const when = Math.ceil((context.currentTime + AUDIO_START_DELAY_SECONDS) / quantum) * quantum;
-      // 保调音频的长度是原长/rate：offset与时钟必须使用同一个倍率换算，不能二次加速。
-      const offset = Math.min(at / 1000 / rate, buffer.duration);
-      const source = context.createBufferSource();
-      const gain = context.createGain();
-      source.buffer = buffer;
-      source.playbackRate.value = 1;
-      gain.gain.setValueAtTime(0, when);
-      gain.gain.linearRampToValueAtTime(1, when + AUDIO_FADE_SECONDS);
-      source.connect(gain);
-      gain.connect(audioGain);
-      source.onended = () => {
-        source.disconnect();
-        gain.disconnect();
-      };
-      audioSource = source;
-      audioSourceGain = gain;
-      source.start(when, offset);
-      audioClock = { contextTime: when, mediaMs: at, rate };
-      audioClockActive = true;
+    void audioCtx.resume().catch(() => {});
+    // 自动播放被宿主挂起时沿用墙钟；用户手势恢复后重新对齐声音。
+    if (audioCtx.state !== "running") {
       state.buffering = false;
-      emit(true);
-    } catch (error) {
-      if (disposed || seq !== audioStartSeq) return;
-      preparingAudio = false;
-      if (error?.name !== "AbortError") fail(error);
+      return;
     }
+    const quantum = 128 / audioCtx.sampleRate;
+    const when = Math.ceil((audioCtx.currentTime + AUDIO_START_DELAY_SECONDS) / quantum) * quantum;
+    if (!audio.start(when)) return;
+    audioClock = { contextTime: when, mediaMs: at, rate: playbackRate };
+    audioClockActive = true;
+    state.buffering = false;
+    emit(true);
   };
 
   /** 从当前媒体位置切换到保调音频；准备完成前冻结音画，不把旧时段按新速度重算。 */
@@ -441,7 +390,12 @@ export const createWebCodecsPlayer = ({ canvas, getRpc, onState = () => {}, onPr
   const syncAudioState = () => {
     if (disposed || !audioCtx) return;
     if (audioCtx.state === "running") {
-      if (playing && !state.buffering && !audioClockActive) void startAudio(currentMs());
+      if (playing && !state.buffering && !audioClockActive) {
+        const at = currentMs();
+        stopAudio();
+        anchorTimeMs = at;
+        state.buffering = true;
+      }
       return;
     }
     if (!audioClockActive) return;
@@ -457,156 +411,19 @@ export const createWebCodecsPlayer = ({ canvas, getRpc, onState = () => {}, onPr
     void audioCtx.resume().catch(() => {});
   };
 
-  /**
-   * 整集音频先全解成一条 AudioBuffer。
-   * 一集 720p 约 43MB Float32，换来 seek/暂停都不必重新解码，实现也简单。
-   */
-  const prepareAudio = async () => {
-    if (!audioTrack || !audioSamples.length) {
-      onProgress("audio: 无音轨");
-      return;
-    }
-    if (typeof AudioDecoder === "undefined") {
-      onProgress("audio: 无 AudioDecoder");
-      return;
-    }
-    const sampleRate = Number(audioTrack.sampleRate) || 44100;
-    const channels = Math.max(1, Number(audioTrack.channels) || 2);
-    const chunks = [];
-    let total = 0;
-    let failure = "";
-    const audioDecoder = new AudioDecoder({
-      output: (data) => {
-        try {
-          // 被切集销毁的解码输出只释放，不再分配整集 PCM。
-          if (disposed) return;
-          const count = data.numberOfFrames;
-          const planes = [];
-          for (let channel = 0; channel < data.numberOfChannels; channel += 1) {
-            const plane = new Float32Array(count);
-            data.copyTo(plane, { planeIndex: channel, format: "f32-planar" });
-            planes.push(plane);
-          }
-          chunks.push({ planes, frames: count });
-          total += count;
-        } catch (error) {
-          failure = String(error?.message || error).slice(0, 80);
-        } finally {
-          data.close();
-        }
-      },
-      error: (error) => {
-        failure = String(error?.message || error).slice(0, 80);
-      },
-    });
-    activeAudioDecoder = audioDecoder;
-    try {
-      audioDecoder.configure({ codec: audioTrack.codec, sampleRate, numberOfChannels: channels });
-      for (const sample of audioSamples) {
-        audioDecoder.decode(
-          new EncodedAudioChunk({ type: "key", timestamp: sample.ctsUs, data: sample.data })
-        );
-      }
-      await audioDecoder.flush();
-    } catch (error) {
-      failure = String(error?.message || error).slice(0, 80);
-    } finally {
-      try {
-        audioDecoder.close();
-      } catch {
-        // destroy 可能已关闭。
-      }
-      if (activeAudioDecoder === audioDecoder) activeAudioDecoder = null;
-    }
-
-    // 切集销毁期间 flush 仍可能完成，不要为旧实例重新创建音频上下文。
-    if (disposed) return;
-    if (failure || !total) {
-      onProgress(`audio 失败: ${failure || "无输出"}`);
-      return;
-    }
-
-    try {
-      audioCtx = new AudioContext({ sampleRate });
-      audioCtx.addEventListener("statechange", syncAudioState);
-      const targetRate = Number(audioCtx.sampleRate) || sampleRate;
-      audioGain = audioCtx.createGain();
-      audioGain.gain.value = volumeLevel;
-      audioGain.connect(audioCtx.destination);
-
-      // AAC priming 延迟按轨道 timescale 换算成采样数，不能假定 timescale 总等于采样率。
-      const primingFrames = Math.round((Math.max(0, Number(audioTrack.mediaTime) || 0) / (Number(audioTrack.timescale) || sampleRate)) * sampleRate);
-      const skip = Math.min(primingFrames, total);
-      const usable = Math.max(0, total - skip);
-      const source = [];
-      for (let channel = 0; channel < channels; channel += 1) {
-        source.push(new Float32Array(Math.max(1, usable)));
-      }
-      let consumed = 0;
-      let written = 0;
-      for (const chunk of chunks) {
-        const drop = Math.max(0, skip - consumed);
-        const count = Math.min(Math.max(0, chunk.frames - drop), Math.max(0, usable - written));
-        if (count > 0) {
-          for (let channel = 0; channel < channels; channel += 1) {
-            const plane = chunk.planes[Math.min(channel, chunk.planes.length - 1)];
-            if (!plane) continue;
-            source[channel].set(plane.subarray(drop, drop + count), written);
-          }
-          written += count;
-        }
-        consumed += chunk.frames;
-      }
-
-      // 设备采样率和轨道采样率不一致时必须重采样：
-      // 直接把 44.1k 数据塞进 48k 的 AudioBuffer 会让整条音轨快 8.8%，越播越不对口型。
-      const outFrames = Math.max(1, Math.round((written / sampleRate) * targetRate));
-      audioBuffer = audioCtx.createBuffer(channels, outFrames, targetRate);
-      for (let channel = 0; channel < channels; channel += 1) {
-        const input = source[channel];
-        const output = audioBuffer.getChannelData(channel);
-        if (targetRate === sampleRate) {
-          output.set(input.subarray(0, Math.min(outFrames, input.length)));
-          continue;
-        }
-        const step = sampleRate / targetRate;
-        for (let index = 0; index < outFrames; index += 1) {
-          const position = index * step;
-          const base = Math.floor(position);
-          const fraction = position - base;
-          const a = input[base] || 0;
-          const b = input[Math.min(base + 1, Math.max(0, written - 1))] || 0;
-          output[index] = a + (b - a) * fraction;
-        }
-      }
-
-      onProgress(
-        `audio ok: ${channels}ch ${sampleRate}Hz ctx=${targetRate}Hz ${(outFrames / targetRate).toFixed(1)}s skip=${skip}`
-      );
-    } catch (error) {
-      onProgress(`audio 初始化失败: ${String(error?.message || error).slice(0, 80)}`);
-      audioCtx?.removeEventListener("statechange", syncAudioState);
-      void audioCtx?.close().catch(() => {});
-      audioCtx = null;
-      audioGain = null;
-      audioBuffer = null;
-    }
-  };
-
   const stopLoop = () => {
     if (rafId) cancelAnimationFrame(rafId);
     rafId = 0;
   };
 
-  const load = async ({ episodeId, quality, segmentCount, initPayload: preparedInit, resumeMs = 0 }) => {
+
+  const load = async ({ episodeId, quality, segmentCount, initPayload: preparedInit, durationMs = 0, resumeMs = 0 }) => {
     if (disposed) return;
     const startedAt = performance.now();
     const rpc = getRpc();
     state.phase = "loading";
     state.error = "";
     emit(true);
-    onProgress(`load: init q=${quality}`);
-
     const initPayload = preparedInit || await rpc.getStreamInit(episodeId, quality);
     if (disposed) return;
     const initBytes = decodeBase64(initPayload?.base64);
@@ -615,94 +432,80 @@ export const createWebCodecsPlayer = ({ canvas, getRpc, onState = () => {}, onPr
     track = parsed.video;
     audioTrack = parsed.audio;
     if (!track) throw new PanelError("PROTOCOL", "init 段没有视频轨");
-    onProgress(`init ok: ${track.codec} ${track.width}x${track.height} desc=${track.description?.length ?? 0}B`);
-
+    const declared = Math.floor(Number(segmentCount) || 0);
+    if (declared <= 0) throw new PanelError("PROTOCOL", "服务端未返回分片数量");
+    if (declared > MAX_LOCAL_SEGMENTS) throw new PanelError("SEGMENT_LIMIT", "本集分段数量超过本机解码上限 " + MAX_LOCAL_SEGMENTS);
+    state.durationMs = Math.max(0, Number(durationMs) || parsed.durationMs || 0);
+    if (!state.durationMs) throw new PanelError("PROTOCOL", "服务端未返回有效时长");
     canvas.width = track.width || 854;
     canvas.height = track.height || 480;
     state.width = canvas.width;
     state.height = canvas.height;
     ctx.fillStyle = "#000";
     ctx.fillRect(0, 0, canvas.width, canvas.height);
+    decodeConfig = {
+      codec: track.codec, description: track.description,
+      codedWidth: canvas.width, codedHeight: canvas.height, hardwareAcceleration: "prefer-hardware",
+    };
+    anchorTimeMs = Math.max(0, Math.min(Number(resumeMs) || 0, state.durationMs));
+    anchored = true;
+    audio = createStreamingAudio({ track: audioTrack, onError: fail, onStateChange: syncAudioState });
+    audioCtx = audio?.context || null;
+    audio?.setVolume(volumeLevel);
+    resetVideoAt(anchorTimeMs);
 
-    // 以服务端分片数为准；超过本机解码上限时明确报错，不再静默截断。
-    const declared = Math.floor(Number(segmentCount) || 0);
-    if (declared <= 0) throw new PanelError("PROTOCOL", "服务端未返回分片数量");
-    if (declared > MAX_LOCAL_SEGMENTS) {
-      throw new PanelError("SEGMENT_LIMIT", `本集共 ${declared} 段，超过本机解码上限 ${MAX_LOCAL_SEGMENTS} 段`);
-    }
-    // 最多三段同时跨进程读取，按原顺序解析；整集样本仍用于保调音频和任意位置 seek。
-    samples = [];
-    audioSamples = [];
-    const total = declared;
-    for await (const { seq, bytes } of readSegments({ rpc, episodeId, quality, count: total, cancelled: () => disposed })) {
-      const buckets = parseSegment(bytes, parsed.tracks, parsed.trex);
-      const list = buckets.get(track.id) || [];
-      const videoShift = Number(track.mediaTime) || 0;
-      for (const sample of list) {
-        samples.push({
-          // 减去 elst 的 media_time，把各轨对齐到同一条时间轴。
-          ctsUs: toMicros(Math.max(0, sample.time + sample.cts - videoShift), track.timescale),
-          durationUs: toMicros(sample.duration, track.timescale),
-          key: sample.key,
-          data: bytes.subarray(sample.offset, sample.offset + sample.size),
-        });
-      }
-      if (audioTrack) {
-        const audioList = buckets.get(audioTrack.id) || [];
-        for (const sample of audioList) {
-          audioSamples.push({
-            ctsUs: toMicros(sample.time, audioTrack.timescale),
+    // load 只等首段。后续读取独立推进，失败仍归属当前实例；切集/关闭后停止继续排请求。
+    const ready = new Promise((resolve, reject) => {
+      settleLoad = (error) => { settleLoad = null; if (error) reject(error); else resolve(); };
+    });
+    const consume = async () => {
+      for await (const { seq, bytes } of readSegments({
+        rpc, episodeId, quality, count: declared, cancelled: () => disposed || state.phase === "error",
+      })) {
+        const buckets = parseSegment(bytes, parsed.tracks, parsed.trex);
+        const shift = Number(track.mediaTime) || 0;
+        for (const sample of buckets.get(track.id) || []) {
+          samples.push({
+            ctsUs: toMicros(Math.max(0, sample.time + sample.cts - shift), track.timescale),
+            durationUs: toMicros(sample.duration, track.timescale), key: sample.key,
             data: bytes.subarray(sample.offset, sample.offset + sample.size),
           });
         }
+        inputComplete = seq === declared;
+        state.downloadComplete = inputComplete;
+        const timestamps = [...new Set(samples.map((sample) => sample.ctsUs))].sort((a, b) => a - b);
+        firstVideoTimeUs = timestamps[0] || 0;
+        const endUs = samples.reduce((end, sample) => Math.max(end, sample.ctsUs + sample.durationUs), 0);
+        state.bufferedEndMs = endUs / 1000;
+        if (inputComplete) {
+          if (!samples.length) throw new PanelError("PROTOCOL", "没有解析到视频样本");
+          state.durationMs = Math.round(endUs / 1000);
+          anchorTimeMs = Math.min(anchorTimeMs, state.durationMs);
+        }
+        timestamps.forEach((timestamp, index) => videoFrameEnds.set(timestamp, timestamps[index + 1] ?? endUs));
+        if (lastDrawnTs >= 0) lastDrawnEndUs = videoFrameEnds.get(lastDrawnTs) ?? lastDrawnEndUs;
+        if (audioTrack) audio?.append((buckets.get(audioTrack.id) || []).map((sample) => ({
+          ctsUs: toMicros(sample.time, audioTrack.timescale),
+          durationUs: toMicros(sample.duration, audioTrack.timescale),
+          data: bytes.subarray(sample.offset, sample.offset + sample.size),
+        })));
+        if (inputComplete) audio?.finish();
+        if (disposed || state.phase === "error") return;
+        if (state.phase === "loading" && samples.length) {
+          resetVideoAt(anchorTimeMs);
+          state.phase = "ready";
+          previewing = true;
+          pump();
+          rafId = requestAnimationFrame(tick);
+          log("[wvc] 首段就绪 " + track.codec + " 准备=" + Math.round(performance.now() - startedAt) + "ms");
+          settleLoad?.();
+        } else if (playing || previewing) pump();
+        onProgress("seg " + seq + "/" + declared + ": " + bytes.length + "B");
+        emit(true);
       }
-      state.phase = "loading";
-      state.durationMs = 0;
-      emit(true);
-      onProgress(`seg ${seq}/${total}: ${bytes.length}B samples=${samples.length}`);
-    }
-
-    if (disposed) return;
-    if (!samples.length) throw new PanelError("PROTOCOL", "没有解析到视频样本");
-
-    // 解码顺序不一定是显示顺序，片尾取所有帧的最大显示结束时间。
-    state.durationMs = Math.round(samples.reduce((end, sample) => Math.max(end, sample.ctsUs + sample.durationUs), 0) / 1000);
-    // 帧持续显示到源轨的下一显示时间；真实时间戳空隙不是解码欠帧，不能因此永久缓冲。
-    const timestamps = [...new Set(samples.map((sample) => sample.ctsUs))].sort((a, b) => a - b);
-    firstVideoTimeUs = timestamps[0];
-    videoFrameEnds.clear();
-    timestamps.forEach((timestamp, index) => {
-      videoFrameEnds.set(timestamp, timestamps[index + 1] ?? state.durationMs * 1000);
-    });
-
-    decodeConfig = {
-      codec: track.codec,
-      description: track.description,
-      codedWidth: canvas.width,
-      codedHeight: canvas.height,
-      // 有硬件解码就走硬件，没有会自动回退软件解码；高倍速下仍以音画同步优先。
-      hardwareAcceleration: "prefer-hardware",
     };
-    onProgress(`cfg ${track.codec} keys=${samples.filter((sample) => sample.key).length}`);
-
-    anchorTimeMs = Math.max(0, Math.min(Number(resumeMs) || 0, state.durationMs));
-    anchored = true;
-    // 续播与切清晰度直接从目标附近预热，不让旧起点的画面追赶已经续播的声音。
-    resetVideoAt(anchorTimeMs);
-    pump();
-    // 视频解码与音频准备并行；首帧是否就绪由 tick 的缓冲状态判断，不固定睡眠。
-    await prepareAudio();
-    if (disposed || state.phase === "error") return;
-    draw(anchorTimeMs);
-    pump();
-
-    anchorWall = performance.now();
-    state.phase = "ready";
-    previewing = true;
-    rafId = requestAnimationFrame(tick);
-    log(`[wvc] 就绪 ${track.codec} ${canvas.width}x${canvas.height} 样本=${samples.length} 时长=${state.durationMs}ms 准备=${Math.round(performance.now() - startedAt)}ms`);
-    onProgress(`ready ${samples.length} 帧 / ${state.durationMs}ms`);
-    emit(true);
+    void consume().catch((error) => { if (!disposed) fail(error); });
+    return ready;
   };
 
   const play = () => {
@@ -762,24 +565,11 @@ export const createWebCodecsPlayer = ({ canvas, getRpc, onState = () => {}, onPr
     state.buffering = false;
     stopLoop();
     stopAudio();
-    tempoRenderer?.destroy();
-    tempoRenderer = null;
-    try {
-      audioCtx?.removeEventListener?.("statechange", syncAudioState);
-      void audioCtx?.close().catch(() => {});
-    } catch {
-      // 忽略。
-    }
+
+    settleLoad?.();
+    audio?.destroy();
+    audio = null;
     audioCtx = null;
-    audioGain = null;
-    audioBuffer = null;
-    audioSamples = [];
-    try {
-      activeAudioDecoder?.close();
-    } catch {
-      // 已关闭时忽略。
-    }
-    activeAudioDecoder = null;
     clearFrames();
     videoFrameEnds.clear();
     try {
@@ -794,7 +584,7 @@ export const createWebCodecsPlayer = ({ canvas, getRpc, onState = () => {}, onPr
 
   const setVolume = (value) => {
     volumeLevel = Math.max(0, Math.min(1, Number(value) || 0));
-    if (audioGain) audioGain.gain.value = volumeLevel;
+    audio?.setVolume(volumeLevel);
     return volumeLevel;
   };
 

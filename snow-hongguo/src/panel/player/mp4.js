@@ -3,6 +3,7 @@
 // 宿主 CSP 没有 media-src，<video> 无法加载 blob:/data:/http 媒体，
 // 因此播放必须绕开媒体元素：自己解封装，把样本交给 VideoDecoder / AudioDecoder。
 // 这里只负责「字节 -> box 树 -> 轨道与样本」，不涉及解码与渲染，方便单测与复用。
+import { parseEsds } from "../../shared/aac.js";
 
 const textAt = (bytes, at) =>
   String.fromCharCode(bytes[at] || 0, bytes[at + 1] || 0, bytes[at + 2] || 0, bytes[at + 3] || 0);
@@ -60,7 +61,7 @@ const readEntryCodec = (bytes, entry) => {
   if (!config) return { configType: "", description: null };
   return {
     configType: config.type,
-    // WebCodecs 的 description 要的是配置 box 的内容（不含 8 字节 box 头）。
+    // 视频配置直接取 box 内容；esds 会在 readTracks 中继续提取内部的 ASC。
     description: bytes.subarray(config.bodyStart, config.bodyEnd),
   };
 };
@@ -86,56 +87,6 @@ const avcCodecString = (bytes, description, sampleType) => {
   if (!description || description.length < 4) return sampleType;
   const hex = (value) => value.toString(16).padStart(2, "0");
   return `${sampleType}.${hex(description[1])}${hex(description[2])}${hex(description[3])}`;
-};
-
-/**
- * esds -> mp4a.OO.A    例如 mp4a.40.2（AAC-LC）。
- * AudioDecoder 不接受裸 "mp4a"，必须带上 objectTypeIndication 与 audioObjectType。
- */
-const esdsCodecString = (bytes, description, sampleType) => {
-  const data = description || new Uint8Array(0);
-  let index = 4; // 跳过 version/flags
-  let objectType = 0x40;
-  let audioObjectType = 2;
-  const readLength = () => {
-    let length = 0;
-    for (let count = 0; count < 4 && index < data.length; count += 1) {
-      const value = data[index];
-      index += 1;
-      length = (length << 7) | (value & 0x7f);
-      if (!(value & 0x80)) break;
-    }
-    return length;
-  };
-  while (index + 1 < data.length) {
-    const tag = data[index];
-    index += 1;
-    const length = readLength();
-    const end = Math.min(data.length, index + length);
-    if (tag === 0x03) {
-      // ES_Descriptor：ES_ID(2) + flags(1)，再按 flags 跳过可选字段
-      const flags = data[index + 2] || 0;
-      index += 3;
-      if (flags & 0x80) index += 2;
-      if (flags & 0x40) {
-        const urlLength = data[index] || 0;
-        index += 1 + urlLength;
-      }
-      if (flags & 0x20) index += 2;
-      continue;
-    }
-    if (tag === 0x04) {
-      objectType = data[index] || 0x40;
-      index = end;
-      continue;
-    }
-    if (tag === 0x05) {
-      audioObjectType = (data[index] || 0x12) >> 3;
-      break;
-    }
-    index = end;
-  }
-  return `${sampleType}.${objectType.toString(16)}.${audioObjectType}`;
 };
 
 const readSampleTable = (bytes, stbl) => {
@@ -270,12 +221,14 @@ const readTracks = (bytes, moov) => {
     const entries = readBoxes(bytes, stsd.bodyStart + 8, stsd.bodyEnd);
     const entry = entries[0];
     if (!entry) continue;
-    const { configType, description } = readEntryCodec(bytes, entry);
+    let { configType, description } = readEntryCodec(bytes, entry);
     const sampleType = entry.type;
     let codec = sampleType;
     if (configType === "hvcC") codec = hevcCodecString(bytes, description, sampleType);
     else if (configType === "avcC") codec = avcCodecString(bytes, description, sampleType);
-    else if (configType === "esds") codec = esdsCodecString(bytes, description, sampleType);
+    else if (configType === "esds") {
+      ({ codec, description } = parseEsds(description, sampleType));
+    }
 
     const width = ENTRY_PREFIX[sampleType] ? u16(bytes, entry.bodyStart + 24) : 0;
     const height = ENTRY_PREFIX[sampleType] ? u16(bytes, entry.bodyStart + 26) : 0;
@@ -310,10 +263,15 @@ const readTracks = (bytes, moov) => {
 export const parseMp4 = (bytes) => {
   const top = readBoxes(bytes);
   const moov = childOf(top, "moov");
+  const mvhd = moov && childOf(readBoxes(bytes, moov.bodyStart, moov.bodyEnd), "mvhd");
+  const version = mvhd ? bytes[mvhd.bodyStart] : 0;
+  const movieTimescale = mvhd ? u32(bytes, mvhd.bodyStart + (version === 1 ? 20 : 12)) : 0;
+  const movieDuration = !mvhd ? 0 : version === 1 ? u64(bytes, mvhd.bodyStart + 24) : u32(bytes, mvhd.bodyStart + 16);
   const tracks = moov ? readTracks(bytes, moov) : [];
   const withSamples = tracks.filter((track) => track.samples.length > 0);
   return {
     tracks,
+    durationMs: movieTimescale ? Math.round(movieDuration / movieTimescale * 1000) : 0,
     video: tracks.find((track) => track.kind === "video") || null,
     audio: tracks.find((track) => track.kind === "audio") || null,
     playable: withSamples,

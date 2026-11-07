@@ -164,8 +164,7 @@ export function createPlayer(slot, initialProps) {
   // 本机解码能力：两个解码器都在才算可用；缺一个就只能走兼容路径。
   const canDecodeLocally = () =>
     typeof VideoDecoder !== "undefined" && typeof AudioDecoder !== "undefined";
-  // 本次会话里本机解码失败过就不再自动重试，避免每切一集都撞一次失败；
-  // 用户在覆盖层点「直接播放」时清掉它，重新给一次机会。
+  // 当前集失败后避免自动重试循环；换集或点「直接播放」时重新尝试自己的音视频配置。
   let wvcBlocked = false;
   // 本机解码的载入序号：连续切集时用它作废上一轮还没跑完的载入，避免两个解码器同时出声。
   let wvcSeq = 0;
@@ -1051,8 +1050,14 @@ export function createPlayer(slot, initialProps) {
 
   const syncBuffered = () => {
     if (wvc) {
-      // 直连播放是整集预取，没有 MSE 的 buffered ranges，缓冲条留空。
-      buffered.replaceChildren();
+      const snapshot = wvc.getState();
+      const end = snapshot.downloadComplete ? snapshot.durationMs : snapshot.bufferedEndMs;
+      if (end > 0 && snapshot.durationMs > 0) {
+        const node = make("span", "hg-player-buffered-range");
+        node.style.left = "0%";
+        node.style.width = `${clamp(end / snapshot.durationMs * 100, 0, 100)}%`;
+        buffered.replaceChildren(node);
+      } else buffered.replaceChildren();
       return;
     }
     const duration = durationOf();
@@ -1235,7 +1240,7 @@ export function createPlayer(slot, initialProps) {
         label: t("player.playDirect"),
         kind: "direct",
         primary: true,
-        // 用户主动重试：清掉本次会话的失败标记，重新走一遍本机解码。
+        // 用户主动重试：清掉当前集的失败标记，重新走一遍本机解码。
         onClick: () => {
           wvcBlocked = false;
           void playWebCodecs();
@@ -1296,7 +1301,7 @@ export function createPlayer(slot, initialProps) {
         label: t("player.playDirect"),
         kind: "direct",
         primary: true,
-        // 用户主动重试：清掉本次会话的失败标记，重新走一遍本机解码。
+        // 用户主动重试：清掉当前集的失败标记，重新走一遍本机解码。
         onClick: () => {
           wvcBlocked = false;
           void playWebCodecs();
@@ -1684,7 +1689,7 @@ export function createPlayer(slot, initialProps) {
   };
 
   /**
-   * 本机解码失败后的唯一一次回退：标记本次会话不再自动重试，按原有载入逻辑交给兼容路径。
+   * 本机解码失败后的唯一一次回退：当前集不再自动重试，按原有载入逻辑交给兼容路径。
    * 画面上只留两行中文说明，不暴露技术细节。
    */
   const fallbackFromWebCodecs = () => {
@@ -1725,6 +1730,8 @@ export function createPlayer(slot, initialProps) {
     }
     let player = null;
     stopWebCodecs();
+    // 旧集的兼容探测可能还在等接口；退出它，避免迟到结果盖住新集的本机画面。
+    engine.stop();
     // stopWebCodecs 已经把序号加过一，这里记下本轮的身份，后续每步都先核对。
     const seq = wvcSeq;
     endedReported = false;
@@ -1812,6 +1819,7 @@ export function createPlayer(slot, initialProps) {
         episodeId,
         quality,
         segmentCount,
+        durationMs: info.durationMs,
         initPayload,
         resumeMs,
       });
@@ -1846,6 +1854,7 @@ export function createPlayer(slot, initialProps) {
     // 换集时先收掉 WebCodecs 播放层，避免旧集的解码器继续画在画面上。
     stopWebCodecs();
     if (disposed) return;
+    wvcBlocked = false;
     hideOverlay();
     // 换集后上一集的失败提示不再适用。
     hideNotice();

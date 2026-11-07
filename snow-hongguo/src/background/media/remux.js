@@ -6,10 +6,12 @@
 // 本文件在其基础上改写为 Snow App 插件产物：
 //   1) 纯 ESM 导出，去掉 Enso 渲染层依赖；
 //   2) moov 可能超出首个 range：新增 scanHead()，下载层据此按需追加；
-//   3) 分段改成「GOP 切片 -> 1-2MB 聚合」，segmentCount 在解析 moov 后即可确定；
+//   3) 分段按 GOP 与播放时长聚合、限制字节数，segmentCount 在解析 moov 后即可确定；
 //   4) 增加 codec 字符串（hvc1 / avc1 / mp4a）与 durationMs，供面板拼 MSE 类型；
 //   5) 加密信息缺失时抛类型化错误，不再静默返回未解密样本。
 import { createDecipheriv } from "node:crypto";
+import { LIMITS } from "../../shared/contract.js";
+import { parseEsds } from "../../shared/aac.js";
 
 /** 单次随机读允许覆盖的区间上限：超过它说明样本在文件里零散分布，退回逐样本读取。 */
 const MAX_RANDOM_READ_BYTES = 8 * 1024 * 1024;
@@ -133,51 +135,10 @@ export function avcCodecString(sampleEntryType, avcC) {
   return `${sampleEntryType}.${hex(avcC[1])}${hex(avcC[2])}${hex(avcC[3])}`;
 }
 
-const readDescriptor = (buf, offset) => {
-  const tag = buf[offset];
-  let cursor = offset + 1;
-  let size = 0;
-  for (let index = 0; index < 4; index += 1) {
-    const byte = buf[cursor];
-    cursor += 1;
-    size = (size << 7) | (byte & 0x7f);
-    if (!(byte & 0x80)) break;
-  }
-  return { tag, start: cursor, end: cursor + size };
-};
-
 /** esds 里取 AudioSpecificConfig 的 audioObjectType，拼成 mp4a.40.2 之类的字符串。 */
 export function aacCodecString(sampleEntryType, esds) {
   try {
-    let cursor = 4; // esds 是 FullBox，跳过 version/flags
-    let descriptor = readDescriptor(esds, cursor);
-    if (descriptor.tag === 0x03) {
-      const flags = esds[descriptor.start + 2];
-      cursor = descriptor.start + 3;
-      if (flags & 0x80) cursor += 2;
-      if (flags & 0x40) cursor += 1 + esds[cursor];
-      if (flags & 0x20) cursor += 2;
-      descriptor = readDescriptor(esds, cursor);
-    }
-    if (descriptor.tag !== 0x04) return sampleEntryType;
-    const objectType = esds[descriptor.start];
-    cursor = descriptor.start + 13;
-    descriptor = readDescriptor(esds, cursor);
-    if (descriptor.tag !== 0x05 || descriptor.start >= descriptor.end) {
-      return objectType === 0x40 ? `${sampleEntryType}.40.2` : `${sampleEntryType}.${objectType}`;
-    }
-    let bits = 0;
-    let value = 0;
-    for (let index = 0; index < 5; index += 1) {
-      value = (value << 1) | ((esds[descriptor.start + (index >> 3)] >> (7 - (index & 7))) & 1);
-      bits += 1;
-    }
-    if (bits === 5 && value === 31) {
-      for (let index = 0; index < 6; index += 1) {
-        value = (value << 1) | ((esds[descriptor.start + ((5 + index) >> 3)] >> (7 - ((5 + index) & 7))) & 1);
-      }
-    }
-    return objectType === 0x40 ? `${sampleEntryType}.40.${value}` : `${sampleEntryType}.${objectType}`;
+    return parseEsds(esds, sampleEntryType).codec;
   } catch {
     return `${sampleEntryType}.40.2`;
   }
@@ -446,9 +407,9 @@ export class Remuxer {
   /**
    * @param {Buffer} head 文件头部（至少包含完整 moov）
    * @param {string|null} keyHex 内容密钥 hex（32 位）；无加密内容可传 null
-   * @param {{ segmentTargetBytes?: number, segmentMaxBytes?: number }} [options]
+   * @param {{ segmentTargetBytes?: number, segmentMaxBytes?: number, firstSegmentTargetBytes?: number, segmentTargetMs?: number }} [options]
    */
-  constructor(head, keyHex, { segmentTargetBytes = 1536 * 1024, segmentMaxBytes = 2 * 1024 * 1024 } = {}) {
+  constructor(head, keyHex, { segmentTargetBytes = 1536 * 1024, segmentMaxBytes = 2 * 1024 * 1024, firstSegmentTargetBytes = 256 * 1024, segmentTargetMs = 4000 } = {}) {
     const top = scanHead(head);
     if (!top.moov) throw new Error("moov 不完整，需要继续读取文件头");
     const ftyp = top.ftyp;
@@ -466,6 +427,8 @@ export class Remuxer {
     this.key = key;
     this.segmentTargetBytes = segmentTargetBytes;
     this.segmentMaxBytes = segmentMaxBytes;
+    this.firstSegmentTargetBytes = Math.min(segmentTargetBytes, firstSegmentTargetBytes);
+    this.segmentTargetMs = segmentTargetMs > 0 ? segmentTargetMs : 4000;
     this.tracks = inner
       .filter((item) => item.type === "trak")
       .map((trak) => parseTrack(moov, trak, key))
@@ -494,6 +457,18 @@ export class Remuxer {
 
     this.fragments = this._planFragments();
     this.segments = this._planSegments();
+    if (this.segments.length > LIMITS.localSegmentsMax) {
+      // 长集逐步放宽时间窗口；时间切片不能让原本可播放的分段数超过面板内存护栏。
+      const byteOnly = this._planSegments(Infinity);
+      if (byteOnly.length <= LIMITS.localSegmentsMax) {
+        let targetMs = this.segmentTargetMs;
+        for (let attempt = 0; attempt < 8 && this.segments.length > LIMITS.localSegmentsMax; attempt++) {
+          targetMs *= 2;
+          this.segments = this._planSegments(targetMs);
+        }
+      }
+      if (this.segments.length > LIMITS.localSegmentsMax) this.segments = byteOnly;
+    }
     this.segmentCount = this.segments.length;
     this.nextSegment = 0;
   }
@@ -551,18 +526,20 @@ export class Remuxer {
   _measureFragment(parts, sequence) {
     let payloadBytes = 0;
     let need = 0;
+    let durationMs = 0;
     for (const part of parts) {
       for (let index = part.from; index < part.to; index += 1) {
         payloadBytes += part.track.sizes[index];
+        if (part.track.handler === "vide") durationMs += part.track.durations[index] / part.track.timescale * 1000;
         need = Math.max(need, part.track.offsets[index] + part.track.sizes[index]);
       }
     }
     const moof = this._buildMoof(parts, parts.map(() => 0), sequence);
-    return { parts, sequence, need, payloadBytes, size: moof.length + 8 + payloadBytes, moofLength: moof.length };
+    return { parts, sequence, need, durationMs, payloadBytes, size: moof.length + 8 + payloadBytes, moofLength: moof.length };
   }
 
-  /** 片段按字节聚合：达到 1.5MB 就收口，且绝不越过 2MB（最后一段可能更小）。 */
-  _planSegments() {
+  /** 以约 4 秒为时间窗口，仍在 GOP 边界收口并遵守字节上限；避免小首段后接几十秒的大段。 */
+  _planSegments(targetMs = this.segmentTargetMs) {
     const segments = [];
     let current = null;
     const close = () => {
@@ -572,12 +549,15 @@ export class Remuxer {
       current = null;
     };
     for (const fragment of this.fragments) {
-      if (current && (current.bytes >= this.segmentTargetBytes || current.bytes + fragment.size > this.segmentMaxBytes)) {
+      const target = segments.length === 0 ? this.firstSegmentTargetBytes : this.segmentTargetBytes;
+      if (current && (current.bytes >= target || current.bytes + fragment.size > this.segmentMaxBytes
+        || current.durationMs + fragment.durationMs > targetMs)) {
         close();
       }
-      current ??= { fragments: [], bytes: 0, need: 0 };
+      current ??= { fragments: [], bytes: 0, need: 0, durationMs: 0 };
       current.fragments.push(fragment);
       current.bytes += fragment.size;
+      current.durationMs += fragment.durationMs;
     }
     close();
     return segments;

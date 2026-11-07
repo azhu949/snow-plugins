@@ -285,6 +285,8 @@ var LIMITS = {
   coverMaxBytes: 3 * 1024 * 1024,
   coverKeep: 300,
   videoKeep: 6,
+  /** 本机播放最多保留的分段数；后台按时长切片时也遵守此预算。 */
+  localSegmentsMax: 128,
   /** 综合搜索缺封面时并发补全 getSeries 的上限。 */
   searchEnrichConcurrency: 4,
   /** 同一上游接口两次调用之间的最小间隔。 */
@@ -623,8 +625,10 @@ var MEDIA_LIMITS = {
   maxHeadBytes: 64 * 1024 * 1024,
   /** 单次 Range 的原始字节上限 3MB（base64 后 4MB，仍在 5MB 面板上限内）。 */
   blockBytes: 3 * 1024 * 1024,
-  /** 分段聚合目标 1.5MB、硬上限 2MB（base64 后 2.67MB）。 */
+  /** 分段还有约 4 秒的时间窗口；字节聚合目标 1.5MB、硬上限 2MB（base64 后 2.67MB）。 */
   segmentTargetBytes: 1536 * 1024,
+  /** 首段单独收口，缩短首播与下一集预热所需的下载量。 */
+  firstSegmentTargetBytes: 256 * 1024,
   segmentMaxBytes: 2 * 1024 * 1024,
   /** api.net.fetch 单次响应上限 5MB：base64 长度不得超过。 */
   maxBase64Bytes: 5 * 1024 * 1024,
@@ -650,6 +654,64 @@ var base64Length = (rawBytes) => Math.ceil(rawBytes / 3) * 4;
 
 // src/background/media/remux.js
 import { createDecipheriv } from "node:crypto";
+
+// src/shared/aac.js
+var readDescriptor = (bytes, offset, limit) => {
+  if (offset >= limit) throw new Error("音频配置描述符缺失");
+  const tag = bytes[offset++];
+  let size = 0;
+  for (let index = 0; index < 4; index++) {
+    if (offset >= limit) break;
+    const byte = bytes[offset++];
+    size = size * 128 + (byte & 127);
+    if (!(byte & 128)) {
+      const end = offset + size;
+      if (end > limit) break;
+      return { tag, start: offset, end };
+    }
+  }
+  throw new Error("音频配置描述符长度无效");
+};
+var findDescriptor = (bytes, start2, end, tag) => {
+  for (let at = start2; at < end; ) {
+    const descriptor = readDescriptor(bytes, at, end);
+    if (descriptor.tag === tag) return descriptor;
+    at = descriptor.end;
+  }
+  throw new Error("音频配置描述符缺失");
+};
+function parseEsds(bytes, sampleType = "mp4a") {
+  let descriptor = readDescriptor(bytes, 4, bytes.length);
+  if (descriptor.tag === 3) {
+    const limit = descriptor.end;
+    if (descriptor.start + 3 > limit) throw new Error("ES 音频描述符不完整");
+    const flags = bytes[descriptor.start + 2];
+    let at = descriptor.start + 3;
+    if (flags & 128) at += 2;
+    if (flags & 64) {
+      if (at >= limit) throw new Error("ES 音频描述符不完整");
+      at += 1 + bytes[at];
+    }
+    if (flags & 32) at += 2;
+    descriptor = findDescriptor(bytes, at, limit, 4);
+  }
+  if (descriptor.tag !== 4 || descriptor.start + 13 > descriptor.end) {
+    throw new Error("音频缺少解码配置");
+  }
+  const objectType = bytes[descriptor.start];
+  const specific = findDescriptor(bytes, descriptor.start + 13, descriptor.end, 5);
+  const description = bytes.subarray(specific.start, specific.end);
+  if (description.length < 2) throw new Error("AudioSpecificConfig 不完整");
+  let audioObjectType = description[0] >> 3;
+  if (audioObjectType === 31) audioObjectType = 32 + ((description[0] & 7) << 3 | description[1] >> 5);
+  if (!audioObjectType) throw new Error("音频编码类型无效");
+  return {
+    codec: objectType === 64 ? `${sampleType}.40.${audioObjectType}` : `${sampleType}.${objectType.toString(16)}`,
+    description
+  };
+}
+
+// src/background/media/remux.js
 var MAX_RANDOM_READ_BYTES = 8 * 1024 * 1024;
 function parseBoxes(buf, start2 = 0, end = buf.length) {
   const out = [];
@@ -745,49 +807,9 @@ function avcCodecString(sampleEntryType, avcC) {
   const hex = (value) => value.toString(16).toUpperCase().padStart(2, "0");
   return `${sampleEntryType}.${hex(avcC[1])}${hex(avcC[2])}${hex(avcC[3])}`;
 }
-var readDescriptor = (buf, offset) => {
-  const tag = buf[offset];
-  let cursor = offset + 1;
-  let size = 0;
-  for (let index = 0; index < 4; index += 1) {
-    const byte = buf[cursor];
-    cursor += 1;
-    size = size << 7 | byte & 127;
-    if (!(byte & 128)) break;
-  }
-  return { tag, start: cursor, end: cursor + size };
-};
 function aacCodecString(sampleEntryType, esds) {
   try {
-    let cursor = 4;
-    let descriptor = readDescriptor(esds, cursor);
-    if (descriptor.tag === 3) {
-      const flags = esds[descriptor.start + 2];
-      cursor = descriptor.start + 3;
-      if (flags & 128) cursor += 2;
-      if (flags & 64) cursor += 1 + esds[cursor];
-      if (flags & 32) cursor += 2;
-      descriptor = readDescriptor(esds, cursor);
-    }
-    if (descriptor.tag !== 4) return sampleEntryType;
-    const objectType = esds[descriptor.start];
-    cursor = descriptor.start + 13;
-    descriptor = readDescriptor(esds, cursor);
-    if (descriptor.tag !== 5 || descriptor.start >= descriptor.end) {
-      return objectType === 64 ? `${sampleEntryType}.40.2` : `${sampleEntryType}.${objectType}`;
-    }
-    let bits = 0;
-    let value = 0;
-    for (let index = 0; index < 5; index += 1) {
-      value = value << 1 | esds[descriptor.start + (index >> 3)] >> 7 - (index & 7) & 1;
-      bits += 1;
-    }
-    if (bits === 5 && value === 31) {
-      for (let index = 0; index < 6; index += 1) {
-        value = value << 1 | esds[descriptor.start + (5 + index >> 3)] >> 7 - (5 + index & 7) & 1;
-      }
-    }
-    return objectType === 64 ? `${sampleEntryType}.40.${value}` : `${sampleEntryType}.${objectType}`;
+    return parseEsds(esds, sampleEntryType).codec;
   } catch {
     return `${sampleEntryType}.40.2`;
   }
@@ -1023,9 +1045,9 @@ var Remuxer = class {
   /**
    * @param {Buffer} head 文件头部（至少包含完整 moov）
    * @param {string|null} keyHex 内容密钥 hex（32 位）；无加密内容可传 null
-   * @param {{ segmentTargetBytes?: number, segmentMaxBytes?: number }} [options]
+   * @param {{ segmentTargetBytes?: number, segmentMaxBytes?: number, firstSegmentTargetBytes?: number, segmentTargetMs?: number }} [options]
    */
-  constructor(head, keyHex, { segmentTargetBytes = 1536 * 1024, segmentMaxBytes = 2 * 1024 * 1024 } = {}) {
+  constructor(head, keyHex, { segmentTargetBytes = 1536 * 1024, segmentMaxBytes = 2 * 1024 * 1024, firstSegmentTargetBytes = 256 * 1024, segmentTargetMs = 4e3 } = {}) {
     const top = scanHead(head);
     if (!top.moov) throw new Error("moov 不完整，需要继续读取文件头");
     const ftyp = top.ftyp;
@@ -1040,6 +1062,8 @@ var Remuxer = class {
     this.key = key;
     this.segmentTargetBytes = segmentTargetBytes;
     this.segmentMaxBytes = segmentMaxBytes;
+    this.firstSegmentTargetBytes = Math.min(segmentTargetBytes, firstSegmentTargetBytes);
+    this.segmentTargetMs = segmentTargetMs > 0 ? segmentTargetMs : 4e3;
     this.tracks = inner.filter((item) => item.type === "trak").map((trak) => parseTrack(moov, trak, key)).filter(Boolean);
     for (const track of this.tracks) track.moov = moov;
     this.video = this.tracks.find((track) => track.handler === "vide");
@@ -1061,6 +1085,17 @@ var Remuxer = class {
     ]);
     this.fragments = this._planFragments();
     this.segments = this._planSegments();
+    if (this.segments.length > LIMITS.localSegmentsMax) {
+      const byteOnly = this._planSegments(Infinity);
+      if (byteOnly.length <= LIMITS.localSegmentsMax) {
+        let targetMs = this.segmentTargetMs;
+        for (let attempt = 0; attempt < 8 && this.segments.length > LIMITS.localSegmentsMax; attempt++) {
+          targetMs *= 2;
+          this.segments = this._planSegments(targetMs);
+        }
+      }
+      if (this.segments.length > LIMITS.localSegmentsMax) this.segments = byteOnly;
+    }
     this.segmentCount = this.segments.length;
     this.nextSegment = 0;
   }
@@ -1114,17 +1149,19 @@ var Remuxer = class {
   _measureFragment(parts, sequence) {
     let payloadBytes = 0;
     let need = 0;
+    let durationMs = 0;
     for (const part of parts) {
       for (let index = part.from; index < part.to; index += 1) {
         payloadBytes += part.track.sizes[index];
+        if (part.track.handler === "vide") durationMs += part.track.durations[index] / part.track.timescale * 1e3;
         need = Math.max(need, part.track.offsets[index] + part.track.sizes[index]);
       }
     }
     const moof = this._buildMoof(parts, parts.map(() => 0), sequence);
-    return { parts, sequence, need, payloadBytes, size: moof.length + 8 + payloadBytes, moofLength: moof.length };
+    return { parts, sequence, need, durationMs, payloadBytes, size: moof.length + 8 + payloadBytes, moofLength: moof.length };
   }
-  /** 片段按字节聚合：达到 1.5MB 就收口，且绝不越过 2MB（最后一段可能更小）。 */
-  _planSegments() {
+  /** 以约 4 秒为时间窗口，仍在 GOP 边界收口并遵守字节上限；避免小首段后接几十秒的大段。 */
+  _planSegments(targetMs = this.segmentTargetMs) {
     const segments = [];
     let current = null;
     const close = () => {
@@ -1134,12 +1171,14 @@ var Remuxer = class {
       current = null;
     };
     for (const fragment of this.fragments) {
-      if (current && (current.bytes >= this.segmentTargetBytes || current.bytes + fragment.size > this.segmentMaxBytes)) {
+      const target = segments.length === 0 ? this.firstSegmentTargetBytes : this.segmentTargetBytes;
+      if (current && (current.bytes >= target || current.bytes + fragment.size > this.segmentMaxBytes || current.durationMs + fragment.durationMs > targetMs)) {
         close();
       }
-      current ??= { fragments: [], bytes: 0, need: 0 };
+      current ??= { fragments: [], bytes: 0, need: 0, durationMs: 0 };
       current.fragments.push(fragment);
       current.bytes += fragment.size;
+      current.durationMs += fragment.durationMs;
     }
     close();
     return segments;
@@ -1705,7 +1744,8 @@ function createMedia({ sdk, cache, log = () => {
     job.total = total;
     const remuxer = new Remuxer(head, keyHex, {
       segmentTargetBytes: MEDIA_LIMITS.segmentTargetBytes,
-      segmentMaxBytes: MEDIA_LIMITS.segmentMaxBytes
+      segmentMaxBytes: MEDIA_LIMITS.segmentMaxBytes,
+      firstSegmentTargetBytes: MEDIA_LIMITS.firstSegmentTargetBytes
     });
     if (job.info?.segmentCount > 0 && job.info.segmentCount !== remuxer.segmentCount) {
       throw new HttpError(502, "MEDIA_SOURCE_MISMATCH", "备用源的分段结构与主源不一致");
@@ -1762,9 +1802,11 @@ function createMedia({ sdk, cache, log = () => {
               job.state = "streaming";
             }
             const from = job.have;
+            const nextNeed = remuxer.segments[remuxer.nextSegment]?.need;
             const to = Math.min(
               from + MEDIA_LIMITS.blockBytes - 1,
               total - 1,
+              nextNeed > from ? nextNeed - 1 : Infinity,
               job.foreground ? total - 1 : MEDIA_LIMITS.prefetchMaxBytes - 1
             );
             const block = await requestRange(url, from, to, { signal });

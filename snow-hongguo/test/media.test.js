@@ -16,6 +16,7 @@ import { MEDIA_LIMITS, base64Length } from "../src/background/media/limits.js";
 import { Remuxer, decryptSample, parseBoxes, scanHead } from "../src/background/media/remux.js";
 import { createRequestHandler, startServer } from "../src/background/server.js";
 import { readSegments } from "../src/panel/player/segments.js";
+import { LIMITS } from "../src/shared/contract.js";
 
 const CHANNEL = { "x-snow-hongguo-channel": "panel-rpc-v1" };
 const FIXTURE_DIR = fileURLToPath(new URL("./fixtures/", import.meta.url));
@@ -142,36 +143,98 @@ const warmFixture = async (t, sdkFactory, rangeOptions) => {
   return { media, source, rootDir, calls: () => calls };
 };
 
+test("后续分段按播放时长及时交付，不在小首段后等待几十秒内容的大段", () => {
+  const remuxer = new Remuxer(head, DUMMY_KEY);
+  for (const segment of remuxer.segments) {
+    let durationMs = 0;
+    for (const fragment of segment.fragments) {
+      const part = fragment.parts.find((entry) => entry.track.handler === "vide");
+      for (let i = part.from; i < part.to; i++) durationMs += part.track.durations[i] / part.track.timescale * 1000;
+    }
+    assert.ok(durationMs <= 6000, `分段含 ${Math.round(durationMs)}ms 视频，续段等待过长`);
+  }
+});
+
+test("时间切片超过数量预算时放宽窗口，不让可播放的长集超过面板护栏", () => {
+  // 模拟关键帧密集的长集：只调整时间轴和同步样本表，仍使用真实样本大小与文件偏移。
+  class LongRemuxer extends Remuxer {
+    _planFragments() {
+      this.video.sync = new Uint8Array(this.video.count).fill(1);
+      this.video.timescale /= 10;
+      if (this.audio) this.audio.timescale /= 10;
+      return super._planFragments();
+    }
+  }
+  const remuxer = new LongRemuxer(head, DUMMY_KEY);
+  assert.ok(remuxer._planSegments(4000).length > LIMITS.localSegmentsMax);
+  assert.ok(remuxer.segmentCount <= LIMITS.localSegmentsMax);
+  assert.ok(remuxer.segmentCount > 1);
+  assert.equal(remuxer.segments.reduce((sum, segment) => sum + segment.fragments.length, 0), remuxer.fragments.length);
+});
+
+test("小首段减少起播所需字节，并保留全部视频和音频样本", () => {
+  const before = new Remuxer(head, DUMMY_KEY, { firstSegmentTargetBytes: MEDIA_LIMITS.segmentTargetBytes, segmentTargetMs: Infinity });
+  const after = new Remuxer(head, DUMMY_KEY);
+  assert.ok(after.segments[0].need < before.segments[0].need / 3);
+  assert.ok(after.segments[0].bytes < before.segments[0].bytes / 3);
+  for (const track of after.tracks) {
+    const count = after.segments.flatMap((segment) => segment.fragments).flatMap((fragment) => fragment.parts)
+      .filter((part) => part.track.id === track.id).reduce((sum, part) => sum + part.to - part.from, 0);
+    assert.equal(count, track.count);
+  }
+});
+
 test("并行预读在下载持续推进时等待后续分段，不受最初 30 秒期限影响", async (t) => {
   const { media, source } = await warmFixture(t, null, { holdWhen: (count) => count > 1 });
   const info = await media.info("slow", "360p");
-  assert.equal(info.segmentCount, 3);
+  assert.ok(info.segmentCount >= 3);
   await until(() => source.state.held.length === 1);
   t.mock.timers.enable({ apis: ["setTimeout"] });
   const rpc = { getStreamSegment: async (id, quality, seq) => ({
     base64: (await media.segment(id, quality, seq)).bytes.toString("base64"),
   }) };
   const reader = readSegments({ rpc, episodeId: "slow", quality: "360p", count: info.segmentCount, cancelled: () => false });
-  const first = reader.next();
-  await new Promise(setImmediate);
-  t.mock.timers.tick(20_000);
-  source.state.held.shift()();
-  assert.equal((await first).value.seq, 1);
-  assert.equal((await reader.next()).value.seq, 2);
-  await until(() => source.state.held.length === 1);
-  t.mock.timers.tick(20_000);
-  source.state.held.shift()();
-  assert.equal((await reader.next()).value.seq, 3);
+  // 文件头中已有的几段可立即读取，后续每个 Range 分别放行；总等待超过 30 秒也不能误超时。
+  assert.equal((await reader.next()).value.seq, 1);
+  for (let seq = 2; seq <= info.segmentCount; seq++) {
+    let delivered = false;
+    const pending = reader.next().then((result) => { delivered = true; return result; });
+    await new Promise(setImmediate);
+    while (!delivered) {
+      await until(() => delivered || source.state.held.length > 0);
+      if (delivered) break;
+      t.mock.timers.tick(20_000);
+      source.state.held.shift()();
+      await until(() => delivered || source.state.held.length > 0);
+    }
+    assert.equal((await pending).value.seq, seq);
+  }
   assert.equal((await reader.next()).done, true);
   t.mock.timers.reset();
 });
 
+test("首段后的 Range 只补足下一段，不等待 3MB 整块下载", async (t) => {
+  const { media, source } = await warmFixture(t, null, { holdWhen: (count) => count > 1 });
+  const remuxer = new Remuxer(head, DUMMY_KEY);
+  const info = await media.info("timely", "360p");
+  await until(() => source.state.held.length === 1);
+  const next = remuxer.segments.findIndex((segment) => segment.need > source.state.requests[0].to + 1);
+  assert.ok(next > 0 && next < info.segmentCount);
+  assert.equal(source.state.requests[1].to, remuxer.segments[next].need - 1);
+  assert.ok(source.state.requests[1].length < MEDIA_LIMITS.blockBytes / 4);
+  const pending = media.segment("timely", "360p", next + 1);
+  source.state.held.shift()();
+  assert.equal((await pending).seq, next + 1);
+  await until(() => source.state.held.length === 1);
+  assert.equal(media.stats().jobs[0].state, "streaming");
+});
+
 test("分段下载没有进展时仍在 30 秒后超时", async (t) => {
   const { media, source } = await warmFixture(t, null, { holdWhen: (count) => count > 1 });
-  await media.info("stalled", "360p");
+  const info = await media.info("stalled", "360p");
   await until(() => source.state.held.length === 1);
   t.mock.timers.enable({ apis: ["setTimeout"] });
-  const rejected = assert.rejects(media.segment("stalled", "360p", 1), { code: "SEGMENT_TIMEOUT" });
+  const rejected = assert.rejects(media.segment("stalled", "360p", info.segmentCount), { code: "SEGMENT_TIMEOUT" });
   await new Promise(setImmediate);
   t.mock.timers.tick(MEDIA_LIMITS.segmentWaitMs);
   await rejected;

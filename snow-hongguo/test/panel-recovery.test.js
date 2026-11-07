@@ -181,3 +181,33 @@ test("正常播完后继续观看仍可从零重播并收起片尾覆盖层", as
   assert.equal(players[0].state.phase, "playing");
   assert.equal(root.querySelector(".hg-player-overlay").hidden, true);
 });
+
+test("单集解码失败不会禁用下一集的本机解码，旧实例迟到错误不干扰新集", async () => {
+  await mount();
+  await failPlayback();
+  const failed = players[0];
+  await click(root.querySelectorAll(".hg-ep")[1]);
+  assert.equal(players.length, 2, "下一集必须重新尝试自己的音视频配置");
+  assert.equal(players[1].options.episodeId, "e2");
+  assert.equal(players[1].state.phase, "playing");
+  await act(() => failed.fail());
+  await settle();
+  assert.equal(players[1].state.phase, "playing");
+  assert.equal(root.querySelector(".hg-player-overlay").hidden, true);
+});
+
+test("失败集的兼容探测迟到返回时，不覆盖已切换的下一集", async () => {
+  const ctx = await mount();
+  const readInfo = ctx.rpc.getStreamInfo;
+  let release;
+  ctx.rpc.getStreamInfo = (id) => id === "e1" ? new Promise((resolve) => { release = () => resolve(readInfo()); }) : readInfo();
+  await act(() => players[0].fail());
+  await settle();
+  assert.ok(release, "旧集的兼容探测仍在等待接口返回");
+  await click(root.querySelectorAll(".hg-ep")[1]);
+  assert.equal(players.length, 2);
+  await act(() => release());
+  await settle();
+  assert.equal(players[1].state.phase, "playing");
+  assert.equal(root.querySelector(".hg-player-overlay").hidden, true);
+});

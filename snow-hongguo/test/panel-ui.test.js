@@ -81,16 +81,122 @@ const context = (initial = {}) => {
   return { ctx, data, notifications };
 };
 
-const mountDetail = async (ctx) => {
+const mountDetail = async (ctx, visibleEpisodes = 3) => {
   await act(() => React.render(h(DetailPage, { ctx, seed: { id: "series" }, onBack: () => {} }), root));
   await settle();
-  assert.equal(root.querySelectorAll(".hg-ep").length, 3);
+  assert.equal(root.querySelectorAll(".hg-ep").length, visibleEpisodes);
   const video = root.querySelector("video");
   assert.ok(video, root.textContent);
   Object.defineProperty(video, "duration", { configurable: true, value: 60 });
   Object.defineProperty(video, "readyState", { configurable: true, value: 4 });
   return video;
 };
+
+const mockEpisodeCount = (ctx, count) => {
+  const items = Array.from({ length: count }, (_, index) => [`e${index + 1}`, index + 1, 1]);
+  ctx.rpc.getSeries = async () => ({ id: "series", title: "测试短剧", count, tags: [] });
+  ctx.rpc.getEpisodes = async () => ({ items });
+  return items;
+};
+
+test("长剧打开定位续播分组，浏览和回到当前集不打断播放，进度刷新不抢回分组", async () => {
+  const { ctx } = context({
+    history: [{ seriesId: "series", episodeId: "e126", episodeIndex: 125, positionMs: 12000 }],
+  });
+  mockEpisodeCount(ctx, 307);
+  const video = await mountDetail(ctx, 30);
+  const groups = root.querySelectorAll(".hg-episode-group");
+  assert.equal(groups.length, 11);
+  assert.equal(root.querySelector('.hg-episode-group[aria-pressed="true"]').textContent, "121–150");
+  assert.equal(root.querySelector(".hg-ep.is-current .hg-ep-num").textContent, "126");
+  assert.ok(root.querySelector(".hg-ep.is-current").classList.contains("is-partial"));
+  assert.equal(root.querySelectorAll(".hg-ep-num")[0].textContent, "121");
+  assert.equal(root.querySelectorAll(".hg-ep-num")[29].textContent, "150");
+
+  // jsdom 没有布局；给区间栏尺寸，核对定位只移动横向区间而不滚动详情。
+  const strip = root.querySelector(".hg-episode-groups");
+  Object.defineProperty(strip, "clientWidth", { configurable: true, value: 160 });
+  groups.forEach((node, index) => {
+    Object.defineProperty(node, "offsetLeft", { configurable: true, value: index * 60 + 2 });
+    Object.defineProperty(node, "offsetWidth", { configurable: true, value: 58 });
+  });
+  const pageScroll = root.querySelector(".hg-scroll");
+  pageScroll.scrollTop = 300;
+  await fire(groups[10]);
+  assert.equal(root.querySelectorAll(".hg-ep").length, 7);
+  assert.equal(root.querySelector(".hg-ep-num").textContent, "301");
+  assert.equal(root.querySelector("#hg-player-slot").dataset.episodeId, "e126");
+  assert.equal(strip.scrollLeft, 500);
+  assert.equal(pageScroll.scrollTop, 300);
+
+  video.currentTime = 24;
+  await fire(video, "seeked");
+  assert.equal(root.querySelector('.hg-episode-group[aria-pressed="true"]').textContent, "301–307");
+  assert.equal((await readHistory(ctx.api))[0].positionMs, 24000);
+  await fire(root.querySelector(".hg-episode-locate"));
+  assert.equal(root.querySelector('.hg-episode-group[aria-pressed="true"]').textContent, "121–150");
+  assert.equal(root.querySelector(".hg-ep.is-current .hg-ep-num").textContent, "126");
+  assert.equal(video.currentTime, 24);
+  assert.equal(strip.scrollLeft, 242);
+  assert.equal(pageScroll.scrollTop, 300);
+  assert.equal((await readHistory(ctx.api))[0].episodeId, "e126");
+});
+
+test("末尾分组保留已看、部分观看和禁用状态，切集使用全局下标并恢复各自进度", async () => {
+  const { ctx } = context();
+  const items = mockEpisodeCount(ctx, 307);
+  items[306][2] = 0;
+  await upsertHistory(ctx.api, {
+    seriesId: "series", episodeId: "e305", episodeIndex: 304,
+    positionMs: 60000, durationMs: 60000, completed: true,
+  });
+  await upsertHistory(ctx.api, {
+    seriesId: "series", episodeId: "e306", episodeIndex: 305,
+    positionMs: 23000, durationMs: 60000,
+  });
+  await mountDetail(ctx, 7);
+  const episodes = root.querySelectorAll(".hg-ep");
+  assert.ok(episodes[4].classList.contains("is-watched"));
+  assert.ok(episodes[5].classList.contains("is-partial"));
+  assert.ok(episodes[5].classList.contains("is-current"));
+  assert.equal(episodes[6].disabled, true);
+  await fire(root.querySelectorAll(".hg-episode-group")[0]);
+  await fire(root.querySelectorAll(".hg-ep")[29]);
+  assert.equal(root.querySelector("#hg-player-slot").dataset.episodeId, "e30");
+  await fire(root.querySelectorAll(".hg-episode-group")[10]);
+  await fire(root.querySelectorAll(".hg-ep")[5]);
+  assert.equal(root.querySelector("#hg-player-slot").dataset.episodeId, "e306");
+  const [entry] = await readHistory(ctx.api);
+  assert.equal(entry.episodeId, "e306");
+  assert.equal(entry.episodeIndex, 305);
+  assert.equal(entry.positionMs, 23000);
+});
+
+test("自动连播跨过第 30 集时跟随新分组，末尾只有一集时仍能选择", async () => {
+  const { ctx } = context({
+    history: [{ seriesId: "series", episodeId: "e30", episodeIndex: 29, positionMs: 45000 }],
+  });
+  mockEpisodeCount(ctx, 31);
+  const video = await mountDetail(ctx, 30);
+  assert.equal(root.querySelector('.hg-episode-group[aria-pressed="true"]').textContent, "1–30");
+  video.currentTime = 60;
+  await fire(video, "ended");
+  assert.equal(root.querySelector('.hg-episode-group[aria-pressed="true"]').textContent, "31");
+  assert.equal(root.querySelectorAll(".hg-ep").length, 1);
+  assert.equal(root.querySelector(".hg-ep.is-current .hg-ep-num").textContent, "31");
+  const [entry] = await readHistory(ctx.api);
+  assert.equal(entry.episodeId, "e31");
+  assert.equal(entry.episodes.find((item) => item.episodeId === "e30").completed, true);
+});
+
+test("不超过 30 集时直接展示全部，少集数剧不显示区间栏", async () => {
+  const { ctx } = context();
+  mockEpisodeCount(ctx, 30);
+  await mountDetail(ctx, 30);
+  assert.equal(root.querySelector(".hg-episode-nav"), null);
+  await fire(root.querySelectorAll(".hg-ep")[29]);
+  assert.equal(root.querySelector("#hg-player-slot").dataset.episodeId, "e30");
+});
 
 test("详情迁移旧进度只标记实际一集，收藏、分集完成和关闭连播可用", async () => {
   const { ctx } = context({

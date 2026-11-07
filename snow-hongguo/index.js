@@ -68,6 +68,9 @@ var zh_CN_default = {
   "search.loadingMore": "正在加载更多…",
   "search.clearInput": "清空输入",
   "detail.episodes": "选集",
+  "detail.episodeGroups": "集数分组",
+  "detail.episodeRange": "第 {{start}}–{{end}} 集",
+  "detail.backToCurrent": "回到当前集",
   "detail.description": "简介",
   "detail.noDescription": "暂无简介",
   "detail.expand": "展开",
@@ -283,6 +286,9 @@ var zh_TW_default = {
   "search.loadingMore": "正在載入更多…",
   "search.clearInput": "清空輸入",
   "detail.episodes": "選集",
+  "detail.episodeGroups": "集數分組",
+  "detail.episodeRange": "第 {{start}}–{{end}} 集",
+  "detail.backToCurrent": "回到目前集數",
   "detail.description": "簡介",
   "detail.noDescription": "暫無簡介",
   "detail.expand": "展開",
@@ -498,6 +504,9 @@ var en_default = {
   "search.loadingMore": "Loading more…",
   "search.clearInput": "Clear input",
   "detail.episodes": "Episodes",
+  "detail.episodeGroups": "Episode groups",
+  "detail.episodeRange": "Episodes {{start}}–{{end}}",
+  "detail.backToCurrent": "Back to current",
   "detail.description": "Synopsis",
   "detail.noDescription": "No synopsis available",
   "detail.expand": "Expand",
@@ -722,6 +731,8 @@ var LIMITS = {
   coverMaxBytes: 3 * 1024 * 1024,
   coverKeep: 300,
   videoKeep: 6,
+  /** 本机播放最多保留的分段数；后台按时长切片时也遵守此预算。 */
+  localSegmentsMax: 128,
   /** 综合搜索缺封面时并发补全 getSeries 的上限。 */
   searchEnrichConcurrency: 4,
   /** 同一上游接口两次调用之间的最小间隔。 */
@@ -3915,6 +3926,11 @@ function createMseEngine({ video, getRpc, log = () => {
     },
     snapshot: () => snapshotOf(session),
     isPlaying: () => !video.paused && !video.ended,
+    /** 交还给本机解码时取消兼容会话；之后仍可重新 load。 */
+    stop() {
+      if (session) teardown(session);
+      session = null;
+    },
     destroy() {
       if (disposed) return;
       disposed = true;
@@ -3964,6 +3980,62 @@ function icon(name, size = 16) {
   return svg;
 }
 
+// src/shared/aac.js
+var readDescriptor = (bytes, offset, limit) => {
+  if (offset >= limit) throw new Error("音频配置描述符缺失");
+  const tag = bytes[offset++];
+  let size = 0;
+  for (let index = 0; index < 4; index++) {
+    if (offset >= limit) break;
+    const byte = bytes[offset++];
+    size = size * 128 + (byte & 127);
+    if (!(byte & 128)) {
+      const end = offset + size;
+      if (end > limit) break;
+      return { tag, start: offset, end };
+    }
+  }
+  throw new Error("音频配置描述符长度无效");
+};
+var findDescriptor = (bytes, start, end, tag) => {
+  for (let at = start; at < end; ) {
+    const descriptor = readDescriptor(bytes, at, end);
+    if (descriptor.tag === tag) return descriptor;
+    at = descriptor.end;
+  }
+  throw new Error("音频配置描述符缺失");
+};
+function parseEsds(bytes, sampleType = "mp4a") {
+  let descriptor = readDescriptor(bytes, 4, bytes.length);
+  if (descriptor.tag === 3) {
+    const limit = descriptor.end;
+    if (descriptor.start + 3 > limit) throw new Error("ES 音频描述符不完整");
+    const flags = bytes[descriptor.start + 2];
+    let at = descriptor.start + 3;
+    if (flags & 128) at += 2;
+    if (flags & 64) {
+      if (at >= limit) throw new Error("ES 音频描述符不完整");
+      at += 1 + bytes[at];
+    }
+    if (flags & 32) at += 2;
+    descriptor = findDescriptor(bytes, at, limit, 4);
+  }
+  if (descriptor.tag !== 4 || descriptor.start + 13 > descriptor.end) {
+    throw new Error("音频缺少解码配置");
+  }
+  const objectType = bytes[descriptor.start];
+  const specific = findDescriptor(bytes, descriptor.start + 13, descriptor.end, 5);
+  const description = bytes.subarray(specific.start, specific.end);
+  if (description.length < 2) throw new Error("AudioSpecificConfig 不完整");
+  let audioObjectType = description[0] >> 3;
+  if (audioObjectType === 31) audioObjectType = 32 + ((description[0] & 7) << 3 | description[1] >> 5);
+  if (!audioObjectType) throw new Error("音频编码类型无效");
+  return {
+    codec: objectType === 64 ? `${sampleType}.40.${audioObjectType}` : `${sampleType}.${objectType.toString(16)}`,
+    description
+  };
+}
+
 // src/panel/player/mp4.js
 var textAt = (bytes, at) => String.fromCharCode(bytes[at] || 0, bytes[at + 1] || 0, bytes[at + 2] || 0, bytes[at + 3] || 0);
 var u16 = (bytes, at) => (bytes[at] << 8 | bytes[at + 1]) >>> 0;
@@ -4006,7 +4078,7 @@ var readEntryCodec = (bytes, entry) => {
   if (!config) return { configType: "", description: null };
   return {
     configType: config.type,
-    // WebCodecs 的 description 要的是配置 box 的内容（不含 8 字节 box 头）。
+    // 视频配置直接取 box 内容；esds 会在 readTracks 中继续提取内部的 ASC。
     description: bytes.subarray(config.bodyStart, config.bodyEnd)
   };
 };
@@ -4026,50 +4098,6 @@ var avcCodecString = (bytes, description, sampleType) => {
   if (!description || description.length < 4) return sampleType;
   const hex = (value) => value.toString(16).padStart(2, "0");
   return `${sampleType}.${hex(description[1])}${hex(description[2])}${hex(description[3])}`;
-};
-var esdsCodecString = (bytes, description, sampleType) => {
-  const data = description || new Uint8Array(0);
-  let index = 4;
-  let objectType = 64;
-  let audioObjectType = 2;
-  const readLength = () => {
-    let length = 0;
-    for (let count = 0; count < 4 && index < data.length; count += 1) {
-      const value = data[index];
-      index += 1;
-      length = length << 7 | value & 127;
-      if (!(value & 128)) break;
-    }
-    return length;
-  };
-  while (index + 1 < data.length) {
-    const tag = data[index];
-    index += 1;
-    const length = readLength();
-    const end = Math.min(data.length, index + length);
-    if (tag === 3) {
-      const flags = data[index + 2] || 0;
-      index += 3;
-      if (flags & 128) index += 2;
-      if (flags & 64) {
-        const urlLength = data[index] || 0;
-        index += 1 + urlLength;
-      }
-      if (flags & 32) index += 2;
-      continue;
-    }
-    if (tag === 4) {
-      objectType = data[index] || 64;
-      index = end;
-      continue;
-    }
-    if (tag === 5) {
-      audioObjectType = (data[index] || 18) >> 3;
-      break;
-    }
-    index = end;
-  }
-  return `${sampleType}.${objectType.toString(16)}.${audioObjectType}`;
 };
 var readSampleTable = (bytes, stbl) => {
   const stts = childOf(stbl, "stts");
@@ -4183,12 +4211,14 @@ var readTracks = (bytes, moov) => {
     const entries = readBoxes(bytes, stsd.bodyStart + 8, stsd.bodyEnd);
     const entry = entries[0];
     if (!entry) continue;
-    const { configType, description } = readEntryCodec(bytes, entry);
+    let { configType, description } = readEntryCodec(bytes, entry);
     const sampleType = entry.type;
     let codec = sampleType;
     if (configType === "hvcC") codec = hevcCodecString(bytes, description, sampleType);
     else if (configType === "avcC") codec = avcCodecString(bytes, description, sampleType);
-    else if (configType === "esds") codec = esdsCodecString(bytes, description, sampleType);
+    else if (configType === "esds") {
+      ({ codec, description } = parseEsds(description, sampleType));
+    }
     const width = ENTRY_PREFIX[sampleType] ? u16(bytes, entry.bodyStart + 24) : 0;
     const height = ENTRY_PREFIX[sampleType] ? u16(bytes, entry.bodyStart + 26) : 0;
     const channels = sampleType === "mp4a" || sampleType === "enca" ? u16(bytes, entry.bodyStart + 16) : 0;
@@ -4215,10 +4245,15 @@ var readTracks = (bytes, moov) => {
 var parseMp4 = (bytes) => {
   const top = readBoxes(bytes);
   const moov = childOf(top, "moov");
+  const mvhd = moov && childOf(readBoxes(bytes, moov.bodyStart, moov.bodyEnd), "mvhd");
+  const version = mvhd ? bytes[mvhd.bodyStart] : 0;
+  const movieTimescale = mvhd ? u32(bytes, mvhd.bodyStart + (version === 1 ? 20 : 12)) : 0;
+  const movieDuration = !mvhd ? 0 : version === 1 ? u64(bytes, mvhd.bodyStart + 24) : u32(bytes, mvhd.bodyStart + 16);
   const tracks = moov ? readTracks(bytes, moov) : [];
   const withSamples = tracks.filter((track) => track.samples.length > 0);
   return {
     tracks,
+    durationMs: movieTimescale ? Math.round(movieDuration / movieTimescale * 1e3) : 0,
     video: tracks.find((track) => track.kind === "video") || null,
     audio: tracks.find((track) => track.kind === "audio") || null,
     playable: withSamples,
@@ -4356,150 +4391,379 @@ var parseSegment = (bytes, tracks, trex = {}) => {
 };
 
 // src/panel/player/tempo-audio.js
-var WORKER_SOURCE = true ? '/*\n * SoundTouch JS audio processing library\n * Copyright (c) Olli Parviainen\n * Copyright (c) Ryan Berdeen\n * Copyright (c) Jakub Fiala\n * Copyright (c) Steve \'Cutter\' Blades\n *\n * Licensed under the Mozilla Public License, v. 2.0.\n * You can obtain one at https://mozilla.org/MPL/2.0/.\n */\n(() => {\n  var __defProp = Object.defineProperty;\n  var __defNormalProp = (obj, key, value) => key in obj ? __defProp(obj, key, { enumerable: true, configurable: true, writable: true, value }) : obj[key] = value;\n  var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "symbol" ? key + "" : key, value);\n\n  // node_modules/@soundtouchjs/core/.dist/AbstractSamplePipe.js\n  var AbstractSamplePipe = class {\n    /**\n     * Constructs an AbstractSamplePipe.\n     * @param options Constructor options.\n     *\n     * @remarks\n     * When `createBuffers` is true, both factories are required so subclasses can\n     * control exact buffer implementations without unsafe casting.\n     */\n    constructor({ createBuffers = false, inputBufferFactory, outputBufferFactory } = {}) {\n      /**\n       * Input buffer for audio samples.\n       */\n      __publicField(this, "_inputBuffer");\n      /**\n       * Output buffer for processed audio samples.\n       */\n      __publicField(this, "_outputBuffer");\n      if (createBuffers) {\n        if (!inputBufferFactory || !outputBufferFactory) {\n          throw new Error("buffer factories are required when createBuffers is true");\n        }\n        this._inputBuffer = inputBufferFactory();\n        this._outputBuffer = outputBufferFactory();\n      } else {\n        this._inputBuffer = null;\n        this._outputBuffer = null;\n      }\n    }\n    /**\n     * Gets the input buffer.\n     * @returns The current input buffer instance, or null if not set.\n     */\n    get inputBuffer() {\n      return this._inputBuffer;\n    }\n    /**\n     * Sets the input buffer.\n     * @param inputBuffer The new input buffer instance, or null to unset.\n     */\n    set inputBuffer(inputBuffer) {\n      this._inputBuffer = inputBuffer;\n    }\n    /**\n     * Gets the output buffer.\n     * @returns The current output buffer instance, or null if not set.\n     */\n    get outputBuffer() {\n      return this._outputBuffer;\n    }\n    /**\n     * Sets the output buffer.\n     * @param outputBuffer The new output buffer instance, or null to unset.\n     */\n    set outputBuffer(outputBuffer) {\n      this._outputBuffer = outputBuffer;\n    }\n    /**\n     * Clears both input and output buffers.\n     *\n     * @remarks\n     * Resets the state of both input and output buffers, if present, by calling their `clear()` methods.\n     */\n    clear() {\n      this._inputBuffer?.clear();\n      this._outputBuffer?.clear();\n    }\n  };\n\n  // node_modules/@soundtouchjs/core/.dist/FifoSampleBuffer.js\n  var BYTES_PER_SAMPLE = 4;\n  var SAMPLES_PER_FRAME = 2;\n  var BYTES_PER_FRAME = BYTES_PER_SAMPLE * SAMPLES_PER_FRAME;\n  var DEFAULT_MAX_FRAMES = 131072;\n  var FifoSampleBuffer = class {\n    /**\n     * Creates a new FifoSampleBuffer.\n     * @param maxFrames Maximum number of frames for buffer allocation.\n     */\n    constructor(maxFrames = DEFAULT_MAX_FRAMES) {\n      /**\n       * Backing ArrayBuffer for sample storage.\n       * @remarks\n       * Underlying memory for the buffer, which may be resized as needed.\n       */\n      __publicField(this, "_buffer");\n      /**\n       * Float32Array view of the buffer.\n       * @remarks\n       * Provides direct access to the sample data for reading and writing.\n       */\n      __publicField(this, "_vector");\n      /**\n       * Current read position (frame index).\n       * @remarks\n       * Indicates the logical start of readable data within the buffer.\n       */\n      __publicField(this, "_position");\n      /**\n       * Number of frames currently stored.\n       * @remarks\n       * Represents the number of complete stereo frames available for reading.\n       */\n      __publicField(this, "_frameCount");\n      this._buffer = new ArrayBuffer(0, {\n        maxByteLength: maxFrames * BYTES_PER_FRAME\n      });\n      this._vector = new Float32Array(this._buffer);\n      this._position = 0;\n      this._frameCount = 0;\n    }\n    /**\n     * Returns the Float32Array view of the buffer.\n     * @returns The Float32Array containing the sample data.\n     */\n    get vector() {\n      return this._vector;\n    }\n    /**\n     * Returns the current read position (frame index).\n     * @returns The current frame index for reading.\n     */\n    get position() {\n      return this._position;\n    }\n    /**\n     * Returns the start sample index for reading.\n     * @returns The sample index corresponding to the start of readable data.\n     */\n    get startIndex() {\n      return this._position * 2;\n    }\n    /**\n     * Returns the number of frames currently stored.\n     * @returns The number of complete frames available for reading.\n     */\n    get frameCount() {\n      return this._frameCount;\n    }\n    /**\n     * Returns the end sample index for reading.\n     * @returns The sample index corresponding to the end of readable data.\n     */\n    get endIndex() {\n      return (this._position + this._frameCount) * 2;\n    }\n    /**\n     * Clears the buffer and resets position and frame count.\n     * @remarks\n     * Fills the buffer with zeros and resets all internal state.\n     */\n    clear() {\n      this._vector.fill(0);\n      this._position = 0;\n      this._frameCount = 0;\n    }\n    /**\n     * Adds empty frames to the buffer.\n     * @param numFrames Number of frames to add.\n     */\n    put(numFrames) {\n      this._frameCount += numFrames;\n    }\n    /**\n     * Adds samples to the buffer from a Float32Array.\n     * @param samples Source samples (interleaved stereo).\n     * @param position Start frame index in source.\n     * @param numFrames Number of frames to copy (default: all available).\n     * @remarks\n     * Automatically grows the buffer if needed. Only complete frames are appended.\n     */\n    putSamples(samples, position = 0, numFrames = 0) {\n      const sourceOffset = position * 2;\n      if (!(numFrames >= 0) || numFrames === 0) {\n        numFrames = (samples.length - sourceOffset) / 2;\n      }\n      const numSamples = numFrames * 2;\n      this.ensureCapacity(numFrames + this._frameCount);\n      const destOffset = this.endIndex;\n      this._vector.set(samples.subarray(sourceOffset, sourceOffset + numSamples), destOffset);\n      this._frameCount += numFrames;\n    }\n    /**\n     * Adds samples from another FifoSampleBuffer.\n     * @param buffer Source buffer.\n     * @param position Start frame index in source buffer.\n     * @param numFrames Number of frames to copy (default: all available).\n     */\n    putBuffer(buffer, position = 0, numFrames = 0) {\n      if (!(numFrames >= 0) || numFrames === 0) {\n        numFrames = buffer.frameCount - position;\n      }\n      this.putSamples(buffer.vector, buffer.position + position, numFrames);\n    }\n    /**\n     * Advances the read position and reduces frame count.\n     * @param numFrames Number of frames to receive (default: all available).\n     * @remarks\n     * Consumed frames are no longer available for reading.\n     */\n    receive(numFrames) {\n      if (numFrames === void 0 || !(numFrames >= 0) || numFrames > this._frameCount) {\n        numFrames = this._frameCount;\n      }\n      this._frameCount -= numFrames;\n      this._position += numFrames;\n    }\n    /**\n     * Copies and receives samples into an output array.\n     * @param output Destination Float32Array.\n     * @param numFrames Number of frames to copy and receive.\n     * @remarks\n     * Advances the read position after copying.\n     */\n    receiveSamples(output, numFrames = 0) {\n      const numSamples = numFrames * 2;\n      const sourceOffset = this.startIndex;\n      output.set(this._vector.subarray(sourceOffset, sourceOffset + numSamples));\n      this.receive(numFrames);\n    }\n    /**\n     * Extracts samples into an output array without advancing position.\n     * @param output Destination Float32Array.\n     * @param position Start frame index in buffer.\n     * @param numFrames Number of frames to extract.\n     */\n    extract(output, position = 0, numFrames = 0) {\n      const sourceOffset = this.startIndex + position * 2;\n      const numSamples = numFrames * 2;\n      output.set(this._vector.subarray(sourceOffset, sourceOffset + numSamples));\n    }\n    /**\n     * Ensures the buffer has capacity for at least numFrames.\n     * @param numFrames Minimum number of frames required.\n     * @remarks\n     * Grows the buffer if needed, preserving all readable frames in order.\n     */\n    ensureCapacity(numFrames = 0) {\n      const minLength = Math.floor(numFrames * SAMPLES_PER_FRAME);\n      if (this._vector.length < minLength) {\n        const newByteLength = minLength * BYTES_PER_SAMPLE;\n        if (newByteLength <= this._buffer.maxByteLength) {\n          this.rewind();\n          this._buffer.resize(newByteLength);\n          this._vector = new Float32Array(this._buffer);\n        } else {\n          const newMaxBytes = newByteLength * 2;\n          const newBuffer = new ArrayBuffer(newByteLength, {\n            maxByteLength: newMaxBytes\n          });\n          const newVector = new Float32Array(newBuffer);\n          newVector.set(this._vector.subarray(this.startIndex, this.endIndex));\n          this._buffer = newBuffer;\n          this._vector = newVector;\n          this._position = 0;\n        }\n      } else {\n        this.rewind();\n      }\n    }\n    /**\n     * Ensures buffer has capacity for additional frames.\n     * @param numFrames Number of additional frames required.\n     */\n    ensureAdditionalCapacity(numFrames = 0) {\n      this.ensureCapacity(this._frameCount + numFrames);\n    }\n    /**\n     * Moves all unread samples to the start of the buffer.\n     * @remarks\n     * Compacts the buffer so that all unread samples are at the beginning, freeing space for new data.\n     */\n    rewind() {\n      if (this._position > 0) {\n        this._vector.set(this._vector.subarray(this.startIndex, this.endIndex));\n        this._position = 0;\n      }\n    }\n  };\n\n  // node_modules/@soundtouchjs/core/.dist/Stretch.js\n  var FifoStretchBufferAdapter = class {\n    constructor() {\n      __publicField(this, "buffer");\n      __publicField(this, "fallbackBuffer");\n      __publicField(this, "fallbackScratch");\n      this.buffer = null;\n      this.fallbackBuffer = new FifoSampleBuffer();\n      this.fallbackScratch = new Float32Array(0);\n    }\n    /**\n     * @param buffer Source buffer to expose through FIFO-style reads.\n     */\n    setBuffer(buffer) {\n      if (buffer instanceof FifoSampleBuffer) {\n        this.buffer = buffer;\n        return;\n      }\n      const frameCount = buffer.frameCount;\n      if (frameCount > 0) {\n        const sampleCount = frameCount * 2;\n        if (this.fallbackScratch.length < sampleCount) {\n          this.fallbackScratch = new Float32Array(sampleCount);\n        }\n        buffer.extract(this.fallbackScratch, 0, frameCount);\n        this.fallbackBuffer.clear();\n        this.fallbackBuffer.putSamples(this.fallbackScratch, 0, frameCount);\n        buffer.receive(frameCount);\n      } else {\n        this.fallbackBuffer.clear();\n      }\n      this.buffer = this.fallbackBuffer;\n    }\n    /**\n     * Returns the currently bound FIFO buffer.\n     * @throws Error when `setBuffer` has not been called yet.\n     */\n    getBoundBuffer() {\n      if (this.buffer === null) {\n        throw new Error("buffer is not set");\n      }\n      return this.buffer;\n    }\n    get frameCount() {\n      return this.getBoundBuffer().frameCount;\n    }\n    get startIndex() {\n      return this.getBoundBuffer().startIndex;\n    }\n    readSample(sampleIndex) {\n      const boundBuffer = this.getBoundBuffer();\n      const start = boundBuffer.startIndex;\n      const end = start + boundBuffer.frameCount * 2;\n      if (sampleIndex < start || sampleIndex >= end) {\n        return 0;\n      }\n      return boundBuffer.vector[sampleIndex];\n    }\n    readSubarray(start, end) {\n      return this.getBoundBuffer().vector.subarray(start, end);\n    }\n    receive(numFrames) {\n      this.getBoundBuffer().receive(numFrames);\n    }\n    receiveSamples(output, numFrames) {\n      this.getBoundBuffer().receiveSamples(output, numFrames);\n    }\n  };\n  var GenericStretchWriteBufferAdapter = class {\n    constructor() {\n      __publicField(this, "buffer");\n      this.buffer = null;\n    }\n    setOutputBuffer(buffer) {\n      this.buffer = buffer;\n    }\n    /**\n     * Returns the currently bound output buffer.\n     * @throws Error when `setOutputBuffer` has not been called.\n     */\n    getBoundBuffer() {\n      if (this.buffer === null) {\n        throw new Error("output buffer is not set");\n      }\n      return this.buffer;\n    }\n    appendSamples(samples, numFrames) {\n      this.getBoundBuffer().putSamples(samples, 0, numFrames);\n    }\n    putFrom(source, position, numFrames) {\n      const sourceStart = source.startIndex + position * 2;\n      const sourceEnd = sourceStart + numFrames * 2;\n      const chunk = source.readSubarray(sourceStart, sourceEnd);\n      this.getBoundBuffer().putSamples(chunk, 0, numFrames);\n    }\n  };\n  var createFifoStretchInputBufferAdapter = () => new FifoStretchBufferAdapter();\n  var USE_AUTO_SEQUENCE_LEN = 0;\n  var DEFAULT_SEQUENCE_MS = USE_AUTO_SEQUENCE_LEN;\n  var USE_AUTO_SEEKWINDOW_LEN = 0;\n  var DEFAULT_SEEKWINDOW_MS = USE_AUTO_SEEKWINDOW_LEN;\n  var DEFAULT_OVERLAP_MS = 8;\n  var AUTOSEQ_TEMPO_LOW = 0.25;\n  var AUTOSEQ_TEMPO_TOP = 4;\n  var AUTOSEQ_AT_MIN = 125;\n  var AUTOSEQ_AT_MAX = 50;\n  var AUTOSEQ_K = (AUTOSEQ_AT_MAX - AUTOSEQ_AT_MIN) / (AUTOSEQ_TEMPO_TOP - AUTOSEQ_TEMPO_LOW);\n  var AUTOSEQ_C = AUTOSEQ_AT_MIN - AUTOSEQ_K * AUTOSEQ_TEMPO_LOW;\n  var AUTOSEEK_AT_MIN = 25;\n  var AUTOSEEK_AT_MAX = 15;\n  var AUTOSEEK_K = (AUTOSEEK_AT_MAX - AUTOSEEK_AT_MIN) / (AUTOSEQ_TEMPO_TOP - AUTOSEQ_TEMPO_LOW);\n  var AUTOSEEK_C = AUTOSEEK_AT_MIN - AUTOSEEK_K * AUTOSEQ_TEMPO_LOW;\n  var NORMALIZED_CORRELATION_EPSILON = 1e-12;\n  var QUICK_SEEK_FALLBACK_THRESHOLD = 256;\n  var QUICK_SEEK_MIN_VALID_CANDIDATES = 8;\n  var Stretch = class _Stretch extends AbstractSamplePipe {\n    /**\n     * Creates a Stretch instance.\n     * @param options Constructor options.\n     */\n    constructor({ sampleRate = 44100, createBuffers = false, inputBufferAdapterFactory = createFifoStretchInputBufferAdapter, sampleBufferFactory = () => new FifoSampleBuffer() } = {}) {\n      super({\n        createBuffers,\n        inputBufferFactory: sampleBufferFactory,\n        outputBufferFactory: sampleBufferFactory\n      });\n      __publicField(this, "inputBufferAdapterFactory");\n      __publicField(this, "sampleBufferFactory");\n      __publicField(this, "inputBufferAdapter");\n      __publicField(this, "outputBufferAdapter");\n      __publicField(this, "overlapScratch");\n      __publicField(this, "_quickSeek");\n      __publicField(this, "midBufferDirty");\n      __publicField(this, "midBuffer");\n      __publicField(this, "refMidBuffer");\n      __publicField(this, "refMidBufferEnergy");\n      __publicField(this, "overlapLength");\n      __publicField(this, "autoSeqSetting");\n      __publicField(this, "autoSeekSetting");\n      __publicField(this, "_tempo");\n      __publicField(this, "sampleRate");\n      __publicField(this, "_overlapMs");\n      __publicField(this, "sequenceMs");\n      __publicField(this, "seekWindowMs");\n      __publicField(this, "seekWindowLength");\n      __publicField(this, "seekLength");\n      __publicField(this, "nominalSkip");\n      __publicField(this, "skipFract");\n      __publicField(this, "sampleReq");\n      this.inputBufferAdapterFactory = inputBufferAdapterFactory;\n      this.sampleBufferFactory = sampleBufferFactory;\n      this.inputBufferAdapter = inputBufferAdapterFactory();\n      this.outputBufferAdapter = new GenericStretchWriteBufferAdapter();\n      this.overlapScratch = new Float32Array(0);\n      this._quickSeek = true;\n      this.midBufferDirty = true;\n      this.midBuffer = null;\n      this.refMidBufferEnergy = 0;\n      this.overlapLength = 0;\n      this.autoSeqSetting = true;\n      this.autoSeekSetting = true;\n      this._tempo = 1;\n      this.setParameters(sampleRate, DEFAULT_SEQUENCE_MS, DEFAULT_SEEKWINDOW_MS, DEFAULT_OVERLAP_MS);\n    }\n    clear() {\n      super.clear();\n      this.clearMidBuffer();\n    }\n    clearMidBuffer() {\n      this.midBufferDirty = true;\n      if (this.midBuffer) {\n        this.midBuffer.fill(0);\n      }\n      if (this.refMidBuffer) {\n        this.refMidBuffer.fill(0);\n      }\n      this.skipFract = 0;\n    }\n    setParameters(sampleRate, sequenceMs, seekWindowMs, overlapMs) {\n      if (sampleRate > 0) {\n        this.sampleRate = sampleRate;\n      }\n      if (overlapMs > 0) {\n        this._overlapMs = overlapMs;\n      }\n      if (sequenceMs > 0) {\n        this.sequenceMs = sequenceMs;\n        this.autoSeqSetting = false;\n      } else {\n        this.autoSeqSetting = true;\n      }\n      if (seekWindowMs > 0) {\n        this.seekWindowMs = seekWindowMs;\n        this.autoSeekSetting = false;\n      } else {\n        this.autoSeekSetting = true;\n      }\n      this.calculateSequenceParameters();\n      this.calculateOverlapLength(this._overlapMs);\n      this.updateTempoDerivedState();\n    }\n    set tempo(newTempo) {\n      this._tempo = newTempo;\n      this.updateTempoDerivedState();\n    }\n    get tempo() {\n      return this._tempo;\n    }\n    get inputChunkSize() {\n      return this.sampleReq;\n    }\n    get outputChunkSize() {\n      return this.overlapLength + Math.max(0, this.seekWindowLength - 2 * this.overlapLength);\n    }\n    calculateOverlapLength(overlapInMsec = 0) {\n      let newOvl = this.sampleRate * overlapInMsec / 1e3;\n      newOvl = newOvl < 16 ? 16 : newOvl;\n      newOvl -= newOvl % 8;\n      if (newOvl === this.overlapLength && this.midBuffer !== null) {\n        return;\n      }\n      this.overlapLength = newOvl;\n      const needed = this.overlapLength * 2;\n      if (!this.refMidBuffer || this.refMidBuffer.length < needed) {\n        this.refMidBuffer = new Float32Array(needed);\n      }\n      if (!this.midBuffer || this.midBuffer.length < needed) {\n        this.midBuffer = new Float32Array(needed);\n      }\n    }\n    checkLimits(x, mi, ma) {\n      return x < mi ? mi : x > ma ? ma : x;\n    }\n    calculateSequenceParameters() {\n      if (this.autoSeqSetting) {\n        let seq = AUTOSEQ_C + AUTOSEQ_K * this._tempo;\n        seq = this.checkLimits(seq, AUTOSEQ_AT_MAX, AUTOSEQ_AT_MIN);\n        this.sequenceMs = Math.floor(seq + 0.5);\n      }\n      if (this.autoSeekSetting) {\n        let seek = AUTOSEEK_C + AUTOSEEK_K * this._tempo;\n        seek = this.checkLimits(seek, AUTOSEEK_AT_MAX, AUTOSEEK_AT_MIN);\n        this.seekWindowMs = Math.floor(seek + 0.5);\n      }\n      this.seekWindowLength = Math.floor(this.sampleRate * this.sequenceMs / 1e3);\n      this.seekLength = Math.floor(this.sampleRate * this.seekWindowMs / 1e3);\n      this.normalizeWindowInvariants();\n    }\n    normalizeWindowInvariants() {\n      this.seekLength = Math.max(1, this.seekLength);\n      this.seekWindowLength = Math.max(this.seekWindowLength, this.overlapLength);\n    }\n    updateTempoDerivedState() {\n      this.calculateSequenceParameters();\n      this.nominalSkip = this._tempo * (this.seekWindowLength - this.overlapLength);\n      this.skipFract = 0;\n      const intskip = Math.floor(this.nominalSkip + 0.5);\n      this.sampleReq = Math.max(intskip + this.overlapLength, this.seekWindowLength) + this.seekLength;\n    }\n    /**\n     * Whether the fast multi-pass seek algorithm is active.\n     * @returns `true` if quick seek is enabled (default); `false` for exhaustive search.\n     */\n    get quickSeek() {\n      return this._quickSeek;\n    }\n    set quickSeek(enable) {\n      this._quickSeek = enable;\n    }\n    /**\n     * Current overlap crossfade length in milliseconds.\n     * @returns The overlap period used at the current sample rate.\n     */\n    get overlapMs() {\n      return this._overlapMs;\n    }\n    /**\n     * Sets the overlap crossfade length and recalculates derived parameters.\n     * @param ms Overlap period in milliseconds (must be > 0).\n     */\n    set overlapMs(ms) {\n      if (ms > 0) {\n        this._overlapMs = ms;\n        this.calculateOverlapLength(this._overlapMs);\n        this.calculateSequenceParameters();\n        this.updateTempoDerivedState();\n      }\n    }\n    /**\n     * Applies a partial set of WSOLA timing parameters.\n     *\n     * @remarks\n     * Only the provided fields are updated; omitted fields remain unchanged.\n     * Pass `sequenceMs: 0` or `seekWindowMs: 0` to switch that dimension back to auto-calculation.\n     *\n     * @param params Partial set of WSOLA timing parameters to apply.\n     *\n     * @example\n     * stretch.setStretchParameters({ overlapMs: 12, quickSeek: false });\n     */\n    setStretchParameters(params) {\n      if (params.quickSeek !== void 0) {\n        this._quickSeek = params.quickSeek;\n      }\n      let needsRecalc = false;\n      if (params.sequenceMs !== void 0) {\n        if (params.sequenceMs > 0) {\n          this.sequenceMs = params.sequenceMs;\n          this.autoSeqSetting = false;\n        } else {\n          this.autoSeqSetting = true;\n        }\n        needsRecalc = true;\n      }\n      if (params.seekWindowMs !== void 0) {\n        if (params.seekWindowMs > 0) {\n          this.seekWindowMs = params.seekWindowMs;\n          this.autoSeekSetting = false;\n        } else {\n          this.autoSeekSetting = true;\n        }\n        needsRecalc = true;\n      }\n      if (params.overlapMs !== void 0 && params.overlapMs > 0) {\n        this._overlapMs = params.overlapMs;\n        this.calculateOverlapLength(this._overlapMs);\n        needsRecalc = true;\n      }\n      if (needsRecalc) {\n        this.calculateSequenceParameters();\n        this.updateTempoDerivedState();\n      }\n    }\n    clone() {\n      const result = new _Stretch({\n        createBuffers: false,\n        inputBufferAdapterFactory: this.inputBufferAdapterFactory,\n        sampleBufferFactory: this.sampleBufferFactory\n      });\n      result.tempo = this._tempo;\n      result.setParameters(this.sampleRate, this.sequenceMs, this.seekWindowMs, this._overlapMs);\n      return result;\n    }\n    seekBestOverlapPosition(inputBuffer) {\n      const resolvedInputBuffer = inputBuffer ?? this.getInputBufferAdapter();\n      if (!this._quickSeek || this.seekLength <= QUICK_SEEK_FALLBACK_THRESHOLD) {\n        return this.seekBestOverlapPositionStereo(resolvedInputBuffer);\n      }\n      return this.seekBestOverlapPositionStereoQuick(resolvedInputBuffer);\n    }\n    seekBestOverlapPositionStereo(inputBuffer) {\n      let bestOffset;\n      let bestCorrelation;\n      let correlation;\n      this.preCalculateCorrelationReferenceStereo();\n      bestOffset = 0;\n      bestCorrelation = -Infinity;\n      for (let i = 0; i < this.seekLength; i++) {\n        correlation = this.calculateCrossCorrelationStereo(2 * i, this.refMidBuffer, inputBuffer);\n        if (correlation > bestCorrelation) {\n          bestCorrelation = correlation;\n          bestOffset = i;\n        }\n      }\n      return bestOffset;\n    }\n    seekBestOverlapPositionStereoQuick(inputBuffer) {\n      let bestOffset;\n      let bestCorrelation;\n      let correlation;\n      let correlationOffset;\n      let tempOffset;\n      let evaluatedCandidates;\n      this.preCalculateCorrelationReferenceStereo();\n      bestCorrelation = this.calculateCrossCorrelationStereo(0, this.refMidBuffer, inputBuffer);\n      evaluatedCandidates = 1;\n      bestOffset = 0;\n      correlationOffset = 0;\n      for (let scanCount = 0; scanCount < 4; scanCount++) {\n        let previousTempOffset = Number.MIN_SAFE_INTEGER;\n        const scanOffsets = this.getQuickScanOffsets(scanCount);\n        for (const scanOffset of scanOffsets) {\n          tempOffset = correlationOffset + scanOffset;\n          if (tempOffset === previousTempOffset) {\n            continue;\n          }\n          previousTempOffset = tempOffset;\n          if (tempOffset < 0) {\n            continue;\n          }\n          if (tempOffset >= this.seekLength) {\n            continue;\n          }\n          correlation = this.calculateCrossCorrelationStereo(2 * tempOffset, this.refMidBuffer, inputBuffer);\n          evaluatedCandidates++;\n          if (correlation > bestCorrelation) {\n            bestCorrelation = correlation;\n            bestOffset = tempOffset;\n          }\n        }\n        correlationOffset = bestOffset;\n      }\n      if (evaluatedCandidates < QUICK_SEEK_MIN_VALID_CANDIDATES) {\n        return this.seekBestOverlapPositionStereo(inputBuffer);\n      }\n      return bestOffset;\n    }\n    getQuickScanOffsets(stage) {\n      const maxOffset = Math.max(1, this.seekLength - 1);\n      if (stage === 0) {\n        return this.generateFractionalScanOffsets(maxOffset, 2, 1, 14, 24);\n      }\n      if (stage === 1) {\n        return this.generateSymmetricScanOffsets(maxOffset, 0.2);\n      }\n      if (stage === 2) {\n        return this.generateSymmetricScanOffsets(maxOffset, 0.06);\n      }\n      return this.generateSymmetricScanOffsets(maxOffset, 0.015);\n    }\n    generateFractionalScanOffsets(maxOffset, startNumerator, stepNumerator, denominator, steps) {\n      const offsets = [];\n      const seen = /* @__PURE__ */ new Set();\n      const safeDenominator = Math.max(1, denominator);\n      const safeSteps = Math.max(1, steps);\n      for (let i = 0; i < safeSteps; i++) {\n        const numerator = startNumerator + i * stepNumerator;\n        const value = Math.round(maxOffset * numerator / safeDenominator);\n        if (value <= 0 || value >= this.seekLength || seen.has(value)) {\n          continue;\n        }\n        seen.add(value);\n        offsets.push(value);\n      }\n      return offsets;\n    }\n    generateSymmetricScanOffsets(maxOffset, spanRatio) {\n      const span = Math.max(1, Math.round(maxOffset * spanRatio));\n      const scales = [1, 0.75, 0.5, 0.25];\n      const negative = [];\n      const positive = [];\n      const seen = /* @__PURE__ */ new Set();\n      for (const scale of scales) {\n        const magnitude = Math.max(1, Math.round(span * scale));\n        const neg = -magnitude;\n        const pos = magnitude;\n        if (!seen.has(neg)) {\n          seen.add(neg);\n          negative.push(neg);\n        }\n        if (!seen.has(pos)) {\n          seen.add(pos);\n          positive.push(pos);\n        }\n      }\n      return negative.concat(positive);\n    }\n    preCalculateCorrelationReferenceStereo() {\n      let energy = 0;\n      for (let i = 0; i < this.overlapLength; i++) {\n        const temp = i * (this.overlapLength - i);\n        const ctx = i * 2;\n        const left = this.midBuffer[ctx] * temp;\n        const right = this.midBuffer[ctx + 1] * temp;\n        this.refMidBuffer[ctx] = left;\n        this.refMidBuffer[ctx + 1] = right;\n        energy += left * left + right * right;\n      }\n      this.refMidBufferEnergy = energy;\n    }\n    calculateCrossCorrelationStereo(mixingPos, compare, inputBuffer) {\n      mixingPos += inputBuffer.startIndex;\n      let dot = 0;\n      let sourceEnergy = 0;\n      const calcLength = 2 * this.overlapLength;\n      const source = inputBuffer.readSubarray(mixingPos, mixingPos + calcLength);\n      for (let i = 0; i < calcLength; i += 2) {\n        const sourceLeft = i < source.length ? source[i] : 0;\n        const sourceRight = i + 1 < source.length ? source[i + 1] : 0;\n        const compareLeft = compare[i];\n        const compareRight = compare[i + 1];\n        dot += sourceLeft * compareLeft + sourceRight * compareRight;\n        sourceEnergy += sourceLeft * sourceLeft + sourceRight * sourceRight;\n      }\n      if (sourceEnergy <= NORMALIZED_CORRELATION_EPSILON || this.refMidBufferEnergy <= NORMALIZED_CORRELATION_EPSILON) {\n        return -1;\n      }\n      return dot / Math.sqrt(sourceEnergy * this.refMidBufferEnergy);\n    }\n    overlapStereo(inputPosition, inputBuffer, outputBuffer) {\n      inputPosition += inputBuffer.startIndex;\n      const overlapSamples = this.overlapLength * 2;\n      if (this.overlapScratch.length < overlapSamples) {\n        this.overlapScratch = new Float32Array(overlapSamples);\n      }\n      const output = this.overlapScratch;\n      const input = inputBuffer.readSubarray(inputPosition, inputPosition + overlapSamples);\n      const frameScale = 1 / this.overlapLength;\n      for (let i = 0; i < this.overlapLength; i++) {\n        const tempFrame = (this.overlapLength - i) * frameScale;\n        const fi = i * frameScale;\n        const ctx = 2 * i;\n        const inputLeft = ctx < input.length ? input[ctx] : 0;\n        const inputRight = ctx + 1 < input.length ? input[ctx + 1] : 0;\n        output[ctx] = inputLeft * fi + this.midBuffer[ctx] * tempFrame;\n        output[ctx + 1] = inputRight * fi + this.midBuffer[ctx + 1] * tempFrame;\n      }\n      outputBuffer.appendSamples(output, this.overlapLength);\n    }\n    process() {\n      const inputBuffer = this.getInputBufferAdapter();\n      const outputBuffer = this.getOutputBufferAdapter();\n      if (!this.bootstrapMidBuffer(inputBuffer)) {\n        return;\n      }\n      while (inputBuffer.frameCount >= this.sampleReq) {\n        this.processOneWindow(inputBuffer, outputBuffer);\n      }\n    }\n    bootstrapMidBuffer(inputBuffer) {\n      if (!this.midBufferDirty) {\n        return true;\n      }\n      if (inputBuffer.frameCount < this.overlapLength) {\n        return false;\n      }\n      const needed = this.overlapLength * 2;\n      if (!this.midBuffer || this.midBuffer.length < needed) {\n        this.midBuffer = new Float32Array(needed);\n      }\n      inputBuffer.receiveSamples(this.midBuffer, this.overlapLength);\n      this.midBufferDirty = false;\n      return true;\n    }\n    processOneWindow(inputBuffer, outputBuffer) {\n      const offset = this.seekBestOverlapPosition(inputBuffer);\n      this.overlapStereo(2 * Math.floor(offset), inputBuffer, outputBuffer);\n      const middleFrames = this.seekWindowLength - 2 * this.overlapLength;\n      if (middleFrames > 0) {\n        outputBuffer.putFrom(inputBuffer, offset + this.overlapLength, middleFrames);\n      }\n      this.captureOverlapHistory(offset, inputBuffer);\n      this.advanceInputByNominalSkip(inputBuffer);\n    }\n    captureOverlapHistory(offset, inputBuffer) {\n      const start = inputBuffer.startIndex + 2 * (offset + this.seekWindowLength - this.overlapLength);\n      this.midBuffer.set(inputBuffer.readSubarray(start, start + 2 * this.overlapLength));\n    }\n    advanceInputByNominalSkip(inputBuffer) {\n      this.skipFract += this.nominalSkip;\n      const overlapSkip = Math.floor(this.skipFract);\n      this.skipFract -= overlapSkip;\n      inputBuffer.receive(overlapSkip);\n    }\n    getInputBufferAdapter() {\n      if (this._inputBuffer === null) {\n        throw new Error("inputBuffer is not set");\n      }\n      this.inputBufferAdapter.setBuffer(this._inputBuffer);\n      return this.inputBufferAdapter;\n    }\n    getOutputBufferAdapter() {\n      if (this._outputBuffer === null) {\n        throw new Error("outputBuffer is not set");\n      }\n      this.outputBufferAdapter.setOutputBuffer(this._outputBuffer);\n      return this.outputBufferAdapter;\n    }\n  };\n\n  // src/panel/player/tempo-worker.js\n  var BLOCK_FRAMES = 8192;\n  var SEQUENCE_MS = 50;\n  var SEEK_WINDOW_MS = 15;\n  var OVERLAP_MS = 8;\n  function renderTempo(data) {\n    const { rate, sampleRate, frameCount, channels, planes } = data || {};\n    if (!Number.isFinite(rate) || rate < 0.75 || rate > 3) {\n      throw new RangeError("保调倍率必须是 0.75 到 3 之间的有限数值");\n    }\n    if (!Number.isFinite(sampleRate) || sampleRate <= 0) {\n      throw new RangeError("保调音频的采样率无效");\n    }\n    if (!Number.isSafeInteger(frameCount) || frameCount < 1) {\n      throw new RangeError("保调音频的帧数必须是有限正整数");\n    }\n    if (channels !== 1 && channels !== 2) {\n      throw new RangeError("离线保调仅支持单声道或双声道音频");\n    }\n    if (!Array.isArray(planes) || planes.length !== channels) {\n      throw new TypeError("保调音频的声道平面不完整");\n    }\n    for (const plane of planes) {\n      if (!(plane instanceof Float32Array) || plane.length !== frameCount) {\n        throw new TypeError("保调音频必须使用等长的 Float32 声道平面");\n      }\n    }\n    const outputFrames = Math.max(1, Math.round(frameCount / rate));\n    if (!Number.isSafeInteger(outputFrames)) {\n      throw new RangeError("保调输出帧数超出安全范围");\n    }\n    const outputPlanes = Array.from({ length: channels }, () => new Float32Array(outputFrames));\n    const stretch = new Stretch({ createBuffers: true, sampleRate });\n    stretch.setStretchParameters({\n      sequenceMs: SEQUENCE_MS,\n      seekWindowMs: SEEK_WINDOW_MS,\n      overlapMs: OVERLAP_MS,\n      quickSeek: true\n    });\n    stretch.tempo = rate;\n    if (!Number.isSafeInteger(stretch.inputChunkSize) || stretch.inputChunkSize < 1 || !Number.isSafeInteger(stretch.outputChunkSize) || rate * stretch.outputChunkSize < 1) {\n      throw new RangeError("保调参数未能产生有效的输入步长与输出窗口");\n    }\n    const input = new Float32Array(BLOCK_FRAMES * 2);\n    const output = new Float32Array(BLOCK_FRAMES * 2);\n    const left = planes[0];\n    const right = planes[channels === 1 ? 0 : 1];\n    let writtenFrames = 0;\n    function processBlock(frames) {\n      stretch.inputBuffer.putSamples(input, 0, frames);\n      stretch.process();\n      const available = stretch.outputBuffer.frameCount;\n      for (let consumed = 0; consumed < available; consumed += BLOCK_FRAMES) {\n        const received = Math.min(BLOCK_FRAMES, available - consumed);\n        stretch.outputBuffer.receiveSamples(output, received);\n        const toCopy = Math.min(received, outputFrames - writtenFrames);\n        for (let frame = 0; frame < toCopy; frame += 1) {\n          const l = output[frame * 2];\n          const r = output[frame * 2 + 1];\n          if (!Number.isFinite(l) || !Number.isFinite(r)) {\n            throw new Error("保调算法产生了非有限音频样本");\n          }\n          outputPlanes[0][writtenFrames + frame] = l;\n          if (channels === 2) outputPlanes[1][writtenFrames + frame] = r;\n        }\n        writtenFrames += toCopy;\n      }\n    }\n    for (let offset = 0; offset < frameCount; offset += BLOCK_FRAMES) {\n      const frames = Math.min(BLOCK_FRAMES, frameCount - offset);\n      for (let frame = 0; frame < frames; frame += 1) {\n        const l = left[offset + frame];\n        const r = right[offset + frame];\n        if (!Number.isFinite(l) || !Number.isFinite(r)) {\n          throw new TypeError("保调输入包含非有限音频样本");\n        }\n        input[frame * 2] = l;\n        input[frame * 2 + 1] = r;\n      }\n      processBlock(frames);\n    }\n    const paddingBudget = Math.ceil(\n      stretch.inputChunkSize + rate * stretch.outputChunkSize + sampleRate * OVERLAP_MS / 1e3\n    );\n    if (!Number.isSafeInteger(paddingBudget) || paddingBudget < 1) {\n      throw new RangeError("保调尾部窗口长度无效");\n    }\n    input.fill(0);\n    for (let padded = 0; padded < paddingBudget && writtenFrames < outputFrames; padded += BLOCK_FRAMES) {\n      processBlock(Math.min(BLOCK_FRAMES, paddingBudget - padded));\n    }\n    if (writtenFrames !== outputFrames) {\n      throw new Error("保调尾部未能在有限补零窗口内排空");\n    }\n    return { type: "done", rate, sampleRate, channels, frameCount: outputFrames, planes: outputPlanes };\n  }\n  self.onmessage = (event) => {\n    self.onmessage = null;\n    try {\n      const result = renderTempo(event.data);\n      self.postMessage(result, result.planes.map((plane) => plane.buffer));\n    } catch (error) {\n      self.postMessage({\n        type: "error",\n        name: error?.name || "Error",\n        message: error?.message || String(error)\n      });\n    } finally {\n      self.close();\n    }\n  };\n})();\n' : "";
-var RENDER_TIMEOUT_MS = 6e4;
-function abortError() {
-  return new DOMException("离线保调任务已取消", "AbortError");
-}
-function createTempoRenderer(context, sourceBuffer) {
-  let destroyed = false;
+var WORKER_SOURCE = true ? '/*\n * SoundTouch JS audio processing library\n * Copyright (c) Olli Parviainen\n * Copyright (c) Ryan Berdeen\n * Copyright (c) Jakub Fiala\n * Copyright (c) Steve \'Cutter\' Blades\n *\n * Licensed under the Mozilla Public License, v. 2.0.\n * You can obtain one at https://mozilla.org/MPL/2.0/.\n */\n(() => {\n  var __defProp = Object.defineProperty;\n  var __defNormalProp = (obj, key, value) => key in obj ? __defProp(obj, key, { enumerable: true, configurable: true, writable: true, value }) : obj[key] = value;\n  var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "symbol" ? key + "" : key, value);\n\n  // node_modules/@soundtouchjs/core/.dist/AbstractSamplePipe.js\n  var AbstractSamplePipe = class {\n    /**\n     * Constructs an AbstractSamplePipe.\n     * @param options Constructor options.\n     *\n     * @remarks\n     * When `createBuffers` is true, both factories are required so subclasses can\n     * control exact buffer implementations without unsafe casting.\n     */\n    constructor({ createBuffers = false, inputBufferFactory, outputBufferFactory } = {}) {\n      /**\n       * Input buffer for audio samples.\n       */\n      __publicField(this, "_inputBuffer");\n      /**\n       * Output buffer for processed audio samples.\n       */\n      __publicField(this, "_outputBuffer");\n      if (createBuffers) {\n        if (!inputBufferFactory || !outputBufferFactory) {\n          throw new Error("buffer factories are required when createBuffers is true");\n        }\n        this._inputBuffer = inputBufferFactory();\n        this._outputBuffer = outputBufferFactory();\n      } else {\n        this._inputBuffer = null;\n        this._outputBuffer = null;\n      }\n    }\n    /**\n     * Gets the input buffer.\n     * @returns The current input buffer instance, or null if not set.\n     */\n    get inputBuffer() {\n      return this._inputBuffer;\n    }\n    /**\n     * Sets the input buffer.\n     * @param inputBuffer The new input buffer instance, or null to unset.\n     */\n    set inputBuffer(inputBuffer) {\n      this._inputBuffer = inputBuffer;\n    }\n    /**\n     * Gets the output buffer.\n     * @returns The current output buffer instance, or null if not set.\n     */\n    get outputBuffer() {\n      return this._outputBuffer;\n    }\n    /**\n     * Sets the output buffer.\n     * @param outputBuffer The new output buffer instance, or null to unset.\n     */\n    set outputBuffer(outputBuffer) {\n      this._outputBuffer = outputBuffer;\n    }\n    /**\n     * Clears both input and output buffers.\n     *\n     * @remarks\n     * Resets the state of both input and output buffers, if present, by calling their `clear()` methods.\n     */\n    clear() {\n      this._inputBuffer?.clear();\n      this._outputBuffer?.clear();\n    }\n  };\n\n  // node_modules/@soundtouchjs/core/.dist/FifoSampleBuffer.js\n  var BYTES_PER_SAMPLE = 4;\n  var SAMPLES_PER_FRAME = 2;\n  var BYTES_PER_FRAME = BYTES_PER_SAMPLE * SAMPLES_PER_FRAME;\n  var DEFAULT_MAX_FRAMES = 131072;\n  var FifoSampleBuffer = class {\n    /**\n     * Creates a new FifoSampleBuffer.\n     * @param maxFrames Maximum number of frames for buffer allocation.\n     */\n    constructor(maxFrames = DEFAULT_MAX_FRAMES) {\n      /**\n       * Backing ArrayBuffer for sample storage.\n       * @remarks\n       * Underlying memory for the buffer, which may be resized as needed.\n       */\n      __publicField(this, "_buffer");\n      /**\n       * Float32Array view of the buffer.\n       * @remarks\n       * Provides direct access to the sample data for reading and writing.\n       */\n      __publicField(this, "_vector");\n      /**\n       * Current read position (frame index).\n       * @remarks\n       * Indicates the logical start of readable data within the buffer.\n       */\n      __publicField(this, "_position");\n      /**\n       * Number of frames currently stored.\n       * @remarks\n       * Represents the number of complete stereo frames available for reading.\n       */\n      __publicField(this, "_frameCount");\n      this._buffer = new ArrayBuffer(0, {\n        maxByteLength: maxFrames * BYTES_PER_FRAME\n      });\n      this._vector = new Float32Array(this._buffer);\n      this._position = 0;\n      this._frameCount = 0;\n    }\n    /**\n     * Returns the Float32Array view of the buffer.\n     * @returns The Float32Array containing the sample data.\n     */\n    get vector() {\n      return this._vector;\n    }\n    /**\n     * Returns the current read position (frame index).\n     * @returns The current frame index for reading.\n     */\n    get position() {\n      return this._position;\n    }\n    /**\n     * Returns the start sample index for reading.\n     * @returns The sample index corresponding to the start of readable data.\n     */\n    get startIndex() {\n      return this._position * 2;\n    }\n    /**\n     * Returns the number of frames currently stored.\n     * @returns The number of complete frames available for reading.\n     */\n    get frameCount() {\n      return this._frameCount;\n    }\n    /**\n     * Returns the end sample index for reading.\n     * @returns The sample index corresponding to the end of readable data.\n     */\n    get endIndex() {\n      return (this._position + this._frameCount) * 2;\n    }\n    /**\n     * Clears the buffer and resets position and frame count.\n     * @remarks\n     * Fills the buffer with zeros and resets all internal state.\n     */\n    clear() {\n      this._vector.fill(0);\n      this._position = 0;\n      this._frameCount = 0;\n    }\n    /**\n     * Adds empty frames to the buffer.\n     * @param numFrames Number of frames to add.\n     */\n    put(numFrames) {\n      this._frameCount += numFrames;\n    }\n    /**\n     * Adds samples to the buffer from a Float32Array.\n     * @param samples Source samples (interleaved stereo).\n     * @param position Start frame index in source.\n     * @param numFrames Number of frames to copy (default: all available).\n     * @remarks\n     * Automatically grows the buffer if needed. Only complete frames are appended.\n     */\n    putSamples(samples, position = 0, numFrames = 0) {\n      const sourceOffset = position * 2;\n      if (!(numFrames >= 0) || numFrames === 0) {\n        numFrames = (samples.length - sourceOffset) / 2;\n      }\n      const numSamples = numFrames * 2;\n      this.ensureCapacity(numFrames + this._frameCount);\n      const destOffset = this.endIndex;\n      this._vector.set(samples.subarray(sourceOffset, sourceOffset + numSamples), destOffset);\n      this._frameCount += numFrames;\n    }\n    /**\n     * Adds samples from another FifoSampleBuffer.\n     * @param buffer Source buffer.\n     * @param position Start frame index in source buffer.\n     * @param numFrames Number of frames to copy (default: all available).\n     */\n    putBuffer(buffer, position = 0, numFrames = 0) {\n      if (!(numFrames >= 0) || numFrames === 0) {\n        numFrames = buffer.frameCount - position;\n      }\n      this.putSamples(buffer.vector, buffer.position + position, numFrames);\n    }\n    /**\n     * Advances the read position and reduces frame count.\n     * @param numFrames Number of frames to receive (default: all available).\n     * @remarks\n     * Consumed frames are no longer available for reading.\n     */\n    receive(numFrames) {\n      if (numFrames === void 0 || !(numFrames >= 0) || numFrames > this._frameCount) {\n        numFrames = this._frameCount;\n      }\n      this._frameCount -= numFrames;\n      this._position += numFrames;\n    }\n    /**\n     * Copies and receives samples into an output array.\n     * @param output Destination Float32Array.\n     * @param numFrames Number of frames to copy and receive.\n     * @remarks\n     * Advances the read position after copying.\n     */\n    receiveSamples(output, numFrames = 0) {\n      const numSamples = numFrames * 2;\n      const sourceOffset = this.startIndex;\n      output.set(this._vector.subarray(sourceOffset, sourceOffset + numSamples));\n      this.receive(numFrames);\n    }\n    /**\n     * Extracts samples into an output array without advancing position.\n     * @param output Destination Float32Array.\n     * @param position Start frame index in buffer.\n     * @param numFrames Number of frames to extract.\n     */\n    extract(output, position = 0, numFrames = 0) {\n      const sourceOffset = this.startIndex + position * 2;\n      const numSamples = numFrames * 2;\n      output.set(this._vector.subarray(sourceOffset, sourceOffset + numSamples));\n    }\n    /**\n     * Ensures the buffer has capacity for at least numFrames.\n     * @param numFrames Minimum number of frames required.\n     * @remarks\n     * Grows the buffer if needed, preserving all readable frames in order.\n     */\n    ensureCapacity(numFrames = 0) {\n      const minLength = Math.floor(numFrames * SAMPLES_PER_FRAME);\n      if (this._vector.length < minLength) {\n        const newByteLength = minLength * BYTES_PER_SAMPLE;\n        if (newByteLength <= this._buffer.maxByteLength) {\n          this.rewind();\n          this._buffer.resize(newByteLength);\n          this._vector = new Float32Array(this._buffer);\n        } else {\n          const newMaxBytes = newByteLength * 2;\n          const newBuffer = new ArrayBuffer(newByteLength, {\n            maxByteLength: newMaxBytes\n          });\n          const newVector = new Float32Array(newBuffer);\n          newVector.set(this._vector.subarray(this.startIndex, this.endIndex));\n          this._buffer = newBuffer;\n          this._vector = newVector;\n          this._position = 0;\n        }\n      } else {\n        this.rewind();\n      }\n    }\n    /**\n     * Ensures buffer has capacity for additional frames.\n     * @param numFrames Number of additional frames required.\n     */\n    ensureAdditionalCapacity(numFrames = 0) {\n      this.ensureCapacity(this._frameCount + numFrames);\n    }\n    /**\n     * Moves all unread samples to the start of the buffer.\n     * @remarks\n     * Compacts the buffer so that all unread samples are at the beginning, freeing space for new data.\n     */\n    rewind() {\n      if (this._position > 0) {\n        this._vector.set(this._vector.subarray(this.startIndex, this.endIndex));\n        this._position = 0;\n      }\n    }\n  };\n\n  // node_modules/@soundtouchjs/core/.dist/Stretch.js\n  var FifoStretchBufferAdapter = class {\n    constructor() {\n      __publicField(this, "buffer");\n      __publicField(this, "fallbackBuffer");\n      __publicField(this, "fallbackScratch");\n      this.buffer = null;\n      this.fallbackBuffer = new FifoSampleBuffer();\n      this.fallbackScratch = new Float32Array(0);\n    }\n    /**\n     * @param buffer Source buffer to expose through FIFO-style reads.\n     */\n    setBuffer(buffer) {\n      if (buffer instanceof FifoSampleBuffer) {\n        this.buffer = buffer;\n        return;\n      }\n      const frameCount = buffer.frameCount;\n      if (frameCount > 0) {\n        const sampleCount = frameCount * 2;\n        if (this.fallbackScratch.length < sampleCount) {\n          this.fallbackScratch = new Float32Array(sampleCount);\n        }\n        buffer.extract(this.fallbackScratch, 0, frameCount);\n        this.fallbackBuffer.clear();\n        this.fallbackBuffer.putSamples(this.fallbackScratch, 0, frameCount);\n        buffer.receive(frameCount);\n      } else {\n        this.fallbackBuffer.clear();\n      }\n      this.buffer = this.fallbackBuffer;\n    }\n    /**\n     * Returns the currently bound FIFO buffer.\n     * @throws Error when `setBuffer` has not been called yet.\n     */\n    getBoundBuffer() {\n      if (this.buffer === null) {\n        throw new Error("buffer is not set");\n      }\n      return this.buffer;\n    }\n    get frameCount() {\n      return this.getBoundBuffer().frameCount;\n    }\n    get startIndex() {\n      return this.getBoundBuffer().startIndex;\n    }\n    readSample(sampleIndex) {\n      const boundBuffer = this.getBoundBuffer();\n      const start = boundBuffer.startIndex;\n      const end = start + boundBuffer.frameCount * 2;\n      if (sampleIndex < start || sampleIndex >= end) {\n        return 0;\n      }\n      return boundBuffer.vector[sampleIndex];\n    }\n    readSubarray(start, end) {\n      return this.getBoundBuffer().vector.subarray(start, end);\n    }\n    receive(numFrames) {\n      this.getBoundBuffer().receive(numFrames);\n    }\n    receiveSamples(output, numFrames) {\n      this.getBoundBuffer().receiveSamples(output, numFrames);\n    }\n  };\n  var GenericStretchWriteBufferAdapter = class {\n    constructor() {\n      __publicField(this, "buffer");\n      this.buffer = null;\n    }\n    setOutputBuffer(buffer) {\n      this.buffer = buffer;\n    }\n    /**\n     * Returns the currently bound output buffer.\n     * @throws Error when `setOutputBuffer` has not been called.\n     */\n    getBoundBuffer() {\n      if (this.buffer === null) {\n        throw new Error("output buffer is not set");\n      }\n      return this.buffer;\n    }\n    appendSamples(samples, numFrames) {\n      this.getBoundBuffer().putSamples(samples, 0, numFrames);\n    }\n    putFrom(source, position, numFrames) {\n      const sourceStart = source.startIndex + position * 2;\n      const sourceEnd = sourceStart + numFrames * 2;\n      const chunk = source.readSubarray(sourceStart, sourceEnd);\n      this.getBoundBuffer().putSamples(chunk, 0, numFrames);\n    }\n  };\n  var createFifoStretchInputBufferAdapter = () => new FifoStretchBufferAdapter();\n  var USE_AUTO_SEQUENCE_LEN = 0;\n  var DEFAULT_SEQUENCE_MS = USE_AUTO_SEQUENCE_LEN;\n  var USE_AUTO_SEEKWINDOW_LEN = 0;\n  var DEFAULT_SEEKWINDOW_MS = USE_AUTO_SEEKWINDOW_LEN;\n  var DEFAULT_OVERLAP_MS = 8;\n  var AUTOSEQ_TEMPO_LOW = 0.25;\n  var AUTOSEQ_TEMPO_TOP = 4;\n  var AUTOSEQ_AT_MIN = 125;\n  var AUTOSEQ_AT_MAX = 50;\n  var AUTOSEQ_K = (AUTOSEQ_AT_MAX - AUTOSEQ_AT_MIN) / (AUTOSEQ_TEMPO_TOP - AUTOSEQ_TEMPO_LOW);\n  var AUTOSEQ_C = AUTOSEQ_AT_MIN - AUTOSEQ_K * AUTOSEQ_TEMPO_LOW;\n  var AUTOSEEK_AT_MIN = 25;\n  var AUTOSEEK_AT_MAX = 15;\n  var AUTOSEEK_K = (AUTOSEEK_AT_MAX - AUTOSEEK_AT_MIN) / (AUTOSEQ_TEMPO_TOP - AUTOSEQ_TEMPO_LOW);\n  var AUTOSEEK_C = AUTOSEEK_AT_MIN - AUTOSEEK_K * AUTOSEQ_TEMPO_LOW;\n  var NORMALIZED_CORRELATION_EPSILON = 1e-12;\n  var QUICK_SEEK_FALLBACK_THRESHOLD = 256;\n  var QUICK_SEEK_MIN_VALID_CANDIDATES = 8;\n  var Stretch = class _Stretch extends AbstractSamplePipe {\n    /**\n     * Creates a Stretch instance.\n     * @param options Constructor options.\n     */\n    constructor({ sampleRate = 44100, createBuffers = false, inputBufferAdapterFactory = createFifoStretchInputBufferAdapter, sampleBufferFactory = () => new FifoSampleBuffer() } = {}) {\n      super({\n        createBuffers,\n        inputBufferFactory: sampleBufferFactory,\n        outputBufferFactory: sampleBufferFactory\n      });\n      __publicField(this, "inputBufferAdapterFactory");\n      __publicField(this, "sampleBufferFactory");\n      __publicField(this, "inputBufferAdapter");\n      __publicField(this, "outputBufferAdapter");\n      __publicField(this, "overlapScratch");\n      __publicField(this, "_quickSeek");\n      __publicField(this, "midBufferDirty");\n      __publicField(this, "midBuffer");\n      __publicField(this, "refMidBuffer");\n      __publicField(this, "refMidBufferEnergy");\n      __publicField(this, "overlapLength");\n      __publicField(this, "autoSeqSetting");\n      __publicField(this, "autoSeekSetting");\n      __publicField(this, "_tempo");\n      __publicField(this, "sampleRate");\n      __publicField(this, "_overlapMs");\n      __publicField(this, "sequenceMs");\n      __publicField(this, "seekWindowMs");\n      __publicField(this, "seekWindowLength");\n      __publicField(this, "seekLength");\n      __publicField(this, "nominalSkip");\n      __publicField(this, "skipFract");\n      __publicField(this, "sampleReq");\n      this.inputBufferAdapterFactory = inputBufferAdapterFactory;\n      this.sampleBufferFactory = sampleBufferFactory;\n      this.inputBufferAdapter = inputBufferAdapterFactory();\n      this.outputBufferAdapter = new GenericStretchWriteBufferAdapter();\n      this.overlapScratch = new Float32Array(0);\n      this._quickSeek = true;\n      this.midBufferDirty = true;\n      this.midBuffer = null;\n      this.refMidBufferEnergy = 0;\n      this.overlapLength = 0;\n      this.autoSeqSetting = true;\n      this.autoSeekSetting = true;\n      this._tempo = 1;\n      this.setParameters(sampleRate, DEFAULT_SEQUENCE_MS, DEFAULT_SEEKWINDOW_MS, DEFAULT_OVERLAP_MS);\n    }\n    clear() {\n      super.clear();\n      this.clearMidBuffer();\n    }\n    clearMidBuffer() {\n      this.midBufferDirty = true;\n      if (this.midBuffer) {\n        this.midBuffer.fill(0);\n      }\n      if (this.refMidBuffer) {\n        this.refMidBuffer.fill(0);\n      }\n      this.skipFract = 0;\n    }\n    setParameters(sampleRate, sequenceMs, seekWindowMs, overlapMs) {\n      if (sampleRate > 0) {\n        this.sampleRate = sampleRate;\n      }\n      if (overlapMs > 0) {\n        this._overlapMs = overlapMs;\n      }\n      if (sequenceMs > 0) {\n        this.sequenceMs = sequenceMs;\n        this.autoSeqSetting = false;\n      } else {\n        this.autoSeqSetting = true;\n      }\n      if (seekWindowMs > 0) {\n        this.seekWindowMs = seekWindowMs;\n        this.autoSeekSetting = false;\n      } else {\n        this.autoSeekSetting = true;\n      }\n      this.calculateSequenceParameters();\n      this.calculateOverlapLength(this._overlapMs);\n      this.updateTempoDerivedState();\n    }\n    set tempo(newTempo) {\n      this._tempo = newTempo;\n      this.updateTempoDerivedState();\n    }\n    get tempo() {\n      return this._tempo;\n    }\n    get inputChunkSize() {\n      return this.sampleReq;\n    }\n    get outputChunkSize() {\n      return this.overlapLength + Math.max(0, this.seekWindowLength - 2 * this.overlapLength);\n    }\n    calculateOverlapLength(overlapInMsec = 0) {\n      let newOvl = this.sampleRate * overlapInMsec / 1e3;\n      newOvl = newOvl < 16 ? 16 : newOvl;\n      newOvl -= newOvl % 8;\n      if (newOvl === this.overlapLength && this.midBuffer !== null) {\n        return;\n      }\n      this.overlapLength = newOvl;\n      const needed = this.overlapLength * 2;\n      if (!this.refMidBuffer || this.refMidBuffer.length < needed) {\n        this.refMidBuffer = new Float32Array(needed);\n      }\n      if (!this.midBuffer || this.midBuffer.length < needed) {\n        this.midBuffer = new Float32Array(needed);\n      }\n    }\n    checkLimits(x, mi, ma) {\n      return x < mi ? mi : x > ma ? ma : x;\n    }\n    calculateSequenceParameters() {\n      if (this.autoSeqSetting) {\n        let seq = AUTOSEQ_C + AUTOSEQ_K * this._tempo;\n        seq = this.checkLimits(seq, AUTOSEQ_AT_MAX, AUTOSEQ_AT_MIN);\n        this.sequenceMs = Math.floor(seq + 0.5);\n      }\n      if (this.autoSeekSetting) {\n        let seek = AUTOSEEK_C + AUTOSEEK_K * this._tempo;\n        seek = this.checkLimits(seek, AUTOSEEK_AT_MAX, AUTOSEEK_AT_MIN);\n        this.seekWindowMs = Math.floor(seek + 0.5);\n      }\n      this.seekWindowLength = Math.floor(this.sampleRate * this.sequenceMs / 1e3);\n      this.seekLength = Math.floor(this.sampleRate * this.seekWindowMs / 1e3);\n      this.normalizeWindowInvariants();\n    }\n    normalizeWindowInvariants() {\n      this.seekLength = Math.max(1, this.seekLength);\n      this.seekWindowLength = Math.max(this.seekWindowLength, this.overlapLength);\n    }\n    updateTempoDerivedState() {\n      this.calculateSequenceParameters();\n      this.nominalSkip = this._tempo * (this.seekWindowLength - this.overlapLength);\n      this.skipFract = 0;\n      const intskip = Math.floor(this.nominalSkip + 0.5);\n      this.sampleReq = Math.max(intskip + this.overlapLength, this.seekWindowLength) + this.seekLength;\n    }\n    /**\n     * Whether the fast multi-pass seek algorithm is active.\n     * @returns `true` if quick seek is enabled (default); `false` for exhaustive search.\n     */\n    get quickSeek() {\n      return this._quickSeek;\n    }\n    set quickSeek(enable) {\n      this._quickSeek = enable;\n    }\n    /**\n     * Current overlap crossfade length in milliseconds.\n     * @returns The overlap period used at the current sample rate.\n     */\n    get overlapMs() {\n      return this._overlapMs;\n    }\n    /**\n     * Sets the overlap crossfade length and recalculates derived parameters.\n     * @param ms Overlap period in milliseconds (must be > 0).\n     */\n    set overlapMs(ms) {\n      if (ms > 0) {\n        this._overlapMs = ms;\n        this.calculateOverlapLength(this._overlapMs);\n        this.calculateSequenceParameters();\n        this.updateTempoDerivedState();\n      }\n    }\n    /**\n     * Applies a partial set of WSOLA timing parameters.\n     *\n     * @remarks\n     * Only the provided fields are updated; omitted fields remain unchanged.\n     * Pass `sequenceMs: 0` or `seekWindowMs: 0` to switch that dimension back to auto-calculation.\n     *\n     * @param params Partial set of WSOLA timing parameters to apply.\n     *\n     * @example\n     * stretch.setStretchParameters({ overlapMs: 12, quickSeek: false });\n     */\n    setStretchParameters(params) {\n      if (params.quickSeek !== void 0) {\n        this._quickSeek = params.quickSeek;\n      }\n      let needsRecalc = false;\n      if (params.sequenceMs !== void 0) {\n        if (params.sequenceMs > 0) {\n          this.sequenceMs = params.sequenceMs;\n          this.autoSeqSetting = false;\n        } else {\n          this.autoSeqSetting = true;\n        }\n        needsRecalc = true;\n      }\n      if (params.seekWindowMs !== void 0) {\n        if (params.seekWindowMs > 0) {\n          this.seekWindowMs = params.seekWindowMs;\n          this.autoSeekSetting = false;\n        } else {\n          this.autoSeekSetting = true;\n        }\n        needsRecalc = true;\n      }\n      if (params.overlapMs !== void 0 && params.overlapMs > 0) {\n        this._overlapMs = params.overlapMs;\n        this.calculateOverlapLength(this._overlapMs);\n        needsRecalc = true;\n      }\n      if (needsRecalc) {\n        this.calculateSequenceParameters();\n        this.updateTempoDerivedState();\n      }\n    }\n    clone() {\n      const result = new _Stretch({\n        createBuffers: false,\n        inputBufferAdapterFactory: this.inputBufferAdapterFactory,\n        sampleBufferFactory: this.sampleBufferFactory\n      });\n      result.tempo = this._tempo;\n      result.setParameters(this.sampleRate, this.sequenceMs, this.seekWindowMs, this._overlapMs);\n      return result;\n    }\n    seekBestOverlapPosition(inputBuffer) {\n      const resolvedInputBuffer = inputBuffer ?? this.getInputBufferAdapter();\n      if (!this._quickSeek || this.seekLength <= QUICK_SEEK_FALLBACK_THRESHOLD) {\n        return this.seekBestOverlapPositionStereo(resolvedInputBuffer);\n      }\n      return this.seekBestOverlapPositionStereoQuick(resolvedInputBuffer);\n    }\n    seekBestOverlapPositionStereo(inputBuffer) {\n      let bestOffset;\n      let bestCorrelation;\n      let correlation;\n      this.preCalculateCorrelationReferenceStereo();\n      bestOffset = 0;\n      bestCorrelation = -Infinity;\n      for (let i = 0; i < this.seekLength; i++) {\n        correlation = this.calculateCrossCorrelationStereo(2 * i, this.refMidBuffer, inputBuffer);\n        if (correlation > bestCorrelation) {\n          bestCorrelation = correlation;\n          bestOffset = i;\n        }\n      }\n      return bestOffset;\n    }\n    seekBestOverlapPositionStereoQuick(inputBuffer) {\n      let bestOffset;\n      let bestCorrelation;\n      let correlation;\n      let correlationOffset;\n      let tempOffset;\n      let evaluatedCandidates;\n      this.preCalculateCorrelationReferenceStereo();\n      bestCorrelation = this.calculateCrossCorrelationStereo(0, this.refMidBuffer, inputBuffer);\n      evaluatedCandidates = 1;\n      bestOffset = 0;\n      correlationOffset = 0;\n      for (let scanCount = 0; scanCount < 4; scanCount++) {\n        let previousTempOffset = Number.MIN_SAFE_INTEGER;\n        const scanOffsets = this.getQuickScanOffsets(scanCount);\n        for (const scanOffset of scanOffsets) {\n          tempOffset = correlationOffset + scanOffset;\n          if (tempOffset === previousTempOffset) {\n            continue;\n          }\n          previousTempOffset = tempOffset;\n          if (tempOffset < 0) {\n            continue;\n          }\n          if (tempOffset >= this.seekLength) {\n            continue;\n          }\n          correlation = this.calculateCrossCorrelationStereo(2 * tempOffset, this.refMidBuffer, inputBuffer);\n          evaluatedCandidates++;\n          if (correlation > bestCorrelation) {\n            bestCorrelation = correlation;\n            bestOffset = tempOffset;\n          }\n        }\n        correlationOffset = bestOffset;\n      }\n      if (evaluatedCandidates < QUICK_SEEK_MIN_VALID_CANDIDATES) {\n        return this.seekBestOverlapPositionStereo(inputBuffer);\n      }\n      return bestOffset;\n    }\n    getQuickScanOffsets(stage) {\n      const maxOffset = Math.max(1, this.seekLength - 1);\n      if (stage === 0) {\n        return this.generateFractionalScanOffsets(maxOffset, 2, 1, 14, 24);\n      }\n      if (stage === 1) {\n        return this.generateSymmetricScanOffsets(maxOffset, 0.2);\n      }\n      if (stage === 2) {\n        return this.generateSymmetricScanOffsets(maxOffset, 0.06);\n      }\n      return this.generateSymmetricScanOffsets(maxOffset, 0.015);\n    }\n    generateFractionalScanOffsets(maxOffset, startNumerator, stepNumerator, denominator, steps) {\n      const offsets = [];\n      const seen = /* @__PURE__ */ new Set();\n      const safeDenominator = Math.max(1, denominator);\n      const safeSteps = Math.max(1, steps);\n      for (let i = 0; i < safeSteps; i++) {\n        const numerator = startNumerator + i * stepNumerator;\n        const value = Math.round(maxOffset * numerator / safeDenominator);\n        if (value <= 0 || value >= this.seekLength || seen.has(value)) {\n          continue;\n        }\n        seen.add(value);\n        offsets.push(value);\n      }\n      return offsets;\n    }\n    generateSymmetricScanOffsets(maxOffset, spanRatio) {\n      const span = Math.max(1, Math.round(maxOffset * spanRatio));\n      const scales = [1, 0.75, 0.5, 0.25];\n      const negative = [];\n      const positive = [];\n      const seen = /* @__PURE__ */ new Set();\n      for (const scale of scales) {\n        const magnitude = Math.max(1, Math.round(span * scale));\n        const neg = -magnitude;\n        const pos = magnitude;\n        if (!seen.has(neg)) {\n          seen.add(neg);\n          negative.push(neg);\n        }\n        if (!seen.has(pos)) {\n          seen.add(pos);\n          positive.push(pos);\n        }\n      }\n      return negative.concat(positive);\n    }\n    preCalculateCorrelationReferenceStereo() {\n      let energy = 0;\n      for (let i = 0; i < this.overlapLength; i++) {\n        const temp = i * (this.overlapLength - i);\n        const ctx = i * 2;\n        const left = this.midBuffer[ctx] * temp;\n        const right = this.midBuffer[ctx + 1] * temp;\n        this.refMidBuffer[ctx] = left;\n        this.refMidBuffer[ctx + 1] = right;\n        energy += left * left + right * right;\n      }\n      this.refMidBufferEnergy = energy;\n    }\n    calculateCrossCorrelationStereo(mixingPos, compare, inputBuffer) {\n      mixingPos += inputBuffer.startIndex;\n      let dot = 0;\n      let sourceEnergy = 0;\n      const calcLength = 2 * this.overlapLength;\n      const source = inputBuffer.readSubarray(mixingPos, mixingPos + calcLength);\n      for (let i = 0; i < calcLength; i += 2) {\n        const sourceLeft = i < source.length ? source[i] : 0;\n        const sourceRight = i + 1 < source.length ? source[i + 1] : 0;\n        const compareLeft = compare[i];\n        const compareRight = compare[i + 1];\n        dot += sourceLeft * compareLeft + sourceRight * compareRight;\n        sourceEnergy += sourceLeft * sourceLeft + sourceRight * sourceRight;\n      }\n      if (sourceEnergy <= NORMALIZED_CORRELATION_EPSILON || this.refMidBufferEnergy <= NORMALIZED_CORRELATION_EPSILON) {\n        return -1;\n      }\n      return dot / Math.sqrt(sourceEnergy * this.refMidBufferEnergy);\n    }\n    overlapStereo(inputPosition, inputBuffer, outputBuffer) {\n      inputPosition += inputBuffer.startIndex;\n      const overlapSamples = this.overlapLength * 2;\n      if (this.overlapScratch.length < overlapSamples) {\n        this.overlapScratch = new Float32Array(overlapSamples);\n      }\n      const output = this.overlapScratch;\n      const input = inputBuffer.readSubarray(inputPosition, inputPosition + overlapSamples);\n      const frameScale = 1 / this.overlapLength;\n      for (let i = 0; i < this.overlapLength; i++) {\n        const tempFrame = (this.overlapLength - i) * frameScale;\n        const fi = i * frameScale;\n        const ctx = 2 * i;\n        const inputLeft = ctx < input.length ? input[ctx] : 0;\n        const inputRight = ctx + 1 < input.length ? input[ctx + 1] : 0;\n        output[ctx] = inputLeft * fi + this.midBuffer[ctx] * tempFrame;\n        output[ctx + 1] = inputRight * fi + this.midBuffer[ctx + 1] * tempFrame;\n      }\n      outputBuffer.appendSamples(output, this.overlapLength);\n    }\n    process() {\n      const inputBuffer = this.getInputBufferAdapter();\n      const outputBuffer = this.getOutputBufferAdapter();\n      if (!this.bootstrapMidBuffer(inputBuffer)) {\n        return;\n      }\n      while (inputBuffer.frameCount >= this.sampleReq) {\n        this.processOneWindow(inputBuffer, outputBuffer);\n      }\n    }\n    bootstrapMidBuffer(inputBuffer) {\n      if (!this.midBufferDirty) {\n        return true;\n      }\n      if (inputBuffer.frameCount < this.overlapLength) {\n        return false;\n      }\n      const needed = this.overlapLength * 2;\n      if (!this.midBuffer || this.midBuffer.length < needed) {\n        this.midBuffer = new Float32Array(needed);\n      }\n      inputBuffer.receiveSamples(this.midBuffer, this.overlapLength);\n      this.midBufferDirty = false;\n      return true;\n    }\n    processOneWindow(inputBuffer, outputBuffer) {\n      const offset = this.seekBestOverlapPosition(inputBuffer);\n      this.overlapStereo(2 * Math.floor(offset), inputBuffer, outputBuffer);\n      const middleFrames = this.seekWindowLength - 2 * this.overlapLength;\n      if (middleFrames > 0) {\n        outputBuffer.putFrom(inputBuffer, offset + this.overlapLength, middleFrames);\n      }\n      this.captureOverlapHistory(offset, inputBuffer);\n      this.advanceInputByNominalSkip(inputBuffer);\n    }\n    captureOverlapHistory(offset, inputBuffer) {\n      const start = inputBuffer.startIndex + 2 * (offset + this.seekWindowLength - this.overlapLength);\n      this.midBuffer.set(inputBuffer.readSubarray(start, start + 2 * this.overlapLength));\n    }\n    advanceInputByNominalSkip(inputBuffer) {\n      this.skipFract += this.nominalSkip;\n      const overlapSkip = Math.floor(this.skipFract);\n      this.skipFract -= overlapSkip;\n      inputBuffer.receive(overlapSkip);\n    }\n    getInputBufferAdapter() {\n      if (this._inputBuffer === null) {\n        throw new Error("inputBuffer is not set");\n      }\n      this.inputBufferAdapter.setBuffer(this._inputBuffer);\n      return this.inputBufferAdapter;\n    }\n    getOutputBufferAdapter() {\n      if (this._outputBuffer === null) {\n        throw new Error("outputBuffer is not set");\n      }\n      this.outputBufferAdapter.setOutputBuffer(this._outputBuffer);\n      return this.outputBufferAdapter;\n    }\n  };\n\n  // src/panel/player/tempo-processing.js\n  var BLOCK_FRAMES = 8192;\n  var OVERLAP_MS = 8;\n  function createTempoProcessor({ rate, sampleRate, channels }) {\n    if (!Number.isFinite(rate) || rate < 0.75 || rate > 3) throw new RangeError("无效的保调倍率");\n    if (!Number.isFinite(sampleRate) || sampleRate <= 0) throw new RangeError("无效的采样率");\n    if (channels !== 1 && channels !== 2) throw new RangeError("保调仅支持单声道或双声道");\n    const stretch = new Stretch({ createBuffers: true, sampleRate });\n    stretch.setStretchParameters({ sequenceMs: 50, seekWindowMs: 15, overlapMs: OVERLAP_MS, quickSeek: true });\n    stretch.tempo = rate;\n    const input = new Float32Array(BLOCK_FRAMES * 2);\n    const output = new Float32Array(BLOCK_FRAMES * 2);\n    let received = 0;\n    let emitted = 0;\n    let finished = false;\n    return {\n      append(planes, final = false) {\n        if (finished) throw new Error("保调流已经结束");\n        if (!Array.isArray(planes) || planes.length !== channels) throw new TypeError("声道平面不完整");\n        const frames = planes[0]?.length;\n        if (!Number.isSafeInteger(frames) || planes.some((plane) => !(plane instanceof Float32Array) || plane.length !== frames)) {\n          throw new TypeError("保调输入必须是等长 Float32 声道平面");\n        }\n        received += frames;\n        const expected = Math.round(received / rate);\n        const blocks = [];\n        let count = 0;\n        const process = (size) => {\n          stretch.inputBuffer.putSamples(input, 0, size);\n          stretch.process();\n          while (stretch.outputBuffer.frameCount > 0 && emitted < expected) {\n            const size2 = Math.min(BLOCK_FRAMES, stretch.outputBuffer.frameCount, expected - emitted);\n            stretch.outputBuffer.receiveSamples(output, size2);\n            const block = Array.from({ length: channels }, () => new Float32Array(size2));\n            for (let i = 0; i < size2; i++) {\n              for (let c = 0; c < channels; c++) {\n                const value = output[i * 2 + c];\n                if (!Number.isFinite(value)) throw new Error("保调产生了无效音频样本");\n                block[c][i] = value;\n              }\n            }\n            blocks.push(block);\n            emitted += size2;\n            count += size2;\n          }\n        };\n        for (let offset2 = 0; offset2 < frames; offset2 += BLOCK_FRAMES) {\n          const size = Math.min(BLOCK_FRAMES, frames - offset2);\n          for (let i = 0; i < size; i++) {\n            const left = planes[0][offset2 + i];\n            const right = planes[channels === 1 ? 0 : 1][offset2 + i];\n            if (!Number.isFinite(left) || !Number.isFinite(right)) throw new TypeError("保调输入含无效音频样本");\n            input[i * 2] = left;\n            input[i * 2 + 1] = right;\n          }\n          process(size);\n        }\n        if (final) {\n          const budget = Math.ceil(stretch.inputChunkSize + rate * stretch.outputChunkSize + sampleRate * OVERLAP_MS / 1e3);\n          input.fill(0);\n          for (let padded = 0; padded < budget && emitted < expected; padded += BLOCK_FRAMES) {\n            process(Math.min(BLOCK_FRAMES, budget - padded));\n          }\n          if (emitted !== expected) throw new Error("保调尾部未能排空");\n          finished = true;\n        }\n        const result = Array.from({ length: channels }, () => new Float32Array(count));\n        let offset = 0;\n        for (const block of blocks) {\n          for (let c = 0; c < channels; c++) result[c].set(block[c], offset);\n          offset += block[0].length;\n        }\n        return { planes: result, frameCount: count, final, rate, sampleRate, channels };\n      }\n    };\n  }\n\n  // src/panel/player/tempo-worker.js\n  var processor = null;\n  self.onmessage = (event) => {\n    try {\n      processor ?? (processor = createTempoProcessor(event.data));\n      const result = processor.append(event.data.planes, event.data.final === true);\n      self.postMessage({ type: "chunk", ...result }, result.planes.map((plane) => plane.buffer));\n      if (result.final) self.close();\n    } catch (error) {\n      self.postMessage({ type: "error", message: error?.message || String(error) });\n      self.close();\n    }\n  };\n})();\n' : "";
+function createTempoStreamRenderer({ rate, sampleRate, channels }) {
+  let worker = null;
+  let url = null;
   let pending = null;
-  let cachedRate = null;
-  let cachedBuffer = null;
-  function releaseJob(job) {
-    if (job.timer !== null) clearTimeout(job.timer);
-    job.timer = null;
-    if (job.worker) {
-      job.worker.onmessage = null;
-      job.worker.onerror = null;
-      job.worker.onmessageerror = null;
-      job.worker.terminate();
-      job.worker = null;
+  let destroyed = false;
+  const release = () => {
+    if (worker) {
+      worker.onmessage = worker.onerror = worker.onmessageerror = null;
+      worker.terminate();
+      worker = null;
     }
-    if (job.url) URL.revokeObjectURL(job.url);
-    job.url = null;
-  }
-  function settle(job, error, buffer) {
-    if (pending !== job) return;
+    if (url) URL.revokeObjectURL(url);
+    url = null;
+  };
+  const settle = (error, result) => {
+    const job = pending;
+    if (!job) return;
     pending = null;
-    releaseJob(job);
-    if (error) {
-      job.reject(error);
-    } else {
-      cachedRate = job.rate;
-      cachedBuffer = buffer;
-      job.resolve(buffer);
+    clearTimeout(job.timer);
+    if (error || result?.final) {
+      destroyed = true;
+      release();
     }
-    job.resolve = null;
-    job.reject = null;
-  }
-  function cancel() {
-    if (pending) settle(pending, abortError());
-  }
-  function destroy() {
-    if (destroyed) return;
-    destroyed = true;
-    cancel();
-    cachedRate = null;
-    cachedBuffer = null;
-    sourceBuffer = null;
-    context = null;
-  }
-  function getBuffer(rate) {
-    if (destroyed) return Promise.reject(abortError());
-    if (!Number.isFinite(rate) || rate < 0.75 || rate > 3) {
-      return Promise.reject(new RangeError("保调倍率必须是 0.75 到 3 之间的有限数值"));
-    }
-    if (pending?.rate === rate) return pending.promise;
-    cancel();
-    if (rate === 1) return Promise.resolve(sourceBuffer);
-    if (cachedRate === rate && cachedBuffer) return Promise.resolve(cachedBuffer);
-    const job = { rate, promise: null, resolve: null, reject: null, worker: null, url: null, timer: null };
-    job.promise = new Promise((resolve, reject) => {
-      job.resolve = resolve;
-      job.reject = reject;
-    });
-    pending = job;
-    try {
-      if (!sourceBuffer || typeof sourceBuffer.getChannelData !== "function") {
-        throw new TypeError("离线保调需要有效的 AudioBuffer");
-      }
-      if (!context || typeof context.createBuffer !== "function") {
-        throw new TypeError("离线保调需要有效的音频上下文");
-      }
-      const { numberOfChannels: channels, sampleRate, length: frameCount } = sourceBuffer;
-      if (channels !== 1 && channels !== 2) {
-        throw new RangeError("离线保调仅支持单声道或双声道音频");
-      }
-      if (!Number.isFinite(sampleRate) || sampleRate <= 0 || !Number.isSafeInteger(frameCount) || frameCount < 1) {
-        throw new RangeError("保调源音频的采样率或帧数无效");
-      }
-      const outputFrames = Math.max(1, Math.round(frameCount / rate));
-      if (!Number.isSafeInteger(outputFrames)) throw new RangeError("保调输出帧数超出安全范围");
-      if (typeof Worker !== "function" || typeof Blob !== "function" || typeof URL === "undefined" || typeof URL.createObjectURL !== "function" || typeof URL.revokeObjectURL !== "function") {
-        throw new Error("当前宿主不支持 Blob Worker，无法进行保调播放");
-      }
-      if (!WORKER_SOURCE) throw new Error("缺少内嵌保调 Worker，请使用 build.mjs 生成的面板入口");
-      job.url = URL.createObjectURL(new Blob([WORKER_SOURCE], { type: "text/javascript" }));
-      try {
-        job.worker = new Worker(job.url);
-      } catch (error) {
-        throw new Error(`无法启动保调 Worker（可能被 CSP 拒绝）：${error?.message || error}`);
-      }
-      job.worker.onmessage = (event) => {
-        if (pending !== job) return;
+    if (error) job.reject(error);
+    else job.resolve(result);
+  };
+  return {
+    append(planes, final = false) {
+      if (destroyed) return Promise.reject(new DOMException("保调流已取消", "AbortError"));
+      if (pending) return Promise.reject(new Error("保调块必须顺序提交"));
+      return new Promise((resolve, reject) => {
+        pending = { resolve, reject, timer: setTimeout(() => settle(new Error("保调处理超时")), 6e4) };
         try {
-          const result = event.data;
-          if (result?.type === "error") {
-            const error = new Error(`离线保调失败：${result.message || "Worker 未返回错误详情"}`);
-            error.name = result.name || "Error";
-            throw error;
+          if (!worker) {
+            if (!WORKER_SOURCE) throw new Error("缺少内嵌保调 Worker，请重新构建插件");
+            url = URL.createObjectURL(new Blob([WORKER_SOURCE], { type: "text/javascript" }));
+            worker = new Worker(url);
+            worker.onmessage = ({ data }) => {
+              if (data?.type === "error") {
+                settle(new Error(data.message));
+                return;
+              }
+              if (data?.type !== "chunk" || data.rate !== rate || data.sampleRate !== sampleRate || data.channels !== channels || !Number.isSafeInteger(data.frameCount) || data.frameCount < 0 || !Array.isArray(data.planes) || data.planes.length !== channels || data.planes.some((plane) => !(plane instanceof Float32Array) || plane.length !== data.frameCount)) {
+                settle(new Error("保调 Worker 返回无效音频格式"));
+                return;
+              }
+              settle(null, data);
+            };
+            worker.onerror = (event) => {
+              event.preventDefault();
+              settle(new Error(event.message || "保调 Worker 失败"));
+            };
+            worker.onmessageerror = () => settle(new Error("保调音频无法反序列化"));
           }
-          if (result?.type !== "done" || result.rate !== rate || result.sampleRate !== sampleRate || result.channels !== channels || result.frameCount !== outputFrames || !Array.isArray(result.planes) || result.planes.length !== channels) {
-            throw new Error("保调 Worker 返回了无效的音频格式");
-          }
-          for (const plane of result.planes) {
-            if (!(plane instanceof Float32Array) || plane.length !== outputFrames) {
-              throw new Error("保调 Worker 返回了无效的 Float32 声道平面");
-            }
-          }
-          const buffer = context.createBuffer(channels, outputFrames, sampleRate);
-          for (let channel = 0; channel < channels; channel += 1) {
-            buffer.copyToChannel(result.planes[channel], channel);
-          }
-          settle(job, null, buffer);
+          worker.postMessage({ rate, sampleRate, channels, planes, final }, planes.map((plane) => plane.buffer));
         } catch (error) {
-          settle(job, error);
+          settle(error);
         }
-      };
-      job.worker.onerror = (event) => {
-        event.preventDefault();
-        settle(job, new Error(`保调 Worker 启动或执行失败（请检查 CSP 与宿主支持）：${event.message || "未知错误"}`));
-      };
-      job.worker.onmessageerror = () => settle(job, new Error("保调 Worker 音频结果无法反序列化"));
-      job.timer = setTimeout(() => {
-        const error = new Error("离线保调处理超时（60 秒）");
-        error.name = "TimeoutError";
-        settle(job, error);
-      }, RENDER_TIMEOUT_MS);
-      const planes = [];
-      for (let channel = 0; channel < channels; channel += 1) {
-        const plane = sourceBuffer.getChannelData(channel);
-        if (!(plane instanceof Float32Array) || plane.length !== frameCount) {
-          throw new TypeError("保调源音频必须使用等长的 Float32 声道平面");
-        }
-        planes.push(new Float32Array(plane));
-      }
-      job.worker.postMessage(
-        { rate, sampleRate, frameCount, channels, planes },
-        planes.map((plane) => plane.buffer)
-      );
-    } catch (error) {
-      settle(job, error);
+      });
+    },
+    destroy() {
+      destroyed = true;
+      settle(new DOMException("保调流已取消", "AbortError"));
+      release();
     }
-    return job.promise;
+  };
+}
+
+// src/panel/player/stream-audio.js
+var MAX_PCM_BYTES = 128 * 1024 * 1024;
+var DECODE_QUEUE_LIMIT = 64;
+var AHEAD_SECONDS = 3;
+var START_AHEAD_SECONDS = 1;
+function createStreamingAudio({ track, onError, onStateChange = () => {
+}, createRenderer = createTempoStreamRenderer }) {
+  if (!track || typeof AudioDecoder !== "function" || typeof AudioContext !== "function") return null;
+  let sampleRate = Number(track.sampleRate) || 44100;
+  const channels = Math.max(1, Number(track.channels) || 2);
+  const context = new AudioContext({ sampleRate });
+  context.addEventListener("statechange", onStateChange);
+  const gain = context.createGain();
+  gain.connect(context.destination);
+  const pcm = [];
+  const encoded = [];
+  let totalFrames = 0;
+  let formatReady = false;
+  let skip = Math.round(Math.max(0, Number(track.mediaTime) || 0) / (Number(track.timescale) || sampleRate) * sampleRate);
+  let inputDone = false;
+  let decodedDone = false;
+  let flushing = false;
+  let pumping = false;
+  let disposed = false;
+  let failed = false;
+  let session = null;
+  const error = (reason) => {
+    if (disposed || failed) return;
+    failed = true;
+    onError(reason);
+  };
+  const decoder = new AudioDecoder({
+    output(data) {
+      try {
+        if (disposed || failed) return;
+        if (!formatReady) {
+          if (!(data.sampleRate > 0)) throw new Error("音频解码采样率无效");
+          if (sampleRate !== data.sampleRate) cancel();
+          sampleRate = data.sampleRate;
+          skip = Math.round(Math.max(0, Number(track.mediaTime) || 0) / (Number(track.timescale) || sampleRate) * sampleRate);
+          formatReady = true;
+        }
+        if (data.sampleRate !== sampleRate) throw new Error("播放过程中音频采样率发生变化");
+        const drop = Math.min(skip, data.numberOfFrames);
+        skip -= drop;
+        const size = data.numberOfFrames - drop;
+        if (!size) return;
+        if ((totalFrames + size) * channels * 4 > MAX_PCM_BYTES) throw new Error("本集音频超出本机内存上限");
+        const planes = Array.from({ length: channels }, (_, channel) => {
+          const plane = new Float32Array(data.numberOfFrames);
+          data.copyTo(plane, { planeIndex: Math.min(channel, data.numberOfChannels - 1), format: "f32-planar" });
+          return drop ? plane.slice(drop) : plane;
+        });
+        pcm.push({ start: totalFrames, size, planes });
+        totalFrames += size;
+        pumpOutput();
+      } catch (reason) {
+        error(reason);
+      } finally {
+        data.close();
+      }
+    },
+    error
+  });
+  const pumpDecode = () => {
+    if (disposed || failed || pumping || flushing) return;
+    pumping = true;
+    try {
+      while (encoded.length && decoder.decodeQueueSize < DECODE_QUEUE_LIMIT) {
+        const sample = encoded.shift();
+        decoder.decode(new EncodedAudioChunk({ type: "key", timestamp: sample.ctsUs, duration: sample.durationUs, data: sample.data }));
+      }
+      if (inputDone && !encoded.length) {
+        flushing = true;
+        void decoder.flush().then(() => {
+          if (disposed || failed) return;
+          decodedDone = true;
+          decoder.close();
+          pumpOutput();
+        }).catch(error);
+      }
+    } catch (reason) {
+      error(reason);
+    } finally {
+      pumping = false;
+    }
+  };
+  decoder.ondequeue = pumpDecode;
+  try {
+    decoder.configure({
+      codec: track.codec,
+      sampleRate,
+      numberOfChannels: channels,
+      ...track.description?.byteLength ? { description: track.description } : {}
+    });
+  } catch (reason) {
+    decoder.close();
+    void context.close().catch(() => {
+    });
+    throw reason;
   }
-  return { getBuffer, cancel, destroy };
+  const readPcm = (target, count) => {
+    const planes = Array.from({ length: channels }, () => new Float32Array(count));
+    let copied = 0;
+    while (copied < count) {
+      const chunk = pcm[target.index];
+      if (!chunk) throw new Error("音频缓冲区不完整");
+      const offset = target.cursor + copied - chunk.start;
+      if (offset >= chunk.size) {
+        target.index++;
+        continue;
+      }
+      const size = Math.min(count - copied, chunk.size - offset);
+      for (let c = 0; c < channels; c++) planes[c].set(chunk.planes[c].subarray(offset, offset + size), copied);
+      copied += size;
+    }
+    target.cursor += count;
+    return planes;
+  };
+  const schedule = (target) => {
+    if (session !== target || target.when === null || target.missed) return;
+    while (target.queue.length) {
+      const when = target.when + target.scheduled / sampleRate;
+      if (when < context.currentTime - 5e-3) {
+        target.missed = true;
+        return;
+      }
+      const buffer = target.queue.shift();
+      const source = context.createBufferSource();
+      source.buffer = buffer;
+      source.playbackRate.value = 1;
+      source.connect(target.gain);
+      target.sources.add(source);
+      source.onended = () => {
+        source.disconnect();
+        target.sources.delete(source);
+        if (target.cancelled && !target.sources.size) target.gain.disconnect();
+        if (session === target) pumpOutput();
+      };
+      source.start(when);
+      target.scheduled += buffer.length;
+    }
+  };
+  const accept = (target, result) => {
+    if (disposed || session !== target) return;
+    target.busy = false;
+    target.final = result.final;
+    const length = result.planes[0].length;
+    if (length) {
+      const buffer = context.createBuffer(channels, length, sampleRate);
+      for (let c = 0; c < channels; c++) buffer.copyToChannel(result.planes[c], c);
+      target.queue.push(buffer);
+      target.produced += length;
+    }
+    schedule(target);
+  };
+  function pumpOutput() {
+    const target = session;
+    if (!target || disposed || failed || target.busy || target.final || target.missed) return;
+    try {
+      const elapsed = target.when === null ? 0 : Math.max(0, context.currentTime - target.when);
+      while (!target.busy && !target.final && !target.missed && target.produced / sampleRate - elapsed < AHEAD_SECONDS) {
+        const available = Math.max(0, totalFrames - target.cursor);
+        if (!decodedDone && available < sampleRate / 4) break;
+        const count = Math.min(available, sampleRate);
+        const planes = readPcm(target, count);
+        const final = decodedDone && target.cursor >= totalFrames;
+        if (target.rate === 1) accept(target, { planes, final });
+        else {
+          target.renderer ?? (target.renderer = createRenderer({ rate: target.rate, sampleRate, channels }));
+          target.busy = true;
+          void target.renderer.append(planes, final).then((result) => {
+            try {
+              accept(target, result);
+              pumpOutput();
+            } catch (reason) {
+              error(reason);
+            }
+          }).catch((reason) => {
+            if (session === target && reason?.name !== "AbortError") error(reason);
+          });
+        }
+      }
+    } catch (reason) {
+      error(reason);
+    }
+  }
+  const cancel = () => {
+    const target = session;
+    session = null;
+    if (!target) return;
+    target.renderer?.destroy();
+    target.cancelled = true;
+    const now = context.currentTime;
+    let end = now;
+    if (!disposed && context.state === "running" && target.sources.size) {
+      target.gain.gain.cancelAndHoldAtTime(now);
+      target.gain.gain.linearRampToValueAtTime(0, now + 5e-3);
+      end += 5e-3;
+    }
+    for (const source of target.sources) {
+      try {
+        source.stop(end);
+      } catch {
+      }
+      if (end === now) source.disconnect();
+    }
+    if (end === now || !target.sources.size) {
+      target.sources.clear();
+      target.gain.disconnect();
+    }
+    target.queue.length = 0;
+  };
+  return {
+    context,
+    append(samples) {
+      if (!disposed && !inputDone) {
+        for (const sample of samples) encoded.push(sample);
+        pumpDecode();
+      }
+    },
+    finish() {
+      if (!disposed) {
+        inputDone = true;
+        pumpDecode();
+      }
+    },
+    get bufferedMs() {
+      return totalFrames / sampleRate * 1e3;
+    },
+    get complete() {
+      return decodedDone;
+    },
+    get scheduledEndMs() {
+      return session ? session.startMs + session.scheduled / sampleRate * session.rate * 1e3 : 0;
+    },
+    get ended() {
+      return decodedDone && (!session || session.final && !session.queue.length);
+    },
+    get missed() {
+      return session?.missed === true;
+    },
+    prepare(at, rate) {
+      if (disposed || failed) return false;
+      if (decodedDone && at >= totalFrames / sampleRate * 1e3) return true;
+      if (!session || session.startMs !== at || session.rate !== rate) {
+        cancel();
+        const cursor = Math.floor(at / 1e3 * sampleRate);
+        const index = pcm.findIndex((chunk) => chunk.start + chunk.size > cursor);
+        const sessionGain = context.createGain();
+        sessionGain.connect(gain);
+        session = {
+          startMs: at,
+          rate,
+          cursor,
+          index: index < 0 ? pcm.length : index,
+          produced: 0,
+          scheduled: 0,
+          queue: [],
+          sources: /* @__PURE__ */ new Set(),
+          gain: sessionGain,
+          when: null,
+          missed: false,
+          busy: false,
+          final: false,
+          renderer: null
+        };
+      }
+      pumpOutput();
+      return Boolean(session && (session.produced >= sampleRate * START_AHEAD_SECONDS || session.final && session.produced > 0));
+    },
+    start(when) {
+      if (!session || !session.produced) return false;
+      session.when = when;
+      session.gain.gain.setValueAtTime(0, when);
+      session.gain.gain.linearRampToValueAtTime(1, when + 5e-3);
+      schedule(session);
+      return true;
+    },
+    update() {
+      if (session && session.when !== null) {
+        pumpOutput();
+        if (session) schedule(session);
+      }
+    },
+    setVolume(value) {
+      gain.gain.value = value;
+    },
+    cancel,
+    destroy() {
+      if (disposed) return;
+      disposed = true;
+      cancel();
+      try {
+        decoder.close();
+      } catch {
+      }
+      context.removeEventListener("statechange", onStateChange);
+      void context.close().catch(() => {
+      });
+      gain.disconnect();
+      pcm.length = encoded.length = 0;
+    }
+  };
 }
 
 // src/panel/player/segments.js
@@ -4530,10 +4794,10 @@ async function* readSegments({ rpc, episodeId, quality, count, cancelled, concur
 var MAX_DECODE_PER_TICK = 16;
 var MAX_BUFFERED_FRAMES = 40;
 var MAX_VIDEO_LAG_US = 1e5;
-var RESUME_AHEAD_MS = 80;
+var RESUME_AHEAD_MS = 400;
+var SOURCE_AHEAD_MS = 3e3;
 var AUDIO_START_DELAY_SECONDS = 0.06;
-var AUDIO_FADE_SECONDS = 5e-3;
-var MAX_LOCAL_SEGMENTS = 128;
+var MAX_LOCAL_SEGMENTS = LIMITS.localSegmentsMax;
 var createWebCodecsPlayer = ({ canvas, getRpc, onState = () => {
 }, onProgress = () => {
 }, log = () => {
@@ -4559,17 +4823,12 @@ var createWebCodecsPlayer = ({ canvas, getRpc, onState = () => {
   let lastDrawnEndUs = -1;
   let decoderFlushing = false;
   let decoderFlushed = false;
+  let inputComplete = false;
+  let pendingVideoTarget = null;
+  let settleLoad = null;
   let audioTrack = null;
-  let audioSamples = [];
-  let activeAudioDecoder = null;
   let audioCtx = null;
-  let audioBuffer = null;
-  let audioSource = null;
-  let audioSourceGain = null;
-  let audioGain = null;
-  let tempoRenderer = null;
-  let preparingAudio = false;
-  let audioStartSeq = 0;
+  let audio = null;
   let audioClock = null;
   let audioClockActive = false;
   let volumeLevel = 1;
@@ -4584,6 +4843,8 @@ var createWebCodecsPlayer = ({ canvas, getRpc, onState = () => {
     height: 0,
     decoded: 0,
     buffered: 0,
+    bufferedEndMs: 0,
+    downloadComplete: false,
     dropped: 0,
     output: 0,
     picked: 0,
@@ -4620,8 +4881,8 @@ var createWebCodecsPlayer = ({ canvas, getRpc, onState = () => {
   };
   const currentMs = () => {
     if (!anchored || !playing || state.buffering) return anchorTimeMs;
-    if (audioClockActive && audioSource && audioCtx) {
-      return Math.min(state.durationMs, audioMediaMs(audibleContextTime()));
+    if (audioClockActive && audioCtx) {
+      return Math.min(state.durationMs, audio?.ended ? Infinity : audio.scheduledEndMs, audioMediaMs(audibleContextTime()));
     }
     return Math.min(state.durationMs, anchorTimeMs + Math.max(0, performance.now() - anchorWall) * playbackRate);
   };
@@ -4646,6 +4907,7 @@ var createWebCodecsPlayer = ({ canvas, getRpc, onState = () => {
     stopAudio();
     state.error = String(error?.message || error).slice(0, 120);
     state.phase = "error";
+    settleLoad?.(error);
     log(`[wvc] 播放失败：${state.error}`);
     emit(true);
   };
@@ -4679,12 +4941,18 @@ var createWebCodecsPlayer = ({ canvas, getRpc, onState = () => {
     decoderFlushing = false;
     decoderFlushed = false;
     nextIndex = 0;
+    pendingVideoTarget = !inputComplete && targetMs >= state.bufferedEndMs ? targetMs : null;
     for (let index = 0; index < samples.length; index += 1) {
       if (samples[index].key && samples[index].ctsUs <= targetMs * 1e3) nextIndex = index;
     }
   };
   const pump = () => {
     if (disposed || state.phase === "error" || !decodeConfig || decoderFlushing || decoderFlushed) return;
+    if (pendingVideoTarget !== null) {
+      if (!inputComplete && pendingVideoTarget >= state.bufferedEndMs) return;
+      resetVideoAt(pendingVideoTarget);
+    }
+    if (!samples.length) return;
     const dec = ensureDecoder();
     let count = 0;
     while (nextIndex < samples.length && count < MAX_DECODE_PER_TICK) {
@@ -4702,7 +4970,7 @@ var createWebCodecsPlayer = ({ canvas, getRpc, onState = () => {
       state.decoded += 1;
       count += 1;
     }
-    if (nextIndex === samples.length) {
+    if (inputComplete && nextIndex === samples.length) {
       decoderFlushing = true;
       void dec.flush().then(() => {
         if (disposed || decoder !== dec) return;
@@ -4752,6 +5020,8 @@ var createWebCodecsPlayer = ({ canvas, getRpc, onState = () => {
   const videoCovers = (timeMs) => lastDrawnTs >= 0 && lastDrawnEndUs + 1e3 >= timeMs * 1e3;
   const readyToResume = (timeMs) => {
     if (!videoCovers(timeMs)) return false;
+    const sourceTarget = Math.min(state.durationMs, timeMs + SOURCE_AHEAD_MS * playbackRate);
+    if (!inputComplete && state.bufferedEndMs + 1 < sourceTarget) return false;
     const targetUs = Math.min(state.durationMs, timeMs + RESUME_AHEAD_MS * playbackRate) * 1e3;
     let endUs = lastDrawnEndUs;
     let coveredFrames = 0;
@@ -4769,18 +5039,21 @@ var createWebCodecsPlayer = ({ canvas, getRpc, onState = () => {
       const at = currentMs();
       draw(at);
       pump();
+      audio?.update();
       if (playing) {
         const videoBehind = lastDrawnTs < 0 || at * 1e3 > lastDrawnEndUs + MAX_VIDEO_LAG_US;
         const tailPending = at >= state.durationMs && !videoCovers(at);
-        if (!state.buffering && (videoBehind || tailPending)) {
+        const audioBehind = audioClockActive && (audio.missed || !audio.ended && at >= audio.scheduledEndMs);
+        if (!state.buffering && (videoBehind || tailPending || audioBehind)) {
           anchorTimeMs = at;
           state.buffering = true;
           stopAudio();
         }
-        if (state.buffering && !preparingAudio && readyToResume(at)) {
-          void startAudio(at);
+        if (state.buffering) {
+          const audioReady = !audio || audio.prepare(at, playbackRate);
+          if (audioReady && readyToResume(at)) startAudio(at);
         }
-        if (!state.buffering && at >= state.durationMs) {
+        if (inputComplete && !state.buffering && at >= state.durationMs) {
           playing = false;
           anchorTimeMs = state.durationMs;
           state.phase = "ended";
@@ -4798,90 +5071,32 @@ var createWebCodecsPlayer = ({ canvas, getRpc, onState = () => {
     }
   };
   const stopAudio = () => {
-    audioStartSeq += 1;
-    preparingAudio = false;
-    tempoRenderer?.cancel();
+    audio?.cancel();
     audioClockActive = false;
     audioClock = null;
-    const source = audioSource;
-    const gain = audioSourceGain;
-    audioSource = null;
-    audioSourceGain = null;
-    if (!source) return;
-    try {
-      if (!disposed && audioCtx?.state === "running" && gain) {
-        const now = audioCtx.currentTime;
-        gain.gain.cancelAndHoldAtTime(now);
-        gain.gain.linearRampToValueAtTime(0, now + AUDIO_FADE_SECONDS);
-        source.stop(now + AUDIO_FADE_SECONDS);
-      } else {
-        source.stop();
-        source.disconnect();
-        gain?.disconnect();
-      }
-    } catch {
-      source.disconnect();
-      gain?.disconnect();
-    }
   };
-  const startAudio = async (fromMs) => {
-    stopAudio();
-    const seq = audioStartSeq;
+  const startAudio = (fromMs) => {
     const at = Math.max(0, Math.min(Number(fromMs) || 0, state.durationMs));
-    const rate = playbackRate;
     anchorTimeMs = at;
     anchorWall = performance.now();
     if (disposed || !playing) return;
-    if (!audioCtx || !audioBuffer || !audioGain || at >= audioBuffer.duration * 1e3 || at >= state.durationMs) {
+    if (!audio || audio.complete && at >= audio.bufferedMs || at >= state.durationMs) {
       state.buffering = false;
       return;
     }
-    const context = audioCtx;
-    state.buffering = true;
-    preparingAudio = true;
-    void context.resume().catch(() => {
+    void audioCtx.resume().catch(() => {
     });
-    emit(true);
-    if (disposed || seq !== audioStartSeq || !playing) return;
-    try {
-      tempoRenderer ?? (tempoRenderer = createTempoRenderer(context, audioBuffer));
-      const buffer = await tempoRenderer.getBuffer(rate);
-      if (disposed || seq !== audioStartSeq || !playing || context !== audioCtx) return;
-      preparingAudio = false;
-      anchorTimeMs = at;
-      anchorWall = performance.now();
-      if (context.state !== "running") {
-        state.buffering = false;
-        emit(true);
-        return;
-      }
-      const quantum = 128 / context.sampleRate;
-      const when = Math.ceil((context.currentTime + AUDIO_START_DELAY_SECONDS) / quantum) * quantum;
-      const offset = Math.min(at / 1e3 / rate, buffer.duration);
-      const source = context.createBufferSource();
-      const gain = context.createGain();
-      source.buffer = buffer;
-      source.playbackRate.value = 1;
-      gain.gain.setValueAtTime(0, when);
-      gain.gain.linearRampToValueAtTime(1, when + AUDIO_FADE_SECONDS);
-      source.connect(gain);
-      gain.connect(audioGain);
-      source.onended = () => {
-        source.disconnect();
-        gain.disconnect();
-      };
-      audioSource = source;
-      audioSourceGain = gain;
-      source.start(when, offset);
-      audioClock = { contextTime: when, mediaMs: at, rate };
-      audioClockActive = true;
+    if (audioCtx.state !== "running") {
       state.buffering = false;
-      emit(true);
-    } catch (error) {
-      if (disposed || seq !== audioStartSeq) return;
-      preparingAudio = false;
-      if (error?.name !== "AbortError") fail(error);
+      return;
     }
+    const quantum = 128 / audioCtx.sampleRate;
+    const when = Math.ceil((audioCtx.currentTime + AUDIO_START_DELAY_SECONDS) / quantum) * quantum;
+    if (!audio.start(when)) return;
+    audioClock = { contextTime: when, mediaMs: at, rate: playbackRate };
+    audioClockActive = true;
+    state.buffering = false;
+    emit(true);
   };
   const setPlaybackRate = (value) => {
     const next = Number(value);
@@ -4899,7 +5114,12 @@ var createWebCodecsPlayer = ({ canvas, getRpc, onState = () => {
   const syncAudioState = () => {
     if (disposed || !audioCtx) return;
     if (audioCtx.state === "running") {
-      if (playing && !state.buffering && !audioClockActive) void startAudio(currentMs());
+      if (playing && !state.buffering && !audioClockActive) {
+        const at2 = currentMs();
+        stopAudio();
+        anchorTimeMs = at2;
+        state.buffering = true;
+      }
       return;
     }
     if (!audioClockActive) return;
@@ -4913,139 +5133,17 @@ var createWebCodecsPlayer = ({ canvas, getRpc, onState = () => {
     void audioCtx.resume().catch(() => {
     });
   };
-  const prepareAudio = async () => {
-    if (!audioTrack || !audioSamples.length) {
-      onProgress("audio: 无音轨");
-      return;
-    }
-    if (typeof AudioDecoder === "undefined") {
-      onProgress("audio: 无 AudioDecoder");
-      return;
-    }
-    const sampleRate = Number(audioTrack.sampleRate) || 44100;
-    const channels = Math.max(1, Number(audioTrack.channels) || 2);
-    const chunks = [];
-    let total = 0;
-    let failure = "";
-    const audioDecoder = new AudioDecoder({
-      output: (data) => {
-        try {
-          if (disposed) return;
-          const count = data.numberOfFrames;
-          const planes = [];
-          for (let channel = 0; channel < data.numberOfChannels; channel += 1) {
-            const plane = new Float32Array(count);
-            data.copyTo(plane, { planeIndex: channel, format: "f32-planar" });
-            planes.push(plane);
-          }
-          chunks.push({ planes, frames: count });
-          total += count;
-        } catch (error) {
-          failure = String(error?.message || error).slice(0, 80);
-        } finally {
-          data.close();
-        }
-      },
-      error: (error) => {
-        failure = String(error?.message || error).slice(0, 80);
-      }
-    });
-    activeAudioDecoder = audioDecoder;
-    try {
-      audioDecoder.configure({ codec: audioTrack.codec, sampleRate, numberOfChannels: channels });
-      for (const sample of audioSamples) {
-        audioDecoder.decode(
-          new EncodedAudioChunk({ type: "key", timestamp: sample.ctsUs, data: sample.data })
-        );
-      }
-      await audioDecoder.flush();
-    } catch (error) {
-      failure = String(error?.message || error).slice(0, 80);
-    } finally {
-      try {
-        audioDecoder.close();
-      } catch {
-      }
-      if (activeAudioDecoder === audioDecoder) activeAudioDecoder = null;
-    }
-    if (disposed) return;
-    if (failure || !total) {
-      onProgress(`audio 失败: ${failure || "无输出"}`);
-      return;
-    }
-    try {
-      audioCtx = new AudioContext({ sampleRate });
-      audioCtx.addEventListener("statechange", syncAudioState);
-      const targetRate = Number(audioCtx.sampleRate) || sampleRate;
-      audioGain = audioCtx.createGain();
-      audioGain.gain.value = volumeLevel;
-      audioGain.connect(audioCtx.destination);
-      const primingFrames = Math.round(Math.max(0, Number(audioTrack.mediaTime) || 0) / (Number(audioTrack.timescale) || sampleRate) * sampleRate);
-      const skip = Math.min(primingFrames, total);
-      const usable = Math.max(0, total - skip);
-      const source = [];
-      for (let channel = 0; channel < channels; channel += 1) {
-        source.push(new Float32Array(Math.max(1, usable)));
-      }
-      let consumed = 0;
-      let written = 0;
-      for (const chunk of chunks) {
-        const drop = Math.max(0, skip - consumed);
-        const count = Math.min(Math.max(0, chunk.frames - drop), Math.max(0, usable - written));
-        if (count > 0) {
-          for (let channel = 0; channel < channels; channel += 1) {
-            const plane = chunk.planes[Math.min(channel, chunk.planes.length - 1)];
-            if (!plane) continue;
-            source[channel].set(plane.subarray(drop, drop + count), written);
-          }
-          written += count;
-        }
-        consumed += chunk.frames;
-      }
-      const outFrames = Math.max(1, Math.round(written / sampleRate * targetRate));
-      audioBuffer = audioCtx.createBuffer(channels, outFrames, targetRate);
-      for (let channel = 0; channel < channels; channel += 1) {
-        const input = source[channel];
-        const output = audioBuffer.getChannelData(channel);
-        if (targetRate === sampleRate) {
-          output.set(input.subarray(0, Math.min(outFrames, input.length)));
-          continue;
-        }
-        const step = sampleRate / targetRate;
-        for (let index = 0; index < outFrames; index += 1) {
-          const position = index * step;
-          const base = Math.floor(position);
-          const fraction = position - base;
-          const a = input[base] || 0;
-          const b = input[Math.min(base + 1, Math.max(0, written - 1))] || 0;
-          output[index] = a + (b - a) * fraction;
-        }
-      }
-      onProgress(
-        `audio ok: ${channels}ch ${sampleRate}Hz ctx=${targetRate}Hz ${(outFrames / targetRate).toFixed(1)}s skip=${skip}`
-      );
-    } catch (error) {
-      onProgress(`audio 初始化失败: ${String(error?.message || error).slice(0, 80)}`);
-      audioCtx?.removeEventListener("statechange", syncAudioState);
-      void audioCtx?.close().catch(() => {
-      });
-      audioCtx = null;
-      audioGain = null;
-      audioBuffer = null;
-    }
-  };
   const stopLoop = () => {
     if (rafId) cancelAnimationFrame(rafId);
     rafId = 0;
   };
-  const load = async ({ episodeId, quality, segmentCount, initPayload: preparedInit, resumeMs = 0 }) => {
+  const load = async ({ episodeId, quality, segmentCount, initPayload: preparedInit, durationMs = 0, resumeMs = 0 }) => {
     if (disposed) return;
     const startedAt = performance.now();
     const rpc = getRpc();
     state.phase = "loading";
     state.error = "";
     emit(true);
-    onProgress(`load: init q=${quality}`);
     const initPayload = preparedInit || await rpc.getStreamInit(episodeId, quality);
     if (disposed) return;
     const initBytes = decodeBase64(initPayload?.base64);
@@ -5054,81 +5152,92 @@ var createWebCodecsPlayer = ({ canvas, getRpc, onState = () => {
     track = parsed.video;
     audioTrack = parsed.audio;
     if (!track) throw new PanelError("PROTOCOL", "init 段没有视频轨");
-    onProgress(`init ok: ${track.codec} ${track.width}x${track.height} desc=${track.description?.length ?? 0}B`);
+    const declared = Math.floor(Number(segmentCount) || 0);
+    if (declared <= 0) throw new PanelError("PROTOCOL", "服务端未返回分片数量");
+    if (declared > MAX_LOCAL_SEGMENTS) throw new PanelError("SEGMENT_LIMIT", "本集分段数量超过本机解码上限 " + MAX_LOCAL_SEGMENTS);
+    state.durationMs = Math.max(0, Number(durationMs) || parsed.durationMs || 0);
+    if (!state.durationMs) throw new PanelError("PROTOCOL", "服务端未返回有效时长");
     canvas.width = track.width || 854;
     canvas.height = track.height || 480;
     state.width = canvas.width;
     state.height = canvas.height;
     ctx.fillStyle = "#000";
     ctx.fillRect(0, 0, canvas.width, canvas.height);
-    const declared = Math.floor(Number(segmentCount) || 0);
-    if (declared <= 0) throw new PanelError("PROTOCOL", "服务端未返回分片数量");
-    if (declared > MAX_LOCAL_SEGMENTS) {
-      throw new PanelError("SEGMENT_LIMIT", `本集共 ${declared} 段，超过本机解码上限 ${MAX_LOCAL_SEGMENTS} 段`);
-    }
-    samples = [];
-    audioSamples = [];
-    const total = declared;
-    for await (const { seq, bytes } of readSegments({ rpc, episodeId, quality, count: total, cancelled: () => disposed })) {
-      const buckets = parseSegment(bytes, parsed.tracks, parsed.trex);
-      const list = buckets.get(track.id) || [];
-      const videoShift = Number(track.mediaTime) || 0;
-      for (const sample of list) {
-        samples.push({
-          // 减去 elst 的 media_time，把各轨对齐到同一条时间轴。
-          ctsUs: toMicros(Math.max(0, sample.time + sample.cts - videoShift), track.timescale),
-          durationUs: toMicros(sample.duration, track.timescale),
-          key: sample.key,
-          data: bytes.subarray(sample.offset, sample.offset + sample.size)
-        });
-      }
-      if (audioTrack) {
-        const audioList = buckets.get(audioTrack.id) || [];
-        for (const sample of audioList) {
-          audioSamples.push({
-            ctsUs: toMicros(sample.time, audioTrack.timescale),
-            data: bytes.subarray(sample.offset, sample.offset + sample.size)
-          });
-        }
-      }
-      state.phase = "loading";
-      state.durationMs = 0;
-      emit(true);
-      onProgress(`seg ${seq}/${total}: ${bytes.length}B samples=${samples.length}`);
-    }
-    if (disposed) return;
-    if (!samples.length) throw new PanelError("PROTOCOL", "没有解析到视频样本");
-    state.durationMs = Math.round(samples.reduce((end, sample) => Math.max(end, sample.ctsUs + sample.durationUs), 0) / 1e3);
-    const timestamps = [...new Set(samples.map((sample) => sample.ctsUs))].sort((a, b) => a - b);
-    firstVideoTimeUs = timestamps[0];
-    videoFrameEnds.clear();
-    timestamps.forEach((timestamp, index) => {
-      videoFrameEnds.set(timestamp, timestamps[index + 1] ?? state.durationMs * 1e3);
-    });
     decodeConfig = {
       codec: track.codec,
       description: track.description,
       codedWidth: canvas.width,
       codedHeight: canvas.height,
-      // 有硬件解码就走硬件，没有会自动回退软件解码；高倍速下仍以音画同步优先。
       hardwareAcceleration: "prefer-hardware"
     };
-    onProgress(`cfg ${track.codec} keys=${samples.filter((sample) => sample.key).length}`);
     anchorTimeMs = Math.max(0, Math.min(Number(resumeMs) || 0, state.durationMs));
     anchored = true;
+    audio = createStreamingAudio({ track: audioTrack, onError: fail, onStateChange: syncAudioState });
+    audioCtx = audio?.context || null;
+    audio?.setVolume(volumeLevel);
     resetVideoAt(anchorTimeMs);
-    pump();
-    await prepareAudio();
-    if (disposed || state.phase === "error") return;
-    draw(anchorTimeMs);
-    pump();
-    anchorWall = performance.now();
-    state.phase = "ready";
-    previewing = true;
-    rafId = requestAnimationFrame(tick);
-    log(`[wvc] 就绪 ${track.codec} ${canvas.width}x${canvas.height} 样本=${samples.length} 时长=${state.durationMs}ms 准备=${Math.round(performance.now() - startedAt)}ms`);
-    onProgress(`ready ${samples.length} 帧 / ${state.durationMs}ms`);
-    emit(true);
+    const ready = new Promise((resolve, reject) => {
+      settleLoad = (error) => {
+        settleLoad = null;
+        if (error) reject(error);
+        else resolve();
+      };
+    });
+    const consume = async () => {
+      for await (const { seq, bytes } of readSegments({
+        rpc,
+        episodeId,
+        quality,
+        count: declared,
+        cancelled: () => disposed || state.phase === "error"
+      })) {
+        const buckets = parseSegment(bytes, parsed.tracks, parsed.trex);
+        const shift = Number(track.mediaTime) || 0;
+        for (const sample of buckets.get(track.id) || []) {
+          samples.push({
+            ctsUs: toMicros(Math.max(0, sample.time + sample.cts - shift), track.timescale),
+            durationUs: toMicros(sample.duration, track.timescale),
+            key: sample.key,
+            data: bytes.subarray(sample.offset, sample.offset + sample.size)
+          });
+        }
+        inputComplete = seq === declared;
+        state.downloadComplete = inputComplete;
+        const timestamps = [...new Set(samples.map((sample) => sample.ctsUs))].sort((a, b) => a - b);
+        firstVideoTimeUs = timestamps[0] || 0;
+        const endUs = samples.reduce((end, sample) => Math.max(end, sample.ctsUs + sample.durationUs), 0);
+        state.bufferedEndMs = endUs / 1e3;
+        if (inputComplete) {
+          if (!samples.length) throw new PanelError("PROTOCOL", "没有解析到视频样本");
+          state.durationMs = Math.round(endUs / 1e3);
+          anchorTimeMs = Math.min(anchorTimeMs, state.durationMs);
+        }
+        timestamps.forEach((timestamp, index) => videoFrameEnds.set(timestamp, timestamps[index + 1] ?? endUs));
+        if (lastDrawnTs >= 0) lastDrawnEndUs = videoFrameEnds.get(lastDrawnTs) ?? lastDrawnEndUs;
+        if (audioTrack) audio?.append((buckets.get(audioTrack.id) || []).map((sample) => ({
+          ctsUs: toMicros(sample.time, audioTrack.timescale),
+          durationUs: toMicros(sample.duration, audioTrack.timescale),
+          data: bytes.subarray(sample.offset, sample.offset + sample.size)
+        })));
+        if (inputComplete) audio?.finish();
+        if (disposed || state.phase === "error") return;
+        if (state.phase === "loading" && samples.length) {
+          resetVideoAt(anchorTimeMs);
+          state.phase = "ready";
+          previewing = true;
+          pump();
+          rafId = requestAnimationFrame(tick);
+          log("[wvc] 首段就绪 " + track.codec + " 准备=" + Math.round(performance.now() - startedAt) + "ms");
+          settleLoad?.();
+        } else if (playing || previewing) pump();
+        onProgress("seg " + seq + "/" + declared + ": " + bytes.length + "B");
+        emit(true);
+      }
+    };
+    void consume().catch((error) => {
+      if (!disposed) fail(error);
+    });
+    return ready;
   };
   const play = () => {
     if (disposed || !decodeConfig || state.phase === "loading" || state.phase === "error" || playing) return;
@@ -5181,23 +5290,10 @@ var createWebCodecsPlayer = ({ canvas, getRpc, onState = () => {
     state.buffering = false;
     stopLoop();
     stopAudio();
-    tempoRenderer?.destroy();
-    tempoRenderer = null;
-    try {
-      audioCtx?.removeEventListener?.("statechange", syncAudioState);
-      void audioCtx?.close().catch(() => {
-      });
-    } catch {
-    }
+    settleLoad?.();
+    audio?.destroy();
+    audio = null;
     audioCtx = null;
-    audioGain = null;
-    audioBuffer = null;
-    audioSamples = [];
-    try {
-      activeAudioDecoder?.close();
-    } catch {
-    }
-    activeAudioDecoder = null;
     clearFrames();
     videoFrameEnds.clear();
     try {
@@ -5210,7 +5306,7 @@ var createWebCodecsPlayer = ({ canvas, getRpc, onState = () => {
   };
   const setVolume = (value) => {
     volumeLevel = Math.max(0, Math.min(1, Number(value) || 0));
-    if (audioGain) audioGain.gain.value = volumeLevel;
+    audio?.setVolume(volumeLevel);
     return volumeLevel;
   };
   return {
@@ -6191,7 +6287,14 @@ function createPlayer(slot, initialProps) {
   };
   const syncBuffered = () => {
     if (wvc) {
-      buffered.replaceChildren();
+      const snapshot = wvc.getState();
+      const end = snapshot.downloadComplete ? snapshot.durationMs : snapshot.bufferedEndMs;
+      if (end > 0 && snapshot.durationMs > 0) {
+        const node = make("span", "hg-player-buffered-range");
+        node.style.left = "0%";
+        node.style.width = `${clamp(end / snapshot.durationMs * 100, 0, 100)}%`;
+        buffered.replaceChildren(node);
+      } else buffered.replaceChildren();
       return;
     }
     const duration = durationOf();
@@ -6352,7 +6455,7 @@ function createPlayer(slot, initialProps) {
         label: t("player.playDirect"),
         kind: "direct",
         primary: true,
-        // 用户主动重试：清掉本次会话的失败标记，重新走一遍本机解码。
+        // 用户主动重试：清掉当前集的失败标记，重新走一遍本机解码。
         onClick: () => {
           wvcBlocked = false;
           void playWebCodecs();
@@ -6407,7 +6510,7 @@ function createPlayer(slot, initialProps) {
         label: t("player.playDirect"),
         kind: "direct",
         primary: true,
-        // 用户主动重试：清掉本次会话的失败标记，重新走一遍本机解码。
+        // 用户主动重试：清掉当前集的失败标记，重新走一遍本机解码。
         onClick: () => {
           wvcBlocked = false;
           void playWebCodecs();
@@ -6775,6 +6878,7 @@ function createPlayer(slot, initialProps) {
     }
     let player = null;
     stopWebCodecs();
+    engine.stop();
     const seq = wvcSeq;
     endedReported = false;
     hideNotice();
@@ -6847,6 +6951,7 @@ function createPlayer(slot, initialProps) {
         episodeId,
         quality,
         segmentCount,
+        durationMs: info.durationMs,
         initPayload,
         resumeMs
       });
@@ -6876,6 +6981,7 @@ function createPlayer(slot, initialProps) {
   const loadEpisode = () => {
     stopWebCodecs();
     if (disposed) return;
+    wvcBlocked = false;
     hideOverlay();
     hideNotice();
     lastNoticeKey = "";
@@ -7147,6 +7253,107 @@ function PlayerMount(props) {
       "data-series-id": props.series?.id || "",
       "data-episode-id": props.episodes?.[props.episodeIndex]?.id || ""
     })
+  );
+}
+
+// src/panel/ui/episode-picker.js
+var GROUP_SIZE = 30;
+var revealActiveGroup = (strip) => {
+  const active = strip?.querySelector('[aria-pressed="true"]');
+  if (!active || !strip.clientWidth) return;
+  const left = active.offsetLeft;
+  const right = left + active.offsetWidth;
+  if (left < strip.scrollLeft) strip.scrollLeft = left;
+  else if (right > strip.scrollLeft + strip.clientWidth) strip.scrollLeft = right - strip.clientWidth;
+};
+function EpisodePicker({ ctx, episodes, selectedIndex, historyEntry, onSelectEpisode }) {
+  const React = getReact();
+  const t = ctx.t;
+  const groupCount = Math.ceil(episodes.length / GROUP_SIZE);
+  const currentGroup = Math.max(0, Math.min(Math.floor(selectedIndex / GROUP_SIZE), groupCount - 1));
+  const [groupIndex, setGroupIndex] = React.useState(currentGroup);
+  const stripRef = React.useRef(null);
+  const activeGroup = Math.max(0, Math.min(groupIndex, groupCount - 1));
+  const startIndex = activeGroup * GROUP_SIZE;
+  React.useLayoutEffect(() => {
+    setGroupIndex(currentGroup);
+  }, [selectedIndex, currentGroup]);
+  React.useLayoutEffect(() => {
+    revealActiveGroup(stripRef.current);
+  }, [activeGroup, groupCount]);
+  return h(
+    "div",
+    { className: "hg-episode-picker" },
+    groupCount > 1 ? h(
+      "div",
+      { className: "hg-episode-nav" },
+      h(
+        "div",
+        { className: "hg-episode-groups", ref: stripRef, role: "group", "aria-label": t("detail.episodeGroups") },
+        Array.from({ length: groupCount }, (_, index) => {
+          const start = episodes[index * GROUP_SIZE].number;
+          const end = episodes[Math.min((index + 1) * GROUP_SIZE, episodes.length) - 1].number;
+          return h(
+            "button",
+            {
+              key: index,
+              type: "button",
+              className: "hg-episode-group",
+              "aria-pressed": index === activeGroup,
+              "aria-label": start === end ? t("unit.episodeShort", { number: start }) : t("detail.episodeRange", { start, end }),
+              onClick: () => setGroupIndex(index)
+            },
+            start === end ? String(start) : `${start}–${end}`
+          );
+        })
+      ),
+      h(
+        "button",
+        {
+          type: "button",
+          className: "hg-linkbtn hg-episode-locate",
+          onClick: () => {
+            setGroupIndex(currentGroup);
+            if (activeGroup === currentGroup) revealActiveGroup(stripRef.current);
+          }
+        },
+        t("detail.backToCurrent")
+      )
+    ) : null,
+    h(
+      "div",
+      { className: "hg-episodes" },
+      episodes.slice(startIndex, startIndex + GROUP_SIZE).map((episode, offset) => {
+        const index = startIndex + offset;
+        const record = getEpisodeProgress(historyEntry, episode, index);
+        const watched = record?.completed === true;
+        const partial = !watched && record?.positionMs > 0;
+        const current = index === selectedIndex;
+        const label = episode.title || t("unit.episodeShort", { number: episode.number });
+        const titleText = [
+          label,
+          watched ? t("detail.watched") : "",
+          partial ? t("detail.partialAt", { time: formatDuration(record.positionMs) }) : "",
+          episode.playable ? "" : t("detail.unplayable")
+        ].filter(Boolean).join(" · ");
+        return h(
+          "button",
+          {
+            key: episode.id || `${index}`,
+            type: "button",
+            className: `hg-ep${watched ? " is-watched" : ""}${partial ? " is-partial" : ""}${current ? " is-current" : ""}`,
+            disabled: !episode.playable,
+            "aria-current": current ? "true" : void 0,
+            title: titleText,
+            onClick: () => onSelectEpisode(index)
+          },
+          h("span", { className: "hg-ep-num" }, String(episode.number)),
+          episode.title ? h("span", { className: "hg-ep-name" }, episode.title) : null,
+          watched || partial ? h("span", { className: "hg-ep-status" }, watched ? "✓" : formatDuration(record.positionMs)) : null,
+          current ? h("span", { className: "hg-sr-only" }, t("detail.current")) : null
+        );
+      })
+    )
   );
 }
 
@@ -7793,39 +8000,7 @@ function DetailPage({ ctx, seed, onBack }) {
             h("button", { type: "button", className: "hg-linkbtn", onClick: () => void retryEpisodes() }, t("action.retry"))
           ) : null,
           state.truncated ? h("div", { className: "hg-hint" }, t("detail.truncated", { count: episodes.length })) : null,
-          episodes.length > 0 ? h(
-            "div",
-            { className: "hg-episodes" },
-            episodes.map((episode, index) => {
-              const record = getEpisodeProgress(historyEntry, episode, index);
-              const watched = record?.completed === true;
-              const partial = !watched && record?.positionMs > 0;
-              const current = index === selectedIndex;
-              const label = episode.title || t("unit.episodeShort", { number: episode.number });
-              const titleText = [
-                label,
-                watched ? t("detail.watched") : "",
-                partial ? t("detail.partialAt", { time: formatDuration(record.positionMs) }) : "",
-                episode.playable ? "" : t("detail.unplayable")
-              ].filter(Boolean).join(" · ");
-              return h(
-                "button",
-                {
-                  key: episode.id || `${index}`,
-                  type: "button",
-                  className: `hg-ep${watched ? " is-watched" : ""}${partial ? " is-partial" : ""}${current ? " is-current" : ""}`,
-                  disabled: !episode.playable,
-                  "aria-current": current ? "true" : void 0,
-                  title: titleText,
-                  onClick: () => selectEpisode(index)
-                },
-                h("span", { className: "hg-ep-num" }, String(episode.number)),
-                episode.title ? h("span", { className: "hg-ep-name" }, episode.title) : null,
-                watched || partial ? h("span", { className: "hg-ep-status" }, watched ? "✓" : formatDuration(record.positionMs)) : null,
-                current ? h("span", { className: "hg-sr-only" }, t("detail.current")) : null
-              );
-            })
-          ) : !state.episodesError ? h("div", { className: "hg-muted" }, t("detail.noEpisodes")) : null
+          episodes.length > 0 ? h(EpisodePicker, { key: seriesId, ctx, episodes, selectedIndex, historyEntry, onSelectEpisode: selectEpisode }) : !state.episodesError ? h("div", { className: "hg-muted" }, t("detail.noEpisodes")) : null
         )
       ) : null
     )

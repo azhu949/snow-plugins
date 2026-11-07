@@ -44,6 +44,8 @@ export const LIMITS = {
   coverMaxBytes: 3 * 1024 * 1024,
   coverKeep: 300,
   videoKeep: 6,
+  /** 本机播放最多保留的分段数；后台按时长切片时也遵守此预算。 */
+  localSegmentsMax: 128,
   /** 综合搜索缺封面时并发补全 getSeries 的上限。 */
   searchEnrichConcurrency: 4,
   /** 同一上游接口两次调用之间的最小间隔。 */

@@ -1033,6 +1033,11 @@ export function createMseEngine({ video, getRpc, log = () => {}, onState = () =>
     },
     snapshot: () => snapshotOf(session),
     isPlaying: () => !video.paused && !video.ended,
+    /** 交还给本机解码时取消兼容会话；之后仍可重新 load。 */
+    stop() {
+      if (session) teardown(session);
+      session = null;
+    },
     destroy() {
       if (disposed) return;
       disposed = true;

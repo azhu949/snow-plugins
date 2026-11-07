@@ -1265,6 +1265,64 @@
   -webkit-line-clamp: 4;
 }
 
+.hg-episode-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.hg-episode-nav {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.hg-episode-groups {
+  position: relative;
+  display: flex;
+  flex: 1;
+  gap: 5px;
+  min-width: 0;
+  overflow-x: auto;
+  padding: 3px 2px 6px;
+  overscroll-behavior-x: contain;
+  scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar-thumb, rgba(148, 163, 184, 0.58)) transparent;
+}
+
+.hg-episode-group {
+  flex: none;
+  padding: 4px 8px;
+  border: 1px solid var(--hg-border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--hg-sub);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.hg-episode-group:hover {
+  background: var(--hg-hover);
+}
+
+.hg-episode-group[aria-pressed="true"] {
+  border-color: var(--hg-primary);
+  background: rgba(59, 130, 246, 0.1);
+  background: color-mix(in srgb, var(--hg-primary) 10%, transparent);
+  color: var(--hg-primary);
+  font-weight: 600;
+}
+
+.hg-episode-locate {
+  flex: none;
+  min-height: 28px;
+  white-space: nowrap;
+}
+
 .hg-episodes {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(44px, 1fr));

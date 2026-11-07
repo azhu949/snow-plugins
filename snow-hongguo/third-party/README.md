@@ -33,26 +33,26 @@
 
 构建 Worker 时保留 `legalComments: "inline"`；上游普通版权块不属于 esbuild 的特殊 legal comment，因此另将 `Stretch.js` 的首个版权块原样作为 Worker banner。完整 Worker 作为字符串嵌入面板，不依赖外网、相对 URL 或额外服务。版权说明和本目录须随插件包保留；现有 `scripts/pack.ps1` 不排除 `third-party/`。
 
-## 离线保调行为
+## 流式保调行为
 
-本插件自己的适配代码在 `src/panel/player/tempo-worker.js` 和 `src/panel/player/tempo-audio.js`，不是对以上上游文件的修改。
+本插件自己的适配代码在 `src/panel/player/tempo-processing.js`、`tempo-worker.js`、`tempo-audio.js` 和 `stream-audio.js`，不是对以上上游文件的修改。
 
-- `createTempoRenderer(context, sourceBuffer)` 返回 `getBuffer(rate)`、`cancel()`、`destroy()`。
-- 1 倍直接返回原始 AudioBuffer，不启动 Worker；非 1 倍只接受有限的 `0.75..3` 倍率。
-- 保持原始 sampleRate 与声道数；输出帧数严格为 `Math.max(1, Math.round(sourceBuffer.length / rate))`。只接受 mono/stereo，超过双声道明确报错。
-- mono 在一个有限输入块内复制到左右两路，输出时只取原单声道；stereo 两路使用同一次 Stretch 匹配，避免声道漂移。
-- 语音窗口为 sequence 50 ms、seek 15 ms、overlap 8 ms，开启 quickSeek。该组短窗口偏向对白，不能保证音乐、高倍速或所有瞬态完全无伪影。
-- 每次最多输入 8192 个立体声帧，立即消费输出；不会将整集交错输入塞进 FIFO。缓冲 API 中的长度均是帧，不是 float 数量。
-- 片尾有限补零预算为 `ceil(inputChunkSize + rate * outputChunkSize + sampleRate * 0.008)` 个输入帧，涵盖 lookahead、bootstrap 和一次名义输入步长；只消费到理论输出总长。预算耗尽仍不足则报错，不用静音伪造未处理的尾部。
-- 不额外裁掉开头 overlap，不把算法处理等待时间计入媒体时间；调用方用原媒体时间定位，播放保调结果时 `playbackRate = 1`、偏移为原媒体秒数除以倍率。
+- `createTempoStreamRenderer({ rate, sampleRate, channels })` 返回 `append(planes, final)` 与 `destroy()`。每次顺序传入独立 Float32 声道平面，返回当前可播放的输出块。
+- 1 倍直接播放原始 PCM，不启动 Worker；非 1 倍只接受有限的 `0.75..3` 倍率。保留实际 PCM 采样率，由 Web Audio 重采样到设备采样率。
+- 同一段连续播放共用一个 Stretch 实例；网络分段边界不重置 WSOLA、不补静音。真正音轨结束后才排空，总输出帧数为 `Math.round(totalInputFrames / rate)`。
+- mono 在有限输入块内复制到左右两路，输出时取原单声道；stereo 共用匹配。非 1 倍只支持 mono/stereo。
+- 语音窗口为 sequence 50 ms、seek 15 ms、overlap 8 ms，开启 quickSeek；不能保证音乐、高倍速或所有瞬态完全无伪影。
+- 每次最多向 Stretch 输入 8192 个立体声帧，随即消费输出；FIFO 的长度单位是帧，不是 float 数量。
+- 片尾补零预算为 `ceil(inputChunkSize + rate * outputChunkSize + sampleRate * 0.008)`；只消费到理论总长。预算不足报错，不用静音伪造尾部。
+- 输出始终以 `playbackRate = 1` 播放，声卡时钟按倍率换回原媒体时间，不二次加速。
 
 ## 生命周期与内存
 
-- 同一 pending 倍率复用同一个 Promise；切换倍率（包括回到 1 倍或已有缓存）先取消旧任务并以 `AbortError` 拒绝旧 Promise。
-- 模块只保留一个已完成非 1 倍缓存。新倍率处理期间可以保留上一次缓存，成功后替换；`cancel()` 仅取消未完成任务，适用于 seek/pause，保留缓存。
-- `destroy()` 取消任务，释放本模块持有的源音频、缓存和 context 引用；后续 `getBuffer()` 以 `AbortError` 拒绝。调用方已取得的 AudioBuffer 不会被主动破坏。
-- 每个任务使用一个独立 Blob Worker；完成、取消、error、messageerror 或 60 秒超时都终止 Worker、清除定时器、回收 Blob URL。Worker 自身完成后也关闭，不长期缓存整集数据。
-- 输入转移的是独立 Float32Array 副本，绝不 transfer/neuter 原 AudioBuffer；输出平面用 transferable 返回，主线程再创建并填充 AudioBuffer。
-- 设原始音频占用 `S = 4 * channels * frames` 字节，新倍率输出占用约 `O = S / rate`，旧缓存占用 `C`。稳定持有量约 `S + O`；处理中约 `2S + C + O`；结果复制期间的保守瞬时上界约 `2S + C + 2O`，另有少量块缓冲和运行时开销。调用方自行保留的旧结果不在本模块控制范围内。
-- 例如 120 秒、48 kHz、stereo 的原始音频约 46.08 MB，0.75 倍结果约 61.44 MB；单份长期缓存不会随着八个倍率全部累积。切档准备仍可能出现数百 MB 的短时内存占用，GC 时机由宿主决定。
-- Worker 不可用、Blob Worker 被 CSP 拒绝或算法失败会明确 reject，不静默回退到变调播放。es2020 构建目标不代表第三方运行时 API 被 polyfill；FifoSampleBuffer 使用的可调整大小 ArrayBuffer 由当前宿主提供。
+- 增量接收 AAC，从 MP4 的 esds 提取实际编码类型与 AudioSpecificConfig 后配置 AudioDecoder，保留 HE-AAC v2 等扩展类型；解码提交队列最多 64 个样本，只在整条音轨提交完毕后 flush。priming 按轨道时间基换算，在原始 PCM 起点裁剪一次。
+- 原始 PCM 分块缓存供本集 seek，最多 128MB，不拼接、复制整集 AudioBuffer。输出按当前位置前方约 3 秒准备，单次输入不超过一秒原始 PCM；没有整集倍速缓存。
+- 起播与缓冲恢复前积累约 1 秒的真实音频输出，再与视频共同放行；片尾剩余不足 1 秒时允许直接播放到结束。首次不足一秒的 Worker 回包不会立即启动声音。
+- 音块按同一 AudioContext 时间轴连续排程，并在音块结束事件中续排；准备窗口按声卡时钟计算，后台动画帧暂停不会耗尽已准备好的音频。数据不足或错过排程时间时同步缓冲，不能把迟到音块接到错误时间位置。
+- 暂停、seek、改速、切集和关闭取消旧 Worker 与排程音源；迟到回调不能重新发声。暂停/seek 保留原始 PCM，关闭释放 PCM、解码器与上下文。
+- 每段连续的非 1 倍播放使用一个 Blob Worker；片尾、取消、error、messageerror 或单次处理超时（60 秒）终止 Worker、清除定时器并回收 Blob URL。
+- 输入转移独立 Float32Array 副本，不 transfer 原始 PCM；输出平面用 transferable 返回后填入 AudioBuffer。输出窗口有界，内存不随八个倍率累积。
+- Worker 不可用、被 CSP 拒绝或算法失败会明确报错，不静默改用变调播放。es2020 构建目标不代表第三方 API 已被 polyfill；FifoSampleBuffer 的可调整大小 ArrayBuffer 由当前宿主提供。
