@@ -98,6 +98,9 @@ export function describeError(t, error) {
     case "PROTOCOL":
       message = t("error.protocol");
       break;
+    case "CURSOR_EXPIRED":
+      message = t("catalog.cursorExpired");
+      break;
     case "INVALID_PARAM":
     case "PARAM_INVALID":
     case "INVALID_OPTIONS":

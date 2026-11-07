@@ -15,6 +15,9 @@ import {
 export const PANEL_ROUTES = {
   health: "/health",
   discover: "/discover",
+  rank: "/rank",
+  filterPanel: "/filter-panel",
+  filter: "/filter",
   search: "/search",
   series: "/series",
   episodes: "/episodes",
@@ -334,6 +337,11 @@ export function createRpc(api, { log = () => {} } = {}) {
         query: { cursor },
         timeoutMs: TIMEOUTS.list,
       }),
+    getRank: (query = {}) => call(PANEL_ROUTES.rank, { query, timeoutMs: TIMEOUTS.list }),
+    getFilterPanel: (genre) => call(PANEL_ROUTES.filterPanel, { query: { genre }, timeoutMs: TIMEOUTS.list }),
+    filterSeries: (selections = {}, cursor) => call(PANEL_ROUTES.filter, {
+      query: { selections: JSON.stringify(selections), cursor }, timeoutMs: TIMEOUTS.list,
+    }),
     search: (q, cursor) =>
       call(PANEL_ROUTES.search, {
         query: { q, cursor },

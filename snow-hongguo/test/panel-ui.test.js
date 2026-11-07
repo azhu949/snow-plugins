@@ -26,6 +26,12 @@ const fire = async (node, event = "click", value) => {
   });
   await settle();
 };
+const chooseOption = async (trigger, value) => {
+  await fire(trigger);
+  const option = [...document.querySelectorAll(".hg-select-menu [role='option']")].find((node) => node.dataset.value === value);
+  assert.ok(option, `找不到下拉选项 ${value}`);
+  await fire(option);
+};
 
 beforeEach(() => {
   dom = new JSDOM("<!doctype html><body><div id='root'></div></body>", { url: "http://localhost/" });
@@ -98,6 +104,10 @@ test("详情迁移旧进度只标记实际一集，收藏、分集完成和关�
   assert.equal(episodes[1].classList.contains("is-partial"), true);
   await fire(root.querySelector(".hg-watch-actions button"));
   assert.equal((await readWatchlist(ctx.api))[0].status, "watching");
+  assert.equal(root.querySelector(".hg-watch-actions .hg-watch-status-badge[aria-pressed='true']").dataset.status, "watching");
+  await fire(root.querySelector(".hg-watch-actions .hg-watch-status-badge[data-status='completed']"));
+  assert.equal((await readWatchlist(ctx.api))[0].status, "completed");
+  assert.equal(root.querySelector(".hg-watch-actions .hg-watch-status-badge[aria-pressed='true']").dataset.status, "completed");
   video.currentTime = 60;
   await fire(video, "ended");
   assert.equal(root.querySelector(".hg-ep.is-current .hg-ep-num").textContent, "2");
@@ -169,11 +179,14 @@ test("追剧页仅展示收藏，支持打开详情、筛选、修改状态和�
   await fire(root.querySelectorAll(".hg-watch-filter")[1]);
   assert.equal(root.querySelectorAll(".hg-watch-card").length, 1);
   assert.match(root.querySelector(".hg-watch-card").textContent, /待看剧/);
-  await fire(root.querySelector(".hg-watch-status"), "change", "completed");
+  assert.equal(root.querySelectorAll(".hg-watch-status-badge").length, 3);
+  assert.equal(root.querySelector(".hg-watch-status-badge[aria-pressed='true']").dataset.status, "planned");
+  assert.equal(root.querySelector(".hg-watch-card [role='combobox']"), null);
+  await fire(root.querySelector(".hg-watch-status-badge[data-status='completed']"));
   assert.equal(root.querySelectorAll(".hg-watch-card").length, 0);
   await fire(root.querySelectorAll(".hg-watch-filter")[3]);
   assert.equal(root.querySelectorAll(".hg-watch-card").length, 1);
-  await fire(root.querySelector(".hg-watch-card-actions button"));
+  await fire(root.querySelector(".hg-watch-card-actions .hg-linkbtn"));
   assert.equal((await readWatchlist(ctx.api)).length, 1);
   assert.equal((await readHistory(ctx.api)).length, 2);
 });
@@ -190,17 +203,16 @@ test("小窗进度刷新与收藏修改交错时，保存后仍通知详情页�
   const show = (historyVersion) => React.render(h(WatchlistPage, { ctx, active: true, historyVersion, watchlistVersion: 0 }), root);
   await act(() => show(0));
   await settle();
-  const select = root.querySelector(".hg-watch-status");
-  await act(() => {
-    select.value = "completed";
-    select.dispatchEvent(new dom.window.Event("change", { bubbles: true }));
-  });
+  await fire(root.querySelector(".hg-watch-status-badge[data-status='watching']"));
+  assert.equal(ctx.watchlistVersion, 0, "点击当前徽标不重复保存");
+  await fire(root.querySelector(".hg-watch-status-badge[data-status='completed']"));
+  assert.ok([...root.querySelectorAll(".hg-watch-status-badge")].every((button) => button.disabled));
   await act(() => show(1));
   release();
   await settle();
   assert.equal(ctx.watchlistVersion, 1);
-  assert.equal(root.querySelector(".hg-watch-status").value, "completed");
-  assert.equal(root.querySelector(".hg-watch-status").disabled, false);
+  assert.equal(root.querySelector(".hg-watch-status-badge[aria-pressed='true']").dataset.status, "completed");
+  assert.ok([...root.querySelectorAll(".hg-watch-status-badge")].every((button) => !button.disabled));
 });
 
 test("暂停立即保存进度，加载失败或未就绪时的零位置不覆盖续播档案", async () => {
@@ -232,7 +244,7 @@ test("播放器恢复静音和倍速，控件与快捷键保存偏好，重新�
   assert.equal(video.playbackRate, 1.5);
   assert.equal(video.volume, 0.35);
   assert.equal(video.muted, true);
-  await fire(root.querySelector(".hg-player-speed"), "change", "2");
+  await chooseOption(root.querySelector(".hg-player-speed"), "2");
   await fire(root.querySelector(".hg-player-volume"), "input", "0.6");
   root.querySelector(".hg-player").dispatchEvent(new dom.window.KeyboardEvent("keydown", { key: "m", bubbles: true }));
   await settle();
@@ -252,11 +264,37 @@ test("播放器恢复静音和倍速，控件与快捷键保存偏好，重新�
   assert.equal(video.muted, false);
 });
 
+test("播放器下拉展开时保持控件可用，Esc 只关闭菜单，小窗移出鼠标不隐藏", async () => {
+  const player = createPlayer(root, { t: text, episode: null, miniWindow: { autoHide: true } });
+  cleanup = () => player.destroy();
+  const view = root.querySelector(".hg-player");
+  await fire(view.querySelector('[aria-label="player.fill"]'));
+  assert.equal(view.classList.contains("is-fill"), true);
+  const speed = view.querySelector(".hg-player-speed");
+  await fire(speed);
+  assert.ok(document.querySelector(".hg-select-menu"));
+  speed.dispatchEvent(new dom.window.KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+  await settle();
+  assert.equal(document.querySelector(".hg-select-menu"), null);
+  assert.equal(view.classList.contains("is-fill"), true);
+  await fire(view.querySelector('[aria-label="player.exitFill"]'));
+  await fire(view.querySelector(".hg-player-mini-toggle"));
+  assert.equal(view.classList.contains("is-mini"), true);
+  await fire(view.querySelector(".hg-player-quality"));
+  await fire(view, "mouseleave");
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 10)); });
+  assert.ok(document.querySelector(".hg-select-menu"));
+  assert.equal(view.classList.contains("is-mini-hidden"), false);
+  assert.equal(view.classList.contains("is-idle"), false);
+  player.destroy();
+  assert.equal(document.querySelector(".hg-select-menu"), null);
+});
+
 test("设置页提供连播开关并保存倍速、音量与静音", async () => {
   const { ctx } = context();
   await act(() => React.render(h(SettingsPage, { ctx, active: true }), root));
   await settle();
-  await fire(root.querySelector("#hg-playback-rate"), "change", "1.75");
+  await chooseOption(root.querySelector("#hg-playback-rate"), "1.75");
   await fire(root.querySelector("#hg-volume"), "input", "25");
   // compat 将 checkbox 的 onChange 映射到 change。
   const muted = root.querySelector("#hg-muted");

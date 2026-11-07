@@ -191,6 +191,12 @@ export function createSdk({
 
     discover: (options = {}) => execute("discover", "discover", "discover", [compactOptions(options)]),
 
+    shortRank: (options = {}) => execute("shortRank", "shortRank", "shortRank", [compactOptions(options)]),
+
+    shortFilterPanel: (genre = "") => execute("shortFilterPanel", "shortFilterPanel", "shortFilterPanel", [String(genre)]),
+
+    shortFilter: (options = {}) => execute("shortFilter", "shortFilter", "shortFilter", [compactOptions(options)]),
+
     search: (query, options = {}) =>
       execute("search", "search", "search", [String(query ?? ""), compactOptions(options)]),
 

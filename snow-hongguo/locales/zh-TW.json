@@ -1,7 +1,7 @@
 {
   "plugin.title": "紅果短劇",
   "app.subtitle": "短劇瀏覽",
-  "tab.discover": "推薦",
+  "tab.discover": "發現",
   "tab.search": "搜尋",
   "tab.history": "歷史",
   "tab.settings": "設定",
@@ -191,5 +191,20 @@
   "detail.partialAt": "已看到 {{time}}",
   "settings.autoNext": "自動播放下一集",
   "settings.playbackRemembered": "倍速、音量、靜音及連播設定自動儲存，下次開啟仍然生效；關閉連播後，本集播完即停止",
-  "settings.loadFailed": "讀取播放偏好失敗，已暫時靜音；可在設定中重新調整"
+  "settings.loadFailed": "讀取播放偏好失敗，已暫時靜音；可在設定中重新調整",
+  "catalog.navigation": "發現短劇",
+  "catalog.recommend": "推薦",
+  "catalog.rank": "排行",
+  "catalog.filter": "分類",
+  "catalog.content": "作品類型",
+  "catalog.board": "榜單",
+  "catalog.defaultBoard": "預設榜單",
+  "catalog.rankNumber": "第 {{number}} 名",
+  "catalog.promoted": "平台推薦",
+  "catalog.any": "不限",
+  "catalog.reset": "重設篩選",
+  "catalog.empty": "暫無符合條件的短劇",
+  "catalog.emptyHint": "試試其他榜單或篩選條件",
+  "catalog.filtersLoading": "正在載入分類條件…",
+  "catalog.cursorExpired": "分頁已過期，請重試以重新載入列表"
 }

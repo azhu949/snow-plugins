@@ -215,3 +215,29 @@ test("同一 episodeId 的 resolvePlayback 并发只跑一次", async (t) => {
   releases.shift()({ playback: { episode_id: "42", protected: false, streams: [] } });
   await third;
 });
+
+test("榜单与分类通过统一 SDK 调度并保留筛选参数", async (t) => {
+  const calls = [];
+  let rankingAttempts = 0;
+  const waits = [];
+  const { sdk } = await makeSdk(t, {
+    sleep: async (ms) => waits.push(ms),
+    clientFactory: async () => fakeClient({
+      shortRank: async (query) => {
+        calls.push(["rank", query]);
+        if (++rankingAttempts === 1) throw makeError("RATE_LIMITED", { retryable: true, retryAfterMs: 500 });
+        return page;
+      },
+      shortFilterPanel: async (genre) => { calls.push(["panel", genre]); return []; },
+      shortFilter: async (query) => { calls.push(["filter", query]); return page; },
+    }),
+  });
+  await sdk.shortRank({ content: "human", board: "hot", cursor: undefined });
+  await sdk.shortFilterPanel("comic_series");
+  await sdk.shortFilter({ selections: { genre: ["comic_series"], creation_status: ["1"] }, cursor: "next" });
+  assert.deepEqual(waits, [500]);
+  assert.deepEqual(calls, [
+    ["rank", { content: "human", board: "hot" }], ["rank", { content: "human", board: "hot" }],
+    ["panel", "comic_series"], ["filter", { selections: { genre: ["comic_series"], creation_status: ["1"] }, cursor: "next" }],
+  ]);
+});

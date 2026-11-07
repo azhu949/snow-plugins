@@ -4,14 +4,18 @@ import { WATCH_STATUSES, readHistory, readWatchlist, saveWatchlistEntry, removeW
 
 const seedOf = (entry) => ({ id: entry.seriesId, title: entry.title, cover: entry.cover });
 
-function StatusSelect({ ctx, value, disabled, onChange, title }) {
-  return h("select", {
-    className: "hg-select hg-watch-status",
-    value,
-    disabled,
+const STATUS_ICONS = { planned: "Bookmark", watching: "Play", completed: "Check" };
+
+function StatusBadges({ ctx, value, disabled, onChange, title }) {
+  return h("div", {
+    className: "hg-watch-statuses", role: "group", "aria-busy": Boolean(disabled),
     "aria-label": `${ctx.t("watchlist.status")} · ${title || ctx.t("unit.untitled")}`,
-    onChange: (event) => onChange(event.target.value),
-  }, WATCH_STATUSES.map((status) => h("option", { key: status, value: status }, ctx.t(`watchlist.${status}`))));
+  }, WATCH_STATUSES.map((status) => h("button", {
+    key: status, type: "button", disabled,
+    className: `hg-watch-status-badge${value === status ? " is-active" : ""}`,
+    "data-status": status, "aria-pressed": value === status,
+    onClick: () => { if (!disabled && status !== value) onChange(status); },
+  }, h(Icon, { ctx, name: STATUS_ICONS[status], size: 11 }), ctx.t(`watchlist.${status}`))));
 }
 
 /** 详情页收藏入口。收藏状态与观看历史分别保存，删除历史不会移除收藏。 */
@@ -71,7 +75,7 @@ export function WatchlistControls({ ctx, series, hasProgress }) {
       onClick: () => void change(entry ? null : hasProgress ? "watching" : "planned"),
     }, h(Icon, { ctx, name: entry ? "BookmarkCheck" : "Bookmark", size: 14 }),
     ctx.t(entry ? "watchlist.saved" : "watchlist.add")),
-    entry ? h(StatusSelect, {
+    entry ? h(StatusBadges, {
       ctx, title: series.title, value: entry.status, disabled: busy, onChange: (status) => void change(status),
     }) : null
   );
@@ -165,7 +169,7 @@ export function WatchlistPage({ ctx, active, historyVersion, watchlistVersion })
             )
           ),
           h("div", { className: "hg-watch-card-actions" },
-            h(StatusSelect, { ctx, title: entry.title, value: entry.status, disabled: busy, onChange: (status) => void change(entry, status) }),
+            h(StatusBadges, { ctx, title: entry.title, value: entry.status, disabled: busy, onChange: (status) => void change(entry, status) }),
             h("button", {
               type: "button", className: "hg-linkbtn", disabled: busy,
               "aria-label": `${t("watchlist.remove")} · ${entry.title}`, onClick: () => void change(entry, null),

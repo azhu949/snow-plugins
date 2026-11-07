@@ -191,5 +191,20 @@
   "detail.partialAt": "Watched up to {{time}}",
   "settings.autoNext": "Play next episode automatically",
   "settings.playbackRemembered": "Speed, volume, mute and autoplay settings are saved for next time. Turn autoplay off to stop at the end of an episode.",
-  "settings.loadFailed": "Could not load playback settings. Playback is muted for now; adjust it in Settings."
+  "settings.loadFailed": "Could not load playback settings. Playback is muted for now; adjust it in Settings.",
+  "catalog.navigation": "Browse series",
+  "catalog.recommend": "For you",
+  "catalog.rank": "Rankings",
+  "catalog.filter": "Categories",
+  "catalog.content": "Content type",
+  "catalog.board": "Ranking",
+  "catalog.defaultBoard": "Default ranking",
+  "catalog.rankNumber": "Rank {{number}}",
+  "catalog.promoted": "Promoted",
+  "catalog.any": "Any",
+  "catalog.reset": "Reset filters",
+  "catalog.empty": "No matching series",
+  "catalog.emptyHint": "Try another ranking or filter.",
+  "catalog.filtersLoading": "Loading filters…",
+  "catalog.cursorExpired": "This list has expired. Retry to reload it from the first page."
 }

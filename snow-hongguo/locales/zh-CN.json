@@ -1,7 +1,7 @@
 {
   "plugin.title": "红果短剧",
   "app.subtitle": "短剧浏览",
-  "tab.discover": "推荐",
+  "tab.discover": "发现",
   "tab.search": "搜索",
   "tab.history": "历史",
   "tab.settings": "设置",
@@ -191,5 +191,20 @@
   "detail.partialAt": "已看到 {{time}}",
   "settings.autoNext": "自动播放下一集",
   "settings.playbackRemembered": "倍速、音量、静音及连播设置自动保存，下次打开仍然生效；关闭连播后，本集播完即停止",
-  "settings.loadFailed": "读取播放偏好失败，已暂时静音；可在设置中重新调整"
+  "settings.loadFailed": "读取播放偏好失败，已暂时静音；可在设置中重新调整",
+  "catalog.navigation": "发现短剧",
+  "catalog.recommend": "推荐",
+  "catalog.rank": "排行",
+  "catalog.filter": "分类",
+  "catalog.content": "作品类型",
+  "catalog.board": "榜单",
+  "catalog.defaultBoard": "默认榜单",
+  "catalog.rankNumber": "第 {{number}} 名",
+  "catalog.promoted": "平台推荐",
+  "catalog.any": "不限",
+  "catalog.reset": "重置筛选",
+  "catalog.empty": "暂无符合条件的短剧",
+  "catalog.emptyHint": "试试其他榜单或筛选条件",
+  "catalog.filtersLoading": "正在加载分类条件…",
+  "catalog.cursorExpired": "分页已过期，请重试以重新加载列表"
 }

@@ -257,6 +257,9 @@ var CHANNEL_HEADER_VALUE = "panel-rpc-v1";
 var ROUTES = {
   health: "/health",
   discover: "/discover",
+  rank: "/rank",
+  filterPanel: "/filter-panel",
+  filter: "/filter",
   search: "/search",
   series: "/series",
   episodes: "/episodes",
@@ -1709,7 +1712,7 @@ function createMedia({ sdk, cache, log = () => {
       });
     }
   };
-  const fail = (job, error) => {
+  const fail2 = (job, error) => {
     const mapped = asHttpError(error);
     job.state = "error";
     job.error = mapped;
@@ -1726,7 +1729,7 @@ function createMedia({ sdk, cache, log = () => {
       } catch (error) {
         lastError = error;
         if (isAborted(error) || job.abort.signal.aborted) {
-          fail(job, error);
+          fail2(job, error);
           return;
         }
         log(`[media] 源 ${index + 1}/${urls.length} 失败：${error?.code ?? "UNKNOWN"} ${error?.message ?? ""}`);
@@ -1737,7 +1740,7 @@ function createMedia({ sdk, cache, log = () => {
         });
       }
     }
-    fail(job, lastError ?? new Error("没有可用的播放地址"));
+    fail2(job, lastError ?? new Error("没有可用的播放地址"));
   };
   const startJob = async ({ episodeId, quality, definition, dir, cached }) => {
     if (cached) return createJob({ episodeId, quality, definition, dir, info: cached.info, cached: true });
@@ -2532,6 +2535,9 @@ function createSdk({
       };
     },
     discover: (options = {}) => execute("discover", "discover", "discover", [compactOptions(options)]),
+    shortRank: (options = {}) => execute("shortRank", "shortRank", "shortRank", [compactOptions(options)]),
+    shortFilterPanel: (genre = "") => execute("shortFilterPanel", "shortFilterPanel", "shortFilterPanel", [String(genre)]),
+    shortFilter: (options = {}) => execute("shortFilter", "shortFilter", "shortFilter", [compactOptions(options)]),
     search: (query, options = {}) => execute("search", "search", "search", [String(query ?? ""), compactOptions(options)]),
     getSeries: (seriesId) => execute("getSeries", "getSeries", "getSeries", [String(seriesId)]),
     listEpisodes: (seriesId, options = {}) => execute("listEpisodes", "listEpisodes", "listEpisodes", [String(seriesId), compactOptions(options)]),
@@ -2635,7 +2641,7 @@ var assertCoverUrl = (rawUrl) => {
 var requestOnce = (target, { timeoutMs, maxBytes, redirects }) => new Promise((resolve, reject) => {
   let settled = false;
   let req = null;
-  const fail = (error) => {
+  const fail2 = (error) => {
     if (settled) return;
     settled = true;
     try {
@@ -2656,14 +2662,14 @@ var requestOnce = (target, { timeoutMs, maxBytes, redirects }) => new Promise((r
       if (status >= 300 && status < 400 && res.headers.location) {
         res.resume();
         if (redirects <= 0) {
-          fail(new HttpError(502, "COVER_FETCH_FAILED", "封面重定向次数过多"));
+          fail2(new HttpError(502, "COVER_FETCH_FAILED", "封面重定向次数过多"));
           return;
         }
         let next;
         try {
           next = assertCoverUrl(new URL(res.headers.location, target).href);
         } catch (error) {
-          fail(error);
+          fail2(error);
           return;
         }
         settled = true;
@@ -2672,13 +2678,13 @@ var requestOnce = (target, { timeoutMs, maxBytes, redirects }) => new Promise((r
       }
       if (status !== 200) {
         res.resume();
-        fail(new HttpError(502, "COVER_FETCH_FAILED", `封面地址返回 HTTP ${status}`));
+        fail2(new HttpError(502, "COVER_FETCH_FAILED", `封面地址返回 HTTP ${status}`));
         return;
       }
       const declared = Number(res.headers["content-length"]);
       if (Number.isFinite(declared) && declared > maxBytes) {
         res.resume();
-        fail(new HttpError(502, "COVER_TOO_LARGE", "封面图片过大"));
+        fail2(new HttpError(502, "COVER_TOO_LARGE", "封面图片过大"));
         return;
       }
       const contentType = String(res.headers["content-type"] ?? "").split(";")[0].trim().toLowerCase();
@@ -2687,7 +2693,7 @@ var requestOnce = (target, { timeoutMs, maxBytes, redirects }) => new Promise((r
       res.on("data", (chunk) => {
         size += chunk.length;
         if (size > maxBytes) {
-          fail(new HttpError(502, "COVER_TOO_LARGE", "封面图片过大"));
+          fail2(new HttpError(502, "COVER_TOO_LARGE", "封面图片过大"));
           return;
         }
         chunks.push(chunk);
@@ -2697,11 +2703,11 @@ var requestOnce = (target, { timeoutMs, maxBytes, redirects }) => new Promise((r
         settled = true;
         resolve({ bytes: Buffer.concat(chunks), contentType });
       });
-      res.on("error", (error) => fail(error));
+      res.on("error", (error) => fail2(error));
     }
   );
-  req.on("timeout", () => fail(new HttpError(502, "COVER_TIMEOUT", "封面拉取超时")));
-  req.on("error", (error) => fail(error));
+  req.on("timeout", () => fail2(new HttpError(502, "COVER_TIMEOUT", "封面拉取超时")));
+  req.on("error", (error) => fail2(error));
   req.end();
 });
 async function fetchCoverBytes(url, { timeoutMs = 1e4, maxBytes = LIMITS.coverMaxBytes, redirects = 3 } = {}) {
@@ -2916,6 +2922,157 @@ function createCoverResolver({ cache, log = () => {
   };
 }
 
+// src/background/catalog.js
+import { createHash as createHash2 } from "node:crypto";
+var SERIES_CONTENTS = /* @__PURE__ */ new Set(["all", "human", "comic_series_rank", "ai_playlet", "series_album"]);
+var ID = /^[0-9A-Za-z_.-]{1,64}$/;
+var FILTER_KEY = /^[a-zA-Z][a-zA-Z0-9_-]{0,63}$/;
+var CURSOR_PREFIX = "hg1.";
+var forbiddenKeys = /* @__PURE__ */ new Set(["__proto__", "constructor", "prototype"]);
+var validFilterKey = (key) => typeof key === "string" && FILTER_KEY.test(key) && !forbiddenKeys.has(key);
+var fail = (message) => {
+  throw new HttpError(400, "INVALID_PARAM", message);
+};
+var param = (query, key, max = 64, pattern = null) => {
+  const value = query.get(key) || "";
+  if (value.length > max || value && pattern && !pattern.test(value)) fail(`参数 ${key} 格式不正确`);
+  return value;
+};
+var selectionsOf = (query) => {
+  const raw = param(query, "selections", 4096);
+  if (!raw) return {};
+  let input;
+  try {
+    input = JSON.parse(raw);
+  } catch {
+    fail("筛选条件不是有效的 JSON");
+  }
+  if (!input || typeof input !== "object" || Array.isArray(input)) fail("筛选条件必须是对象");
+  const entries = Object.entries(input);
+  if (entries.length > 16) fail("筛选条件过多");
+  const result = {};
+  for (const [key, values] of entries) {
+    if (!validFilterKey(key) || !Array.isArray(values) || values.length > 8) fail("筛选条件格式不正确");
+    if (values.some((value) => typeof value !== "string" || value.length > 128 || /[\u0000-\u001f]/.test(value))) {
+      fail("筛选值格式不正确");
+    }
+    const chosen = [...new Set(values.filter(Boolean))];
+    if (chosen.length) result[key] = chosen;
+  }
+  return result;
+};
+var namedOptions = (raw) => {
+  const seen = /* @__PURE__ */ new Set();
+  return (Array.isArray(raw) ? raw : []).filter((item) => {
+    if (!item || typeof item.id !== "string" || !ID.test(item.id) || typeof item.name !== "string" || seen.has(item.id)) return false;
+    seen.add(item.id);
+    return true;
+  }).slice(0, 32).map((item) => ({ id: item.id, name: truncateChars(item.name, 48), selected: item.selected === true }));
+};
+var filterRows = (raw) => {
+  if (!Array.isArray(raw)) throw new HttpError(502, "PROTOCOL", "筛选面板格式不正确");
+  const seen = /* @__PURE__ */ new Set();
+  return raw.filter((row) => {
+    if (!row || !validFilterKey(row.key) || seen.has(row.key) || !Array.isArray(row.options)) return false;
+    seen.add(row.key);
+    return true;
+  }).slice(0, 16).map((row) => {
+    const values = /* @__PURE__ */ new Set();
+    return {
+      key: row.key,
+      name: truncateChars(row.name, 48) || row.key,
+      options: row.options.filter((option) => {
+        if (!option || typeof option.name !== "string" || typeof option.value !== "string" || option.value.length > 128 || /[\u0000-\u001f]/.test(option.value) || values.has(option.value)) return false;
+        values.add(option.value);
+        return true;
+      }).slice(0, 256).map((option) => ({ name: truncateChars(option.name, 48), value: option.value }))
+    };
+  }).filter((row) => row.options.length > 0);
+};
+function createCatalogHandlers({ sdk, toListItem: toListItem2, fetchPage }) {
+  const panels = createTtlCache({ ttlMs: 10 * 60 * 1e3, max: 20 });
+  const cursors = createTtlCache({ ttlMs: 30 * 60 * 1e3, max: 200 });
+  const inflight = /* @__PURE__ */ new Map();
+  const requireMethod = (name) => {
+    if (typeof sdk[name] !== "function") throw new HttpError(503, "CATALOG_UNAVAILABLE", "当前后台不支持榜单或分类，请更新插件");
+  };
+  const readCursor = (query, kind) => {
+    const value = param(query, "cursor", 4096);
+    if (!value.startsWith(CURSOR_PREFIX)) return value;
+    const entry = cursors.get(value);
+    if (!entry || entry.kind !== kind) {
+      throw new HttpError(410, "CURSOR_EXPIRED", "分页已过期，请重试以重新加载列表");
+    }
+    return entry.cursor;
+  };
+  const pageInfo = (page, kind) => {
+    const raw = typeof page?.cursor === "string" ? page.cursor : "";
+    if (page?.has_more !== true || !raw) return { cursor: null, hasMore: false };
+    const cursor = CURSOR_PREFIX + createHash2("sha256").update(`${kind}\0${raw}`).digest("base64url");
+    cursors.set(cursor, { kind, cursor: raw });
+    return { cursor, hasMore: true };
+  };
+  const seriesItem = (raw) => {
+    const item = toListItem2(raw);
+    item.title = truncateChars(item.title, 160);
+    return item;
+  };
+  return {
+    rank: async ({ query }) => {
+      requireMethod("shortRank");
+      const content = param(query, "content") || "all";
+      if (!SERIES_CONTENTS.has(content)) fail("暂不支持该榜单内容");
+      const board = param(query, "board", 64, ID);
+      const cursor = readCursor(query, "rank");
+      const page = await fetchPage(() => sdk.shortRank({ content, ...board ? { board } : {}, ...cursor ? { cursor } : {} }));
+      const rawContents = Array.isArray(page?.contents) ? page.contents : [];
+      const contents = namedOptions(rawContents).filter((item) => SERIES_CONTENTS.has(item.id)).map((item) => ({
+        ...item,
+        boards: namedOptions(rawContents.find((raw) => raw?.id === item.id)?.boards)
+      }));
+      const items = (Array.isArray(page?.items) ? page.items : []).filter((item) => item?.series_id != null && ID.test(String(item.series_id))).map((item) => ({
+        ...seriesItem({ ...item, id: item.series_id }),
+        position: Number.isInteger(item.position) && item.position > 0 ? item.position : Number.isInteger(item.rank) && item.rank > 0 ? item.rank : null,
+        score: truncateChars(item.score, 80),
+        promoted: item.promoted === true
+      }));
+      return { status: 200, payload: {
+        items,
+        contents,
+        content: SERIES_CONTENTS.has(page?.content) ? page.content : content,
+        board: typeof page?.board === "string" && ID.test(page.board) ? page.board : board,
+        ...pageInfo(page, "rank")
+      } };
+    },
+    filterPanel: async ({ query }) => {
+      requireMethod("shortFilterPanel");
+      const genre = param(query, "genre", 128);
+      if (/[\u0000-\u001f]/.test(genre)) fail("剧种格式不正确");
+      let rows = panels.get(genre);
+      if (!rows) rows = await withSingleFlight(inflight, genre, async () => {
+        const result = filterRows(await sdk.shortFilterPanel(genre));
+        panels.set(genre, result);
+        return result;
+      });
+      return { status: 200, payload: { rows } };
+    },
+    filter: async ({ query }) => {
+      requireMethod("shortFilter");
+      const selections = selectionsOf(query);
+      const cursor = readCursor(query, "filter");
+      let page;
+      try {
+        page = await fetchPage(() => sdk.shortFilter({ selections, ...cursor ? { cursor } : {} }));
+      } catch (error) {
+        if (cursor || error?.code !== "CONTENT_UNAVAILABLE") throw error;
+        page = { items: [], has_more: false };
+      }
+      const items = (Array.isArray(page?.items) ? page.items : []).map(seriesItem).filter((item) => ID.test(item.id));
+      return { status: 200, payload: { items, ...pageInfo(page, "filter") } };
+    }
+  };
+}
+
 // src/background/server.js
 var HOST = "127.0.0.1";
 var MAX_REQUEST_BYTES = 64 * 1024;
@@ -3126,6 +3283,7 @@ function createRequestHandler({
     return items;
   };
   const handles = {
+    ...createCatalogHandlers({ sdk, toListItem, fetchPage }),
     health: async () => {
       const stats = typeof sdk.stats === "function" ? sdk.stats() : {};
       return {
@@ -3322,6 +3480,9 @@ function createRequestHandler({
   const routes = /* @__PURE__ */ new Map([
     [ROUTES.health, { method: "GET", handler: handles.health }],
     [ROUTES.discover, { method: "GET", handler: handles.discover }],
+    [ROUTES.rank, { method: "GET", handler: handles.rank }],
+    [ROUTES.filterPanel, { method: "GET", handler: handles.filterPanel }],
+    [ROUTES.filter, { method: "GET", handler: handles.filter }],
     [ROUTES.search, { method: "GET", handler: handles.search }],
     [ROUTES.series, { method: "GET", handler: handles.series }],
     [ROUTES.episodes, { method: "GET", handler: handles.episodes }],

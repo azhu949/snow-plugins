@@ -193,6 +193,127 @@
   letter-spacing: 0.02em;
 }
 
+/* ---------------- 发现：推荐 / 排行 / 分类 ---------------- */
+
+.hg-discovery-modes {
+  display: flex;
+  flex: none;
+  gap: 4px;
+  padding: 8px 12px 4px;
+}
+
+.hg-discovery-mode {
+  flex: 1;
+  min-width: 0;
+  padding: 6px 8px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--hg-sub);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.hg-discovery-mode:hover {
+  background: var(--hg-hover);
+}
+
+.hg-discovery-mode.is-active {
+  color: var(--hg-primary);
+  border-color: var(--hg-border);
+  background: var(--hg-elevated);
+  font-weight: 600;
+}
+
+.hg-discovery-pane {
+  flex: 1;
+  min-height: 0;
+}
+
+.hg-catalog-controls {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  padding-bottom: 12px;
+}
+
+.hg-catalog-field {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  gap: 4px;
+  color: var(--hg-sub);
+  font-size: 10px;
+}
+
+.hg-catalog-field > .hg-select {
+  min-width: 0;
+  width: 100%;
+  max-width: 100%;
+}
+
+.hg-rank-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.hg-rank-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+  border: none;
+  border-radius: 8px;
+  padding: 8px 4px;
+  background: transparent;
+  color: var(--hg-fg);
+  text-align: left;
+  cursor: pointer;
+}
+
+.hg-rank-item:hover {
+  background: var(--hg-hover);
+}
+
+.hg-rank-number {
+  width: 24px;
+  flex: none;
+  color: var(--hg-sub);
+  font-size: 15px;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+.hg-rank-number.is-top {
+  color: var(--hg-primary);
+  font-weight: 700;
+}
+
+.hg-rank-item > .hg-card-cover {
+  width: 54px;
+  height: 72px;
+  flex: none;
+  border-radius: 6px;
+}
+
+.hg-rank-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.hg-rank-info > .hg-card-title {
+  margin: 0 0 4px;
+}
+
+.hg-rank-score {
+  color: var(--hg-sub);
+  font-size: 10px;
+  margin-top: 3px;
+  overflow-wrap: anywhere;
+}
+
 /* ---------------- 底部页签 ---------------- */
 
 .hg-tabs {
@@ -1261,11 +1382,61 @@
   justify-content: space-between;
 }
 
-.hg-watch-actions .hg-watch-status,
-.hg-watch-card-actions .hg-watch-status {
-  width: auto;
-  min-width: 96px;
+.hg-watch-statuses {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+  min-width: 0;
   max-width: 100%;
+}
+
+.hg-watch-status-badge {
+  --hg-status-color: var(--hg-sub);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  min-height: 25px;
+  padding: 3px 8px;
+  border: 1px solid var(--hg-border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--hg-sub);
+  font-size: 10.5px;
+  line-height: 1.4;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.hg-watch-status-badge[data-status="watching"] {
+  --hg-status-color: var(--hg-primary);
+}
+
+.hg-watch-status-badge[data-status="completed"] {
+  --hg-status-color: var(--hg-success-text);
+}
+
+.hg-watch-status-badge:hover:not(:disabled) {
+  background: var(--hg-hover);
+  color: var(--hg-fg);
+}
+
+.hg-watch-status-badge.is-active {
+  border-color: var(--hg-status-color);
+  background: var(--hg-hover);
+  background: color-mix(in srgb, var(--hg-status-color) 12%, transparent);
+  color: var(--hg-status-color);
+  font-weight: 600;
+}
+
+.hg-watch-status-badge:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.hg-watch-status-badge > svg {
+  flex: none;
 }
 
 /* ---------------- 设置页 ---------------- */
@@ -1364,18 +1535,113 @@
 }
 
 .hg-select {
-  height: 28px;
-  padding: 0 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  min-width: 0;
+  max-width: 100%;
+  height: 30px;
+  padding: 0 8px;
   border: 1px solid var(--hg-border);
-  border-radius: 6px;
+  border-radius: var(--radius-md, 6px);
   outline: none;
   background: var(--hg-bg);
-  color: inherit;
-  font-size: 11.5px;
+  color: var(--hg-fg);
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.4;
+  text-align: left;
+  cursor: pointer;
 }
 
-.hg-select:focus-visible {
-  border-color: var(--hg-primary);
+.hg-select:hover:not(:disabled) {
+  border-color: var(--text-muted, var(--hg-sub));
+}
+
+.hg-select:focus-visible,
+.hg-select[aria-expanded="true"] {
+  border-color: var(--accent-color, var(--hg-primary));
+}
+
+.hg-select:disabled {
+  opacity: 0.68;
+  cursor: default;
+}
+
+.hg-select-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hg-select-arrow,
+.hg-select-option > svg {
+  flex: none;
+}
+
+/* 与宿主 CustomSelect 相同的主题 token；弹层独立挂载，不依赖 .hg-panel 祖先。 */
+.hg-select-menu {
+  position: fixed;
+  z-index: 100000;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 240px;
+  padding: 6px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  border: 1px solid var(--border-light, var(--border, #e5e7eb));
+  border-radius: var(--radius-lg, 8px);
+  background: var(--bg-secondary, var(--card, #f9fafb));
+  color: var(--text-primary, var(--foreground, #111827));
+  box-shadow: var(--island-shadow, 0 8px 24px rgba(0, 0, 0, 0.18));
+  font-family: var(--font-sans, system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif);
+  pointer-events: auto;
+}
+
+.hg-select-option {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 28px;
+  padding: 6px 8px;
+  border: none;
+  border-radius: var(--radius-md, 6px);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.4;
+  cursor: pointer;
+  text-align: left;
+}
+
+.hg-select-option > span {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hg-select-option.is-active,
+.hg-select-option:hover:not(:disabled) {
+  background: var(--bg-hover, rgba(127, 127, 127, 0.1));
+}
+
+.hg-select-option:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 
 .hg-callout {
@@ -1858,7 +2124,8 @@ canvas.hg-player-video {
   flex: none;
   max-width: 72px;
   height: 22px;
-  padding: 0 2px;
+  gap: 4px;
+  padding: 0 4px;
   border: 1px solid rgba(248, 250, 252, 0.22);
   border-radius: 5px;
   outline: none;
@@ -1866,13 +2133,25 @@ canvas.hg-player-video {
   color: #f8fafc;
   font-family: inherit;
   font-size: 9.5px;
-  color-scheme: dark;
 }
 
-/* 本机解码播放时倍速不可用：控件置灰并去掉指针反馈，避免误以为可以加速。 */
 .hg-player-select:disabled {
   opacity: 0.42;
   cursor: default;
+}
+
+.hg-player-select:hover:not(:disabled) {
+  border-color: rgba(248, 250, 252, 0.5);
+}
+
+.hg-player-select:focus-visible,
+.hg-player-select[aria-expanded="true"] {
+  border-color: var(--accent-color, #60a5fa);
+}
+
+.hg-player-select .hg-select-arrow {
+  width: 10px;
+  height: 10px;
 }
 
 .hg-player-speed {
@@ -2223,11 +2502,13 @@ canvas.hg-player-video {
 
   .hg-player-select {
     max-width: 50px;
+    gap: 2px;
+    padding: 0 3px;
     font-size: 9px;
   }
 
   .hg-player-speed {
-    max-width: 42px;
+    max-width: 48px;
   }
 
   .hg-player-time {

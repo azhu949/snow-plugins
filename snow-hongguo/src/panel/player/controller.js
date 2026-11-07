@@ -5,6 +5,7 @@
 // - engine.js 负责取流 / 建 MediaSource / 串行 append / 状态机，只在本机解码不可用时兜底；
 // - 本文件负责 DOM、交互、快捷键、覆盖层、进度上报（detail 页负责落盘 history）。
 import { describeError } from "../ui/common.js";
+import { createSelect } from "../ui/select.js";
 import { DEFAULT_QUALITY, QUALITY_OPTIONS, normalizeMiniWindow } from "../storage.js";
 import { normalizePlaybackPrefs } from "../playback-prefs.js";
 import { MSE_STATE, createMseEngine } from "./engine.js";
@@ -77,6 +78,7 @@ export function createPlayer(slot, initialProps) {
   let miniHidden = false;
   let miniResumePlayback = false;
   let idleTimer = 0;
+  let dropdownOpen = false;
   let lastReportAt = 0;
   let lastReportedMs = Math.max(0, Number(props.positionMs) || 0);
   // 最近上报过的位置：详情页 5 秒节流会把旧值写回 props，不能把它当成「跳转请求」。
@@ -271,28 +273,24 @@ export function createPlayer(slot, initialProps) {
   volume.addEventListener("input", () => setVolume(Number(volume.value)));
   volume.addEventListener("change", () => showControls());
 
-  const qualitySelect = document.createElement("select");
-  qualitySelect.className = "hg-player-select hg-player-quality";
-  for (const quality of QUALITY_OPTIONS) {
-    const option = document.createElement("option");
-    option.value = quality;
-    option.textContent = quality;
-    qualitySelect.append(option);
-  }
-  qualitySelect.addEventListener("change", () => setQuality(qualitySelect.value, true));
-  qualitySelect.addEventListener("click", (event) => event.stopPropagation());
-
-  const speedSelect = document.createElement("select");
-  speedSelect.className = "hg-player-select hg-player-speed";
-  for (const speed of PLAYBACK_RATES) {
-    const option = document.createElement("option");
-    option.value = String(speed);
-    option.textContent = `${speed}x`;
-    speedSelect.append(option);
-  }
-  speedSelect.value = String(desiredPlaybackRate);
-  speedSelect.addEventListener("change", () => setSpeed(speedSelect.value, true));
-  speedSelect.addEventListener("click", (event) => event.stopPropagation());
+  const onSelectOpen = (open) => {
+    dropdownOpen = open;
+    if (open) cancelMiniHide();
+    else if (!disposed && !root.matches(":hover")) scheduleMiniHide();
+    showControls();
+  };
+  const qualityControl = createSelect({
+    className: "hg-player-select hg-player-quality", value: desiredQuality,
+    options: QUALITY_OPTIONS.map((value) => ({ value, label: value })),
+    onChange: (value) => setQuality(value, true), onOpenChange: onSelectOpen,
+  });
+  const qualitySelect = qualityControl.element;
+  const speedControl = createSelect({
+    className: "hg-player-select hg-player-speed", value: desiredPlaybackRate,
+    options: PLAYBACK_RATES.map((value) => ({ value, label: `${value}x` })),
+    onChange: (value) => setSpeed(value, true), onOpenChange: onSelectOpen,
+  });
+  const speedSelect = speedControl.element;
 
   const pipBtn = button("pip", () => void togglePip());
   pipBtn.classList.add("hg-player-pip");
@@ -369,8 +367,7 @@ export function createPlayer(slot, initialProps) {
     muteBtn.title = video.muted ? t("player.unmute") : t("player.mute");
     muteBtn.setAttribute("aria-label", muteBtn.title);
     volume.setAttribute("aria-label", t("player.volume"));
-    qualitySelect.title = t("player.quality");
-    qualitySelect.setAttribute("aria-label", t("player.quality"));
+    qualityControl.update({ title: t("player.quality"), ariaLabel: t("player.quality") });
     // 倍速文案与实际档位由 syncSpeed 按当前播放通道统一处理。
     syncSpeed();
     pipBtn.title = t("player.pip");
@@ -787,7 +784,7 @@ export function createPlayer(slot, initialProps) {
   };
 
   const hideMiniWindow = () => {
-    if (!mini || miniHidden || !miniWindow.autoHide) return;
+    if (!mini || miniHidden || !miniWindow.autoHide || dropdownOpen) return;
     cancelMiniHide();
     const shouldMoveFocus = root.contains(document.activeElement);
     miniHidden = true;
@@ -824,7 +821,7 @@ export function createPlayer(slot, initialProps) {
     if (!mini || miniHidden || !miniWindow.autoHide) return;
     miniHideTimer = setTimeout(() => {
       miniHideTimer = 0;
-      if (!mini || miniInteraction || dragging) return;
+      if (!mini || miniInteraction || dragging || dropdownOpen) return;
       hideMiniWindow();
     }, 0);
   };
@@ -920,6 +917,7 @@ export function createPlayer(slot, initialProps) {
   );
 
   const onDocumentKey = (event) => {
+    if (event.defaultPrevented) return;
     if (!fill && !mini) return;
     if (event.key === "Escape") {
       event.preventDefault();
@@ -1078,10 +1076,7 @@ export function createPlayer(slot, initialProps) {
   };
 
   const syncSpeed = () => {
-    speedSelect.disabled = false;
-    speedSelect.title = t("player.speed");
-    speedSelect.setAttribute("aria-label", speedSelect.title);
-    speedSelect.value = String(currentPlaybackRate());
+    speedControl.update({ value: currentPlaybackRate(), title: t("player.speed"), ariaLabel: t("player.speed") });
   };
 
   const syncQualitySelect = () => {
@@ -1089,7 +1084,7 @@ export function createPlayer(slot, initialProps) {
     const candidate = wvc ? wvcQuality : state.quality || desiredQuality || DEFAULT_QUALITY;
     // 服务器档位不在选项表里时退回到目标档位，避免下拉变成空值。
     const quality = QUALITY_OPTIONS.includes(candidate) ? candidate : desiredQuality;
-    if (qualitySelect.value !== quality) qualitySelect.value = quality;
+    if (qualitySelect.value !== quality) qualityControl.update({ value: quality });
   };
 
   const updateNextButton = () => {
@@ -1145,10 +1140,10 @@ export function createPlayer(slot, initialProps) {
       clearTimeout(idleTimer);
       idleTimer = 0;
     }
-    if (!playing || overlayKind || dragging) return;
+    if (!playing || overlayKind || dragging || dropdownOpen) return;
     idleTimer = setTimeout(() => {
       idleTimer = 0;
-      if (!disposed && playing && !dragging && !overlayKind) root.classList.add("is-idle");
+      if (!disposed && playing && !dragging && !overlayKind && !dropdownOpen) root.classList.add("is-idle");
     }, HIDE_DELAY_MS);
   };
 
@@ -1495,7 +1490,7 @@ export function createPlayer(slot, initialProps) {
     }
     const target = event.target;
     const tagName = target && target.tagName ? String(target.tagName).toLowerCase() : "";
-    if (tagName === "select" || tagName === "input" || tagName === "textarea") return;
+    if (tagName === "select" || tagName === "input" || tagName === "textarea" || target?.closest?.('[role="combobox"]')) return;
     // 焦点在按钮上时，空格/回车交给按钮自身，避免一次按键触发两次。
     const onButton = target && typeof target.closest === "function" && target.closest("button");
     if (onButton && (key === " " || key === "Spacebar" || key === "Enter")) return;
@@ -1545,7 +1540,7 @@ export function createPlayer(slot, initialProps) {
     showControls();
   });
   root.addEventListener("mouseleave", () => {
-    if (playing && !dragging && !overlayKind) root.classList.add("is-idle");
+    if (playing && !dragging && !overlayKind && !dropdownOpen) root.classList.add("is-idle");
   });
 
   // ------------------------------------------------------------------ video 事件
@@ -1987,6 +1982,8 @@ export function createPlayer(slot, initialProps) {
       if (disposed) return;
       report(true);
       disposed = true;
+      qualityControl.destroy();
+      speedControl.destroy();
       try {
         exitMini();
       } catch {

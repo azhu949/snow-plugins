@@ -1,6 +1,7 @@
 // 设置页：清晰度偏好、缓存清理、后台状态（/health）。
 import { getReact, h } from "../ui/runtime.js";
 import { ErrorNotice, Icon, Spinner, describeError, formatUptime } from "../ui/common.js";
+import { Select } from "../ui/select.js";
 import { QUALITY_OPTIONS } from "../storage.js";
 import { PLAYBACK_RATES } from "../playback-prefs.js";
 
@@ -114,26 +115,20 @@ export function SettingsPage({ ctx, active }) {
           "div",
           { className: "hg-field" },
           h("label", { className: "hg-field-label", htmlFor: "hg-quality" }, t("settings.quality")),
-          h(
-            "select",
-            {
-              id: "hg-quality",
-              className: "hg-select",
-              value: quality,
-              onChange: (event) => ctx.updatePrefs({ quality: event.target.value }),
-            },
-            QUALITY_OPTIONS.map((option) =>
-              h("option", { key: option, value: option }, option)
-            )
-          )
+          h(Select, {
+            id: "hg-quality", value: quality, active, ariaLabel: t("settings.quality"),
+            onChange: (value) => ctx.updatePrefs({ quality: value }),
+            options: QUALITY_OPTIONS.map((value) => ({ value, label: value })),
+          })
         ),
         h("div", { className: "hg-hint" }, t("settings.qualityHint")),
         h("div", { className: "hg-field" },
           h("label", { className: "hg-field-label", htmlFor: "hg-playback-rate" }, t("player.speed")),
-          h("select", {
-            id: "hg-playback-rate", className: "hg-select", value: ctx.prefs.playbackRate,
-            onChange: (event) => ctx.updatePrefs({ playbackRate: Number(event.target.value) }),
-          }, PLAYBACK_RATES.map((rate) => h("option", { key: rate, value: rate }, `${rate}x`)))
+          h(Select, {
+            id: "hg-playback-rate", value: ctx.prefs.playbackRate, active, ariaLabel: t("player.speed"),
+            onChange: (value) => ctx.updatePrefs({ playbackRate: Number(value) }),
+            options: PLAYBACK_RATES.map((value) => ({ value, label: `${value}x` })),
+          })
         ),
         h("div", { className: "hg-field hg-range-field" },
           h("label", { className: "hg-field-label", htmlFor: "hg-volume" }, t("player.volume")),

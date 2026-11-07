@@ -28,7 +28,7 @@ function h(type, props, ...children) {
 var zh_CN_default = {
   "plugin.title": "红果短剧",
   "app.subtitle": "短剧浏览",
-  "tab.discover": "推荐",
+  "tab.discover": "发现",
   "tab.search": "搜索",
   "tab.history": "历史",
   "tab.settings": "设置",
@@ -218,14 +218,29 @@ var zh_CN_default = {
   "detail.partialAt": "已看到 {{time}}",
   "settings.autoNext": "自动播放下一集",
   "settings.playbackRemembered": "倍速、音量、静音及连播设置自动保存，下次打开仍然生效；关闭连播后，本集播完即停止",
-  "settings.loadFailed": "读取播放偏好失败，已暂时静音；可在设置中重新调整"
+  "settings.loadFailed": "读取播放偏好失败，已暂时静音；可在设置中重新调整",
+  "catalog.navigation": "发现短剧",
+  "catalog.recommend": "推荐",
+  "catalog.rank": "排行",
+  "catalog.filter": "分类",
+  "catalog.content": "作品类型",
+  "catalog.board": "榜单",
+  "catalog.defaultBoard": "默认榜单",
+  "catalog.rankNumber": "第 {{number}} 名",
+  "catalog.promoted": "平台推荐",
+  "catalog.any": "不限",
+  "catalog.reset": "重置筛选",
+  "catalog.empty": "暂无符合条件的短剧",
+  "catalog.emptyHint": "试试其他榜单或筛选条件",
+  "catalog.filtersLoading": "正在加载分类条件…",
+  "catalog.cursorExpired": "分页已过期，请重试以重新加载列表"
 };
 
 // locales/zh-TW.json
 var zh_TW_default = {
   "plugin.title": "紅果短劇",
   "app.subtitle": "短劇瀏覽",
-  "tab.discover": "推薦",
+  "tab.discover": "發現",
   "tab.search": "搜尋",
   "tab.history": "歷史",
   "tab.settings": "設定",
@@ -415,7 +430,22 @@ var zh_TW_default = {
   "detail.partialAt": "已看到 {{time}}",
   "settings.autoNext": "自動播放下一集",
   "settings.playbackRemembered": "倍速、音量、靜音及連播設定自動儲存，下次開啟仍然生效；關閉連播後，本集播完即停止",
-  "settings.loadFailed": "讀取播放偏好失敗，已暫時靜音；可在設定中重新調整"
+  "settings.loadFailed": "讀取播放偏好失敗，已暫時靜音；可在設定中重新調整",
+  "catalog.navigation": "發現短劇",
+  "catalog.recommend": "推薦",
+  "catalog.rank": "排行",
+  "catalog.filter": "分類",
+  "catalog.content": "作品類型",
+  "catalog.board": "榜單",
+  "catalog.defaultBoard": "預設榜單",
+  "catalog.rankNumber": "第 {{number}} 名",
+  "catalog.promoted": "平台推薦",
+  "catalog.any": "不限",
+  "catalog.reset": "重設篩選",
+  "catalog.empty": "暫無符合條件的短劇",
+  "catalog.emptyHint": "試試其他榜單或篩選條件",
+  "catalog.filtersLoading": "正在載入分類條件…",
+  "catalog.cursorExpired": "分頁已過期，請重試以重新載入列表"
 };
 
 // locales/en.json
@@ -612,7 +642,22 @@ var en_default = {
   "detail.partialAt": "Watched up to {{time}}",
   "settings.autoNext": "Play next episode automatically",
   "settings.playbackRemembered": "Speed, volume, mute and autoplay settings are saved for next time. Turn autoplay off to stop at the end of an episode.",
-  "settings.loadFailed": "Could not load playback settings. Playback is muted for now; adjust it in Settings."
+  "settings.loadFailed": "Could not load playback settings. Playback is muted for now; adjust it in Settings.",
+  "catalog.navigation": "Browse series",
+  "catalog.recommend": "For you",
+  "catalog.rank": "Rankings",
+  "catalog.filter": "Categories",
+  "catalog.content": "Content type",
+  "catalog.board": "Ranking",
+  "catalog.defaultBoard": "Default ranking",
+  "catalog.rankNumber": "Rank {{number}}",
+  "catalog.promoted": "Promoted",
+  "catalog.any": "Any",
+  "catalog.reset": "Reset filters",
+  "catalog.empty": "No matching series",
+  "catalog.emptyHint": "Try another ranking or filter.",
+  "catalog.filtersLoading": "Loading filters…",
+  "catalog.cursorExpired": "This list has expired. Retry to reload it from the first page."
 };
 
 // src/panel/i18n.js
@@ -682,6 +727,9 @@ var LIMITS = {
 var PANEL_ROUTES = {
   health: "/health",
   discover: "/discover",
+  rank: "/rank",
+  filterPanel: "/filter-panel",
+  filter: "/filter",
   search: "/search",
   series: "/series",
   episodes: "/episodes",
@@ -957,6 +1005,12 @@ function createRpc(api, { log = () => {
     },
     discover: (cursor) => call(PANEL_ROUTES.discover, {
       query: { cursor },
+      timeoutMs: TIMEOUTS.list
+    }),
+    getRank: (query = {}) => call(PANEL_ROUTES.rank, { query, timeoutMs: TIMEOUTS.list }),
+    getFilterPanel: (genre) => call(PANEL_ROUTES.filterPanel, { query: { genre }, timeoutMs: TIMEOUTS.list }),
+    filterSeries: (selections = {}, cursor) => call(PANEL_ROUTES.filter, {
+      query: { selections: JSON.stringify(selections), cursor },
       timeoutMs: TIMEOUTS.list
     }),
     search: (q, cursor) => call(PANEL_ROUTES.search, {
@@ -1385,6 +1439,9 @@ function describeError(t, error) {
     case "PROTOCOL":
       message = t("error.protocol");
       break;
+    case "CURSOR_EXPIRED":
+      message = t("catalog.cursorExpired");
+      break;
     case "INVALID_PARAM":
     case "PARAM_INVALID":
     case "INVALID_OPTIONS":
@@ -1507,6 +1564,278 @@ function formatDateTime(value, locale) {
   } catch {
     return date.toLocaleString();
   }
+}
+
+// src/panel/ui/select.js
+var nextId = 0;
+var opened = /* @__PURE__ */ new WeakMap();
+var glyph = (doc, path) => {
+  const svg = doc.createElementNS("http://www.w3.org/2000/svg", "svg");
+  for (const [key, value] of Object.entries({ viewBox: "0 0 24 24", width: "14", height: "14", fill: "none", stroke: "currentColor", "stroke-width": "2", "stroke-linecap": "round", "stroke-linejoin": "round", "aria-hidden": "true" })) svg.setAttribute(key, value);
+  const line = doc.createElementNS(svg.namespaceURI, "path");
+  line.setAttribute("d", path);
+  svg.append(line);
+  return svg;
+};
+function createSelect(initial, element = document.createElement("button")) {
+  const doc = element.ownerDocument;
+  const win = doc.defaultView;
+  const contains = (parent, target) => target instanceof win.Node && parent?.contains(target);
+  const menuId = `hg-select-menu-${++nextId}`;
+  const label = doc.createElement("span");
+  label.className = "hg-select-label";
+  const arrow = glyph(doc, "m6 9 6 6 6-6");
+  arrow.classList.add("hg-select-arrow");
+  element.replaceChildren(label, arrow);
+  element.type = "button";
+  element.setAttribute("role", "combobox");
+  element.setAttribute("aria-haspopup", "listbox");
+  element.setAttribute("aria-expanded", "false");
+  let props = {};
+  let options = [];
+  let menu = null;
+  let rows = [];
+  let active = -1;
+  let disposed = false;
+  let cleanup = () => {
+  };
+  let typed = "";
+  let typedAt = 0;
+  const close = (restoreFocus = false) => {
+    if (!menu) return;
+    cleanup();
+    menu.remove();
+    menu = null;
+    rows = [];
+    element.setAttribute("aria-expanded", "false");
+    element.removeAttribute("aria-controls");
+    element.removeAttribute("aria-activedescendant");
+    if (opened.get(doc) === close) opened.delete(doc);
+    if (restoreFocus && element.isConnected) element.focus({ preventScroll: true });
+    props.onOpenChange?.(false);
+  };
+  const highlight = (index, scroll = false) => {
+    active = index;
+    rows.forEach((row, position2) => row.classList.toggle("is-active", position2 === active));
+    if (rows[active]) {
+      element.setAttribute("aria-activedescendant", rows[active].id);
+      if (scroll) rows[active].scrollIntoView?.({ block: "nearest" });
+    } else element.removeAttribute("aria-activedescendant");
+  };
+  const syncValue = () => {
+    const value = String(props.value ?? "");
+    const selected = options.find((option) => option.value === value);
+    label.textContent = selected?.label ?? value;
+    label.title = label.textContent;
+    element.value = value;
+    element.title = props.title || label.textContent;
+    element.setAttribute("aria-label", props.ariaLabel || label.textContent);
+    rows.forEach((row, index) => {
+      const chosen = options[index].value === value;
+      row.setAttribute("aria-selected", String(chosen));
+      row.lastChild.style.visibility = chosen ? "visible" : "hidden";
+    });
+  };
+  const position = () => {
+    if (!menu) return;
+    if (!element.isConnected || element.disabled || element.closest('[hidden], [inert], [aria-hidden="true"]')) return close();
+    const rect = element.getBoundingClientRect();
+    for (let node = element; node && node !== doc.body; node = node.parentElement) {
+      const style = win.getComputedStyle(node);
+      if (style.display === "none" || style.visibility === "hidden") return close();
+      if (node !== element) {
+        const bounds = node.getBoundingClientRect();
+        const clips = (overflow) => /^(auto|scroll|hidden|clip)$/.test(overflow);
+        if (bounds.height > 0 && clips(style.overflowY) && (rect.bottom <= bounds.top || rect.top >= bounds.bottom)) return close();
+        if (bounds.width > 0 && clips(style.overflowX) && (rect.right <= bounds.left || rect.left >= bounds.right)) return close();
+      }
+    }
+    const viewportWidth = win.innerWidth;
+    const viewportHeight = win.innerHeight;
+    if (rect.bottom < 0 || rect.top > viewportHeight || rect.right < 0 || rect.left > viewportWidth) return close();
+    const width = Math.min(Math.max(rect.width, props.dropdownMinWidth || 128), Math.max(0, viewportWidth - 16));
+    menu.style.width = `${width}px`;
+    const desired = Math.min(240, menu.scrollHeight || options.length * 32 + 14);
+    const below = Math.max(0, viewportHeight - rect.bottom - 12);
+    const above = Math.max(0, rect.top - 12);
+    const up = below < desired && above > below;
+    const height = Math.min(desired, up ? above : below);
+    menu.dataset.placement = up ? "top" : "bottom";
+    menu.style.maxHeight = `${height}px`;
+    menu.style.left = `${Math.max(8, Math.min(rect.left, viewportWidth - width - 8))}px`;
+    menu.style.top = `${up ? Math.max(8, rect.top - height - 4) : rect.bottom + 4}px`;
+  };
+  const choose = (index) => {
+    const option = options[index];
+    if (!option || option.disabled || element.disabled) return;
+    const changed = String(props.value ?? "") !== option.value;
+    props = { ...props, value: option.value };
+    syncValue();
+    close(true);
+    if (changed) props.onChange?.(option.value);
+  };
+  const renderOptions = () => {
+    rows = options.map((option, index) => {
+      const row = doc.createElement("button");
+      row.type = "button";
+      row.tabIndex = -1;
+      row.id = `${menuId}-${index}`;
+      row.className = "hg-select-option";
+      row.setAttribute("role", "option");
+      row.dataset.value = option.value;
+      row.disabled = option.disabled;
+      row.title = option.label;
+      const text = doc.createElement("span");
+      text.textContent = option.label;
+      row.append(text, glyph(doc, "m20 6-11 11-5-5"));
+      row.addEventListener("mousedown", (event) => event.preventDefault());
+      row.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        choose(index);
+      });
+      row.addEventListener("pointermove", () => {
+        if (!option.disabled) highlight(index);
+      });
+      return row;
+    });
+    menu.replaceChildren(...rows);
+    syncValue();
+    const selected = options.findIndex((option) => option.value === String(props.value ?? "") && !option.disabled);
+    highlight(selected >= 0 ? selected : options.findIndex((option) => !option.disabled));
+  };
+  const open = () => {
+    if (disposed || element.disabled || props.active === false || menu || !options.length) return;
+    opened.get(doc)?.();
+    menu = doc.createElement("div");
+    menu.id = menuId;
+    menu.className = "hg-select-menu";
+    menu.setAttribute("role", "listbox");
+    menu.setAttribute("aria-label", props.ariaLabel || label.textContent);
+    menu.addEventListener("keydown", onKeyDown);
+    renderOptions();
+    doc.body.append(menu);
+    element.setAttribute("aria-expanded", "true");
+    element.setAttribute("aria-controls", menuId);
+    element.focus({ preventScroll: true });
+    opened.set(doc, close);
+    typed = "";
+    const outside = (event) => {
+      if (!contains(element, event.target) && !contains(menu, event.target)) close();
+    };
+    const scroll = (event) => {
+      if (!contains(menu, event.target)) position();
+    };
+    const resize = typeof win.ResizeObserver === "function" ? new win.ResizeObserver(position) : null;
+    resize?.observe(element);
+    const observer = new win.MutationObserver(position);
+    for (let node = element; node; node = node.parentElement) {
+      observer.observe(node, { childList: true, attributes: true, attributeFilter: ["hidden", "inert", "aria-hidden", "class", "style"] });
+    }
+    doc.addEventListener("pointerdown", outside, true);
+    doc.addEventListener("focusin", outside);
+    win.addEventListener("resize", position);
+    win.addEventListener("scroll", scroll, true);
+    cleanup = () => {
+      observer.disconnect();
+      resize?.disconnect();
+      doc.removeEventListener("pointerdown", outside, true);
+      doc.removeEventListener("focusin", outside);
+      win.removeEventListener("resize", position);
+      win.removeEventListener("scroll", scroll, true);
+    };
+    props.onOpenChange?.(true);
+    position();
+    if (menu) highlight(active, true);
+  };
+  const onClick = (event) => {
+    event.stopPropagation();
+    menu ? close() : open();
+  };
+  const onKeyDown = (event) => {
+    if (event.altKey || event.ctrlKey || event.metaKey || element.disabled) return;
+    const key = event.key;
+    if (key === "Tab") {
+      close(true);
+      return;
+    }
+    if (key === "Escape") {
+      if (!menu) return;
+      close(true);
+    } else if (key === "Enter" || key === " " || key === "Spacebar") {
+      menu ? choose(active) : open();
+    } else if (["ArrowDown", "ArrowUp", "Home", "End"].includes(key)) {
+      const wasOpen = Boolean(menu);
+      open();
+      const enabled = options.map((option, index) => option.disabled ? -1 : index).filter((index) => index >= 0);
+      if (key === "Home") highlight(enabled[0] ?? -1, true);
+      else if (key === "End") highlight(enabled.at(-1) ?? -1, true);
+      else if (wasOpen && enabled.length) {
+        const offset = key === "ArrowDown" ? 1 : -1;
+        highlight(enabled[(enabled.indexOf(active) + offset + enabled.length) % enabled.length], true);
+      }
+    } else if (key.length === 1) {
+      open();
+      const now = Date.now();
+      typed = now - typedAt > 700 ? key : typed + key;
+      typedAt = now;
+      const index = options.findIndex((option) => !option.disabled && option.label.toLocaleLowerCase().startsWith(typed.toLocaleLowerCase()));
+      if (index >= 0) highlight(index, true);
+    } else return;
+    event.preventDefault();
+    event.stopPropagation();
+  };
+  element.addEventListener("click", onClick);
+  element.addEventListener("keydown", onKeyDown);
+  const update = (next) => {
+    if (disposed) return;
+    const previousValue = props.value;
+    props = { ...props, ...next };
+    const normalized = (props.options || []).map((option) => ({ value: String(option.value), label: String(option.label), disabled: option.disabled === true }));
+    const changed = JSON.stringify(options) !== JSON.stringify(normalized);
+    options = normalized;
+    element.className = `hg-select${props.className ? ` ${props.className}` : ""}`;
+    element.disabled = props.disabled === true;
+    if (props.id) element.id = props.id;
+    if (props.filterKey) element.dataset.filter = props.filterKey;
+    if (element.disabled || props.active === false) close();
+    if (menu && changed) renderOptions();
+    else {
+      syncValue();
+      if (menu && previousValue !== props.value) highlight(options.findIndex((option) => option.value === String(props.value)));
+    }
+    position();
+  };
+  update(initial);
+  return {
+    element,
+    update,
+    close,
+    isOpen: () => Boolean(menu),
+    destroy() {
+      if (disposed) return;
+      close();
+      disposed = true;
+      element.removeEventListener("click", onClick);
+      element.removeEventListener("keydown", onKeyDown);
+    }
+  };
+}
+function Select(props) {
+  const React = getReact();
+  const ref = React.useRef(null);
+  const control = React.useRef(null);
+  React.useLayoutEffect(() => {
+    control.current = createSelect(props, ref.current);
+    return () => {
+      control.current.destroy();
+      control.current = null;
+    };
+  }, []);
+  React.useLayoutEffect(() => {
+    control.current?.update(props);
+  });
+  return h("button", { ref });
 }
 
 // src/panel/pages/discover.js
@@ -1800,6 +2129,371 @@ function DiscoverPage({ ctx, active }) {
         status === "more" ? h(Spinner, { label: t("discover.loadingMore") }) : hasMore ? h("span", null, t("action.loadMore")) : h("span", null, t("discover.end"))
       ) : null
     )
+  );
+}
+
+// src/panel/pages/catalog.js
+var emptyList = () => ({ items: [], page: null, cursor: null, hasMore: false, status: "idle", error: null });
+var mergeItems = (previous, incoming) => {
+  const seen = /* @__PURE__ */ new Set();
+  return [...previous, ...Array.isArray(incoming) ? incoming : []].filter((item) => {
+    if (!item?.id || seen.has(item.id)) return false;
+    seen.add(item.id);
+    return true;
+  });
+};
+function useCatalogList(React, active, request) {
+  const [state, setState] = React.useState(emptyList);
+  const stateRef = React.useRef(state);
+  const identity = React.useRef(null);
+  const generation = React.useRef(0);
+  const busy = React.useRef(false);
+  const loaded = React.useRef(false);
+  const alive = React.useRef(true);
+  const seenCursors = React.useRef(/* @__PURE__ */ new Set());
+  const publish = (next) => {
+    stateRef.current = next;
+    setState(next);
+  };
+  React.useEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+      generation.current += 1;
+    };
+  }, []);
+  const load = React.useCallback(async (append = false) => {
+    if (append && identity.current !== request) return;
+    if (busy.current || append && !stateRef.current.hasMore) return;
+    const seq = append ? generation.current : ++generation.current;
+    const before = stateRef.current;
+    const cursor = append ? before.cursor : null;
+    if (!append) seenCursors.current.clear();
+    if (cursor) seenCursors.current.add(cursor);
+    busy.current = true;
+    publish({ ...append ? before : emptyList(), status: append ? "more" : "loading", error: null });
+    try {
+      const page = await request(cursor);
+      if (!alive.current || seq !== generation.current) return;
+      const nextCursor = page?.cursor || null;
+      loaded.current = true;
+      publish({
+        items: mergeItems(append ? before.items : [], page?.items),
+        page,
+        cursor: nextCursor,
+        hasMore: page?.hasMore === true && Boolean(nextCursor) && !seenCursors.current.has(nextCursor),
+        status: "ready",
+        error: null
+      });
+    } catch (error) {
+      if (!alive.current || seq !== generation.current) return;
+      publish({ ...append ? before : emptyList(), status: "error", error });
+    } finally {
+      if (seq === generation.current) busy.current = false;
+    }
+  }, [request]);
+  React.useEffect(() => {
+    if (identity.current !== request) {
+      identity.current = request;
+      generation.current += 1;
+      busy.current = false;
+      loaded.current = false;
+      publish(emptyList());
+    }
+    if (active && !loaded.current && !busy.current) void load();
+  }, [active, request, load]);
+  return { ...state, load, busy: state.status === "loading" || state.status === "more" };
+}
+function CatalogItems({ ctx, list, active, scrollRef, ranked = false }) {
+  const React = getReact();
+  const t = ctx.t;
+  const sentinelRef = React.useRef(null);
+  React.useEffect(() => {
+    if (!active || list.status !== "ready" || !list.hasMore) return void 0;
+    const root = scrollRef.current;
+    if (!root) return void 0;
+    let disposed = false;
+    const checkNearEnd = () => {
+      if (disposed || root.clientHeight <= 0) return;
+      if (root.scrollHeight - root.scrollTop - root.clientHeight < 240) void list.load(true);
+    };
+    const intersectionObserver = typeof IntersectionObserver === "function" ? new IntersectionObserver(checkNearEnd, { root, rootMargin: "240px 0px" }) : null;
+    const resizeObserver = typeof ResizeObserver === "function" ? new ResizeObserver(checkNearEnd) : null;
+    if (sentinelRef.current) intersectionObserver?.observe(sentinelRef.current);
+    resizeObserver?.observe(root);
+    root.addEventListener("scroll", checkNearEnd, { passive: true });
+    window.addEventListener("resize", checkNearEnd);
+    checkNearEnd();
+    return () => {
+      disposed = true;
+      intersectionObserver?.disconnect();
+      resizeObserver?.disconnect();
+      root.removeEventListener("scroll", checkNearEnd);
+      window.removeEventListener("resize", checkNearEnd);
+    };
+  }, [active, scrollRef, list.load, list.status, list.hasMore, list.cursor]);
+  return h(
+    "div",
+    { className: "hg-catalog-results", "aria-busy": list.busy },
+    list.error ? h(ErrorNotice, {
+      ctx,
+      error: list.error,
+      compact: list.items.length > 0,
+      onRetry: () => void list.load(list.hasMore && list.error.code !== "CURSOR_EXPIRED")
+    }) : null,
+    list.status === "loading" ? h(SkeletonCards, { count: 4 }) : null,
+    list.status === "ready" && list.items.length === 0 && !list.hasMore ? h(EmptyState, {
+      ctx,
+      icon: ranked ? "Trophy" : "ListFilter",
+      title: t("catalog.empty"),
+      hint: t("catalog.emptyHint")
+    }) : null,
+    list.items.length ? h(
+      "div",
+      { className: ranked ? "hg-rank-list" : "hg-grid" },
+      list.items.map((item) => h(
+        "button",
+        {
+          key: item.id,
+          type: "button",
+          className: ranked ? "hg-rank-item" : "hg-card",
+          title: item.title || t("unit.untitled"),
+          onClick: () => ctx.openSeries(item)
+        },
+        ranked ? h("span", {
+          className: `hg-rank-number${!item.promoted && item.position > 0 && item.position <= 3 ? " is-top" : ""}`,
+          "aria-label": item.promoted ? t("catalog.promoted") : item.position ? t("catalog.rankNumber", { number: item.position }) : void 0
+        }, item.promoted ? "—" : item.position || "—") : null,
+        h(
+          "div",
+          { className: "hg-card-cover" },
+          h(Cover, { ctx, path: item.cover }),
+          !ranked && item.count != null ? h("span", { className: "hg-card-badge" }, t("unit.episodes", { count: item.count })) : null
+        ),
+        h(
+          "div",
+          { className: ranked ? "hg-rank-info" : "hg-card-info" },
+          h("div", { className: "hg-card-title" }, item.title || t("unit.untitled")),
+          ranked && item.count != null ? h("div", { className: "hg-meta" }, t("unit.episodes", { count: item.count })) : null,
+          ranked ? h("div", { className: "hg-rank-score" }, item.promoted ? t("catalog.promoted") : item.score) : null
+        )
+      ))
+    ) : null,
+    list.items.length || list.hasMore ? h(
+      "div",
+      { className: "hg-list-foot", ref: sentinelRef },
+      list.status === "more" ? h(Spinner, { label: t("discover.loadingMore") }) : list.hasMore ? !list.error ? h("span", null, t("action.loadMore")) : null : h("span", null, t("discover.end"))
+    ) : null
+  );
+}
+function RankPage({ ctx, active }) {
+  const React = getReact();
+  const t = ctx.t;
+  const [query, setQuery] = React.useState({});
+  const [directory, setDirectory] = React.useState([]);
+  const request = React.useMemo(() => {
+    let resolved = query;
+    return async (cursor) => {
+      const page = await ctx.rpc.getRank({ ...cursor ? resolved : query, cursor });
+      resolved = { content: page?.content || query.content, board: page?.board || query.board };
+      return page;
+    };
+  }, [ctx.rpc, query]);
+  const list = useCatalogList(React, active, request);
+  const scroll = React.useRef(null);
+  React.useEffect(() => {
+    if (list.page?.contents?.length) setDirectory(list.page.contents);
+  }, [list.page]);
+  React.useEffect(() => {
+    if (scroll.current) scroll.current.scrollTop = 0;
+  }, [query]);
+  const content = list.page?.content || query.content || directory.find((item) => item.selected)?.id || directory[0]?.id || "";
+  const boards = directory.find((item) => item.id === content)?.boards || [];
+  const board = list.page?.board || query.board || boards.find((item) => item.selected)?.id || "";
+  return h(
+    "div",
+    { className: "hg-page hg-ranking" },
+    h(
+      "div",
+      { className: "hg-page-head" },
+      h("div", { className: "hg-page-title" }, t("catalog.rank")),
+      h(
+        "button",
+        {
+          type: "button",
+          className: "hg-iconbtn",
+          disabled: list.busy,
+          title: t("action.refresh"),
+          "aria-label": t("action.refresh"),
+          onClick: () => void list.load()
+        },
+        h(Icon, { ctx, name: "RefreshCw", size: 15 })
+      )
+    ),
+    h(
+      "div",
+      { className: "hg-scroll", ref: scroll },
+      directory.length ? h(
+        "div",
+        { className: "hg-catalog-controls" },
+        h(
+          "label",
+          { className: "hg-catalog-field" },
+          h("span", null, t("catalog.content")),
+          h(Select, {
+            ariaLabel: t("catalog.content"),
+            value: content,
+            active,
+            onChange: (value) => setQuery({ content: value }),
+            options: directory.map((item) => ({ value: item.id, label: item.name }))
+          })
+        ),
+        boards.length ? h(
+          "label",
+          { className: "hg-catalog-field" },
+          h("span", null, t("catalog.board")),
+          h(Select, {
+            ariaLabel: t("catalog.board"),
+            value: board,
+            active,
+            onChange: (value) => setQuery({ content, board: value }),
+            options: [
+              ...!board ? [{ value: "", label: t("catalog.defaultBoard") }] : [],
+              ...boards.map((item) => ({ value: item.id, label: item.name }))
+            ]
+          })
+        ) : null
+      ) : null,
+      h(CatalogItems, { ctx, list, active, scrollRef: scroll, ranked: true })
+    )
+  );
+}
+function FilterPage({ ctx, active }) {
+  const React = getReact();
+  const t = ctx.t;
+  const [selections, setSelections] = React.useState({});
+  const [panel, setPanel] = React.useState({ genre: null, rows: [], status: "idle", error: null });
+  const [reload, setReload] = React.useState(0);
+  const panelSeq = React.useRef(0);
+  const scroll = React.useRef(null);
+  const genre = selections.genre?.[0] || "";
+  const request = React.useCallback((cursor) => ctx.rpc.filterSeries(selections, cursor), [ctx.rpc, selections]);
+  const list = useCatalogList(React, active && panel.status === "ready" && panel.genre === genre, request);
+  React.useEffect(() => {
+    if (!active || panel.genre === genre && panel.status === "ready") return void 0;
+    let alive = true;
+    const seq = ++panelSeq.current;
+    setPanel((prev) => ({ ...prev, status: "loading", error: null }));
+    ctx.rpc.getFilterPanel(genre).then((result) => {
+      if (!alive || seq !== panelSeq.current) return;
+      setPanel({ genre, rows: Array.isArray(result?.rows) ? result.rows : [], status: "ready", error: null });
+    }).catch((error) => {
+      if (alive && seq === panelSeq.current) setPanel((prev) => ({ ...prev, status: "error", error }));
+    });
+    return () => {
+      alive = false;
+    };
+  }, [ctx.rpc, active, genre, reload]);
+  React.useEffect(() => {
+    if (scroll.current) scroll.current.scrollTop = 0;
+  }, [selections]);
+  const choose = (key, value) => {
+    setSelections((previous) => {
+      const next = key === "genre" ? {} : { ...previous };
+      if (value) next[key] = [value];
+      else delete next[key];
+      return next;
+    });
+  };
+  const currentPanel = panel.genre === genre;
+  return h(
+    "div",
+    { className: "hg-page hg-filter-page" },
+    h(
+      "div",
+      { className: "hg-page-head" },
+      h("div", { className: "hg-page-title" }, t("catalog.filter")),
+      h("button", {
+        type: "button",
+        className: "hg-linkbtn",
+        disabled: !Object.keys(selections).length,
+        onClick: () => setSelections({})
+      }, t("catalog.reset")),
+      h(
+        "button",
+        {
+          type: "button",
+          className: "hg-iconbtn",
+          disabled: list.busy || panel.status !== "ready" || !currentPanel,
+          title: t("action.refresh"),
+          "aria-label": t("action.refresh"),
+          onClick: () => void list.load()
+        },
+        h(Icon, { ctx, name: "RefreshCw", size: 15 })
+      )
+    ),
+    h(
+      "div",
+      { className: "hg-scroll", ref: scroll },
+      panel.status === "loading" ? h(
+        "div",
+        { className: "hg-loading-line" },
+        h(Spinner, { label: t("catalog.filtersLoading") }),
+        t("catalog.filtersLoading")
+      ) : null,
+      panel.error ? h(ErrorNotice, { ctx, error: panel.error, onRetry: () => setReload((value) => value + 1) }) : null,
+      currentPanel && panel.rows.length ? h(
+        "div",
+        { className: "hg-catalog-controls hg-filter-controls" },
+        panel.rows.map((row) => h(
+          "label",
+          { key: row.key, className: "hg-catalog-field" },
+          h("span", null, row.name),
+          h(Select, {
+            ariaLabel: row.name,
+            filterKey: row.key,
+            active,
+            value: selections[row.key]?.[0] || "",
+            disabled: panel.status !== "ready",
+            onChange: (value) => choose(row.key, value),
+            options: [
+              ...!row.options.some((option) => option.value === "") ? [{ value: "", label: t("catalog.any") }] : [],
+              ...row.options.map((option) => ({ value: option.value, label: option.name }))
+            ]
+          })
+        ))
+      ) : null,
+      currentPanel && panel.status === "ready" ? h(CatalogItems, { ctx, list, active, scrollRef: scroll }) : null
+    )
+  );
+}
+function DiscoveryPage({ ctx, active }) {
+  const React = getReact();
+  const [mode, setMode] = React.useState("recommend");
+  const [visited, setVisited] = React.useState({ recommend: true });
+  const pages = { recommend: DiscoverPage, rank: RankPage, filter: FilterPage };
+  return h(
+    "div",
+    { className: "hg-page hg-discovery" },
+    h(
+      "div",
+      { className: "hg-discovery-modes", role: "group", "aria-label": ctx.t("catalog.navigation") },
+      Object.keys(pages).map((id) => h("button", {
+        type: "button",
+        key: id,
+        className: `hg-discovery-mode${mode === id ? " is-active" : ""}`,
+        "aria-pressed": mode === id,
+        onClick: () => {
+          setMode(id);
+          setVisited((prev) => ({ ...prev, [id]: true }));
+        }
+      }, ctx.t(`catalog.${id}`)))
+    ),
+    Object.entries(pages).map(([id, Component]) => visited[id] ? h("div", {
+      key: id,
+      className: "hg-discovery-pane",
+      hidden: mode !== id
+    }, h(Component, { ctx, active: active && mode === id })) : null)
   );
 }
 
@@ -4367,6 +5061,7 @@ function createPlayer(slot, initialProps) {
   let miniHidden = false;
   let miniResumePlayback = false;
   let idleTimer = 0;
+  let dropdownOpen = false;
   let lastReportAt = 0;
   let lastReportedMs = Math.max(0, Number(props.positionMs) || 0);
   const recentReports = [];
@@ -4520,27 +5215,28 @@ function createPlayer(slot, initialProps) {
   volume.value = "1";
   volume.addEventListener("input", () => setVolume(Number(volume.value)));
   volume.addEventListener("change", () => showControls());
-  const qualitySelect = document.createElement("select");
-  qualitySelect.className = "hg-player-select hg-player-quality";
-  for (const quality of QUALITY_OPTIONS) {
-    const option = document.createElement("option");
-    option.value = quality;
-    option.textContent = quality;
-    qualitySelect.append(option);
-  }
-  qualitySelect.addEventListener("change", () => setQuality(qualitySelect.value, true));
-  qualitySelect.addEventListener("click", (event) => event.stopPropagation());
-  const speedSelect = document.createElement("select");
-  speedSelect.className = "hg-player-select hg-player-speed";
-  for (const speed of PLAYBACK_RATES) {
-    const option = document.createElement("option");
-    option.value = String(speed);
-    option.textContent = `${speed}x`;
-    speedSelect.append(option);
-  }
-  speedSelect.value = String(desiredPlaybackRate);
-  speedSelect.addEventListener("change", () => setSpeed(speedSelect.value, true));
-  speedSelect.addEventListener("click", (event) => event.stopPropagation());
+  const onSelectOpen = (open) => {
+    dropdownOpen = open;
+    if (open) cancelMiniHide();
+    else if (!disposed && !root.matches(":hover")) scheduleMiniHide();
+    showControls();
+  };
+  const qualityControl = createSelect({
+    className: "hg-player-select hg-player-quality",
+    value: desiredQuality,
+    options: QUALITY_OPTIONS.map((value) => ({ value, label: value })),
+    onChange: (value) => setQuality(value, true),
+    onOpenChange: onSelectOpen
+  });
+  const qualitySelect = qualityControl.element;
+  const speedControl = createSelect({
+    className: "hg-player-select hg-player-speed",
+    value: desiredPlaybackRate,
+    options: PLAYBACK_RATES.map((value) => ({ value, label: `${value}x` })),
+    onChange: (value) => setSpeed(value, true),
+    onOpenChange: onSelectOpen
+  });
+  const speedSelect = speedControl.element;
   const pipBtn = button("pip", () => void togglePip());
   pipBtn.classList.add("hg-player-pip");
   const miniBtn = button("mini", () => toggleMini());
@@ -4598,8 +5294,7 @@ function createPlayer(slot, initialProps) {
     muteBtn.title = video.muted ? t("player.unmute") : t("player.mute");
     muteBtn.setAttribute("aria-label", muteBtn.title);
     volume.setAttribute("aria-label", t("player.volume"));
-    qualitySelect.title = t("player.quality");
-    qualitySelect.setAttribute("aria-label", t("player.quality"));
+    qualityControl.update({ title: t("player.quality"), ariaLabel: t("player.quality") });
     syncSpeed();
     pipBtn.title = t("player.pip");
     pipBtn.setAttribute("aria-label", t("player.pip"));
@@ -4972,7 +5667,7 @@ function createPlayer(slot, initialProps) {
     if (shouldResume) safePlay();
   };
   const hideMiniWindow = () => {
-    if (!mini || miniHidden || !miniWindow.autoHide) return;
+    if (!mini || miniHidden || !miniWindow.autoHide || dropdownOpen) return;
     cancelMiniHide();
     const shouldMoveFocus = root.contains(document.activeElement);
     miniHidden = true;
@@ -5006,7 +5701,7 @@ function createPlayer(slot, initialProps) {
     if (!mini || miniHidden || !miniWindow.autoHide) return;
     miniHideTimer = setTimeout(() => {
       miniHideTimer = 0;
-      if (!mini || miniInteraction || dragging) return;
+      if (!mini || miniInteraction || dragging || dropdownOpen) return;
       hideMiniWindow();
     }, 0);
   };
@@ -5091,6 +5786,7 @@ function createPlayer(slot, initialProps) {
     { passive: false }
   );
   const onDocumentKey = (event) => {
+    if (event.defaultPrevented) return;
     if (!fill && !mini) return;
     if (event.key === "Escape") {
       event.preventDefault();
@@ -5231,15 +5927,12 @@ function createPlayer(slot, initialProps) {
     volume.value = muted ? "0" : String(video.volume);
   };
   const syncSpeed = () => {
-    speedSelect.disabled = false;
-    speedSelect.title = t("player.speed");
-    speedSelect.setAttribute("aria-label", speedSelect.title);
-    speedSelect.value = String(currentPlaybackRate());
+    speedControl.update({ value: currentPlaybackRate(), title: t("player.speed"), ariaLabel: t("player.speed") });
   };
   const syncQualitySelect = () => {
     const candidate = wvc ? wvcQuality : state.quality || desiredQuality || DEFAULT_QUALITY;
     const quality = QUALITY_OPTIONS.includes(candidate) ? candidate : desiredQuality;
-    if (qualitySelect.value !== quality) qualitySelect.value = quality;
+    if (qualitySelect.value !== quality) qualityControl.update({ value: quality });
   };
   const updateNextButton = () => {
     const enabled = hasNext();
@@ -5289,10 +5982,10 @@ function createPlayer(slot, initialProps) {
       clearTimeout(idleTimer);
       idleTimer = 0;
     }
-    if (!playing || overlayKind || dragging) return;
+    if (!playing || overlayKind || dragging || dropdownOpen) return;
     idleTimer = setTimeout(() => {
       idleTimer = 0;
-      if (!disposed && playing && !dragging && !overlayKind) root.classList.add("is-idle");
+      if (!disposed && playing && !dragging && !overlayKind && !dropdownOpen) root.classList.add("is-idle");
     }, HIDE_DELAY_MS);
   };
   function handleEngineState(snapshot) {
@@ -5599,7 +6292,7 @@ function createPlayer(slot, initialProps) {
     }
     const target = event.target;
     const tagName = target && target.tagName ? String(target.tagName).toLowerCase() : "";
-    if (tagName === "select" || tagName === "input" || tagName === "textarea") return;
+    if (tagName === "select" || tagName === "input" || tagName === "textarea" || target?.closest?.('[role="combobox"]')) return;
     const onButton = target && typeof target.closest === "function" && target.closest("button");
     if (onButton && (key === " " || key === "Spacebar" || key === "Enter")) return;
     if (key === " " || key === "Spacebar" || key === "k" || key === "K") {
@@ -5647,7 +6340,7 @@ function createPlayer(slot, initialProps) {
     showControls();
   });
   root.addEventListener("mouseleave", () => {
-    if (playing && !dragging && !overlayKind) root.classList.add("is-idle");
+    if (playing && !dragging && !overlayKind && !dropdownOpen) root.classList.add("is-idle");
   });
   video.addEventListener("play", () => {
     playing = true;
@@ -6002,6 +6695,8 @@ function createPlayer(slot, initialProps) {
       if (disposed) return;
       report(true);
       disposed = true;
+      qualityControl.destroy();
+      speedControl.destroy();
       try {
         exitMini();
       } catch {
@@ -6146,14 +6841,24 @@ function PlayerMount(props) {
 
 // src/panel/pages/watchlist.js
 var seedOf = (entry) => ({ id: entry.seriesId, title: entry.title, cover: entry.cover });
-function StatusSelect({ ctx, value, disabled, onChange, title }) {
-  return h("select", {
-    className: "hg-select hg-watch-status",
-    value,
+var STATUS_ICONS = { planned: "Bookmark", watching: "Play", completed: "Check" };
+function StatusBadges({ ctx, value, disabled, onChange, title }) {
+  return h("div", {
+    className: "hg-watch-statuses",
+    role: "group",
+    "aria-busy": Boolean(disabled),
+    "aria-label": `${ctx.t("watchlist.status")} · ${title || ctx.t("unit.untitled")}`
+  }, WATCH_STATUSES.map((status) => h("button", {
+    key: status,
+    type: "button",
     disabled,
-    "aria-label": `${ctx.t("watchlist.status")} · ${title || ctx.t("unit.untitled")}`,
-    onChange: (event) => onChange(event.target.value)
-  }, WATCH_STATUSES.map((status) => h("option", { key: status, value: status }, ctx.t(`watchlist.${status}`))));
+    className: `hg-watch-status-badge${value === status ? " is-active" : ""}`,
+    "data-status": status,
+    "aria-pressed": value === status,
+    onClick: () => {
+      if (!disabled && status !== value) onChange(status);
+    }
+  }, h(Icon, { ctx, name: STATUS_ICONS[status], size: 11 }), ctx.t(`watchlist.${status}`))));
 }
 function WatchlistControls({ ctx, series, hasProgress }) {
   const React = getReact();
@@ -6218,7 +6923,7 @@ function WatchlistControls({ ctx, series, hasProgress }) {
       h(Icon, { ctx, name: entry ? "BookmarkCheck" : "Bookmark", size: 14 }),
       ctx.t(entry ? "watchlist.saved" : "watchlist.add")
     ),
-    entry ? h(StatusSelect, {
+    entry ? h(StatusBadges, {
       ctx,
       title: series.title,
       value: entry.status,
@@ -6334,7 +7039,7 @@ function WatchlistPage({ ctx, active, historyVersion, watchlistVersion }) {
           h(
             "div",
             { className: "hg-watch-card-actions" },
-            h(StatusSelect, { ctx, title: entry.title, value: entry.status, disabled: busy, onChange: (status) => void change(entry, status) }),
+            h(StatusBadges, { ctx, title: entry.title, value: entry.status, disabled: busy, onChange: (status) => void change(entry, status) }),
             h("button", {
               type: "button",
               className: "hg-linkbtn",
@@ -7111,30 +7816,28 @@ function SettingsPage({ ctx, active }) {
           "div",
           { className: "hg-field" },
           h("label", { className: "hg-field-label", htmlFor: "hg-quality" }, t("settings.quality")),
-          h(
-            "select",
-            {
-              id: "hg-quality",
-              className: "hg-select",
-              value: quality,
-              onChange: (event) => ctx.updatePrefs({ quality: event.target.value })
-            },
-            QUALITY_OPTIONS.map(
-              (option) => h("option", { key: option, value: option }, option)
-            )
-          )
+          h(Select, {
+            id: "hg-quality",
+            value: quality,
+            active,
+            ariaLabel: t("settings.quality"),
+            onChange: (value) => ctx.updatePrefs({ quality: value }),
+            options: QUALITY_OPTIONS.map((value) => ({ value, label: value }))
+          })
         ),
         h("div", { className: "hg-hint" }, t("settings.qualityHint")),
         h(
           "div",
           { className: "hg-field" },
           h("label", { className: "hg-field-label", htmlFor: "hg-playback-rate" }, t("player.speed")),
-          h("select", {
+          h(Select, {
             id: "hg-playback-rate",
-            className: "hg-select",
             value: ctx.prefs.playbackRate,
-            onChange: (event) => ctx.updatePrefs({ playbackRate: Number(event.target.value) })
-          }, PLAYBACK_RATES.map((rate) => h("option", { key: rate, value: rate }, `${rate}x`)))
+            active,
+            ariaLabel: t("player.speed"),
+            onChange: (value) => ctx.updatePrefs({ playbackRate: Number(value) }),
+            options: PLAYBACK_RATES.map((value) => ({ value, label: `${value}x` }))
+          })
         ),
         h(
           "div",
@@ -7572,7 +8275,7 @@ function PanelApp({ api, React, locale }) {
     visited.discover ? h(
       "div",
       { className: "hg-tabpane", hidden: activeTab !== "discover" },
-      h(DiscoverPage, { ctx, active: activeTab === "discover" && !covered })
+      h(DiscoveryPage, { ctx, active: activeTab === "discover" && !covered })
     ) : null,
     visited.search ? h(
       "div",

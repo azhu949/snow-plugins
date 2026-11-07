@@ -15,6 +15,9 @@ export const CHANNEL_HEADER_VALUE = "panel-rpc-v1";
 export const ROUTES = {
   health: "/health",
   discover: "/discover",
+  rank: "/rank",
+  filterPanel: "/filter-panel",
+  filter: "/filter",
   search: "/search",
   series: "/series",
   episodes: "/episodes",

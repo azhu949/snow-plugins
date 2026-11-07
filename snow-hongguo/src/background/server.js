@@ -14,6 +14,7 @@ import { HttpError, mapSdkError, toErrorResponse } from "./errors.js";
 import { byteLength, createTtlCache, mapWithConcurrency, truncateChars, withSingleFlight } from "./util.js";
 import { createCoverResolver } from "./media/cover.js";
 import { MEDIA_LIMITS, MEDIA_ROUTES, QUALITIES, base64Length } from "./media/limits.js";
+import { createCatalogHandlers } from "./catalog.js";
 
 const HOST = "127.0.0.1";
 const MAX_REQUEST_BYTES = 64 * 1024;
@@ -256,6 +257,7 @@ export function createRequestHandler({
   };
 
   const handles = {
+    ...createCatalogHandlers({ sdk, toListItem, fetchPage }),
     health: async () => {
       const stats = typeof sdk.stats === "function" ? sdk.stats() : {};
       return {
@@ -471,6 +473,9 @@ export function createRequestHandler({
   const routes = new Map([
     [ROUTES.health, { method: "GET", handler: handles.health }],
     [ROUTES.discover, { method: "GET", handler: handles.discover }],
+    [ROUTES.rank, { method: "GET", handler: handles.rank }],
+    [ROUTES.filterPanel, { method: "GET", handler: handles.filterPanel }],
+    [ROUTES.filter, { method: "GET", handler: handles.filter }],
     [ROUTES.search, { method: "GET", handler: handles.search }],
     [ROUTES.series, { method: "GET", handler: handles.series }],
     [ROUTES.episodes, { method: "GET", handler: handles.episodes }],

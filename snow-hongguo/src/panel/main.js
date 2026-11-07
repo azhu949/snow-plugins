@@ -5,7 +5,7 @@ import { createRpc } from "./rpc.js";
 import { createCoverStore } from "./cover.js";
 import { normalizePrefs, readPrefs, writePrefs } from "./storage.js";
 import { Icon, Spinner, describeError } from "./ui/common.js";
-import { DiscoverPage } from "./pages/discover.js";
+import { DiscoveryPage } from "./pages/catalog.js";
 import { SearchPage } from "./pages/search.js";
 import { DetailPage } from "./pages/detail.js";
 import { HistoryPage } from "./pages/history.js";
@@ -295,7 +295,7 @@ function PanelApp({ api, React, locale }) {
       ? h(
           "div",
           { className: "hg-tabpane", hidden: activeTab !== "discover" },
-          h(DiscoverPage, { ctx, active: activeTab === "discover" && !covered })
+          h(DiscoveryPage, { ctx, active: activeTab === "discover" && !covered })
         )
       : null,
     visited.search
