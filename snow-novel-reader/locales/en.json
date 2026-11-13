@@ -167,5 +167,20 @@
   "data.sources": "Sources",
   "data.cache": "Cached chapters",
   "data.cacheHint": "Chapter text is cached in memory and keeps the {{max}} most recently used chapters; deleting a source or clearing all data also clears it.",
-  "source.added": "Added to shelf"
+  "source.added": "Added to shelf",
+  "win.switchSource": "Switch source",
+  "source.switchTitle": "Switch source",
+  "source.switchHint": "Pick another source from the search results. Chapters are matched by title and your reading position is kept proportionally.",
+  "source.switchAll": "No same-title result found; showing the other search results.",
+  "source.switchNoMatch": "No same-title result found for \"{{name}}\". Source switching only works for the same book; to read another book, add it from the Search tab.",
+  "source.switchEmpty": "No search results yet. Search for this book on the Search tab first.",
+  "source.switchNoOther": "The search results contain no other source. Enable more sources or try another keyword.",
+  "source.switchSearching": "Search still running ({{done}}/{{total}} sources); showing the results received so far.",
+  "source.switchSame": "Already reading from this source.",
+  "source.switchDuplicate": "The shelf already has an entry for this book on that source. Open it from the shelf.",
+  "source.switchLocalOnly": "Local TXT books have no source and cannot be switched.",
+  "source.switchNoBook": "No book is open.",
+  "source.switchSearch": "Go to search",
+  "source.switching": "Switching source…",
+  "source.switched": "Switched to \"{{source}}\" · {{chapter}}"
 }

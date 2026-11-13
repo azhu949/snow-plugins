@@ -167,5 +167,20 @@
   "data.sources": "书源数量",
   "data.cache": "缓存章节",
   "data.cacheHint": "章节正文缓存在本机内存，最多保留最近使用的 {{max}} 章；删除书源或清空全部数据时一并清除。",
-  "source.added": "已加入书架"
+  "source.added": "已加入书架",
+  "win.switchSource": "换源",
+  "source.switchTitle": "换源",
+  "source.switchHint": "从搜索结果中选择其它书源；章节按标题对应，阅读位置按比例保留。",
+  "source.switchAll": "没有找到同名搜索结果，以下为其它搜索结果。",
+  "source.switchNoMatch": "没找到与《{{name}}》同名的搜索结果；换源只能切到同一本书，要读别的书请到「搜索」页加入书架。",
+  "source.switchEmpty": "还没有搜索结果。先在「搜索」页搜索这本书，再回来换源。",
+  "source.switchNoOther": "搜索结果里没有其它书源的结果，试试启用更多书源或更换关键词。",
+  "source.switchSearching": "搜索仍在进行（{{done}}/{{total}} 个书源），下面先显示已返回的结果。",
+  "source.switchSame": "已经在该书源上阅读。",
+  "source.switchDuplicate": "书架里已有这本书在该书源上的条目，请直接从书架打开该条目。",
+  "source.switchLocalOnly": "本地 TXT 书籍没有书源，无法换源。",
+  "source.switchNoBook": "还没有打开任何书籍。",
+  "source.switchSearch": "去搜索",
+  "source.switching": "正在换源…",
+  "source.switched": "已切换到「{{source}}」 · {{chapter}}"
 }

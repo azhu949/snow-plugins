@@ -6,7 +6,7 @@ Snow App 插件集合仓库。子目录包含两类插件：面板插件（发�
 
 | 插件 | ID | 版本 | 说明 |
 | ---- | -- | ---- | ---- |
-| 小说阅读器 | `com.snow.novel-reader` | 1.3.0 | 悬浮 TXT 小说阅读器（可调透明度与显示位置、滚轮与快捷键翻页、章节识别与自动滚动）+ legado 书源导入、多源并发搜索与在线追书 |
+| 小说阅读器 | `com.snow.novel-reader` | 1.3.1 | 悬浮 TXT 小说阅读器（可调透明度与显示位置、滚轮与快捷键翻页、章节识别与自动滚动）+ legado 书源导入、多源并发搜索与在线追书 |
 | 修复工作台 | `com.snow.fix-bench` | 2.14.1 | 客户端脚本插件（`.user.js`）：聊天输入框工具栏扳手入口 + 居中浮层，完成代码审查 → issue 跟踪 → 批量修复 → 结果清理的闭环；另带窗口顶部可拖动的跨项目执行监控胶囊（默认停在 Token 用量仪表右侧），项目切换、严重度筛选、结构化结果回写与清理确认 |
 | Token 用量仪表 | com.snow.token-meter | 1.1.0 | 客户端脚本插件（.user.js）：默认悬浮在窗口顶部中间、与顶栏同一行的胶囊，常驻今日 token 与目录挂牌价估算花费（价格源可选 OpenRouter / models.dev，默认人民币，K/M/B 紧凑计数），浮层含累计/按模型拆分/手动映射 |
 | 红果短剧 | `com.snow.hongguo` | 0.1.8 | 面板插件：推荐、排行、分类筛选、热搜与搜索联想、结果触底加载、收藏追剧、逐集续播与本机 WebCodecs 解码播放（首段起播、增量音画解码、下一集预加载、分块保调倍速、清晰度切换、音量静音记忆、可选连播）；常驻后台模块经本机回环 HTTP 供流，封面与视频分段落盘缓存，支持一键清理 |
@@ -158,10 +158,10 @@ config-set scope=userscripts key="new" value={sourcePath: "D:/ai-workspace/snow-
      "author": "azhu949",
      "repo": "https://github.com/azhu949/snow-plugins",
      "homepage": "https://github.com/azhu949/snow-plugins/tree/main/snow-novel-reader",
-     "version": "1.3.0",
-     "tag": "novel-reader/v1.3.0",
-     "asset": "com.snow.novel-reader-1.3.0.zip",
-     "downloadUrl": "https://github.com/azhu949/snow-plugins/releases/download/novel-reader%2Fv1.3.0/com.snow.novel-reader-1.3.0.zip",
+     "version": "1.3.1",
+     "tag": "novel-reader/v1.3.1",
+     "asset": "com.snow.novel-reader-1.3.1.zip",
+     "downloadUrl": "https://github.com/azhu949/snow-plugins/releases/download/novel-reader%2Fv1.3.1/com.snow.novel-reader-1.3.1.zip",
      "sha256": "<pack.ps1 输出的 64 位十六进制哈希>",
      "icon": "lucide:BookOpen",
      "privacy": ["network"],

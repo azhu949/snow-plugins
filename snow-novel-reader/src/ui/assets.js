@@ -26,7 +26,11 @@ export const WINDOW_ICONS = {
   book: '<path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H19a1 1 0 0 1 1 1v18a1 1 0 0 1-1 1H6.5a1 1 0 0 1 0-5H20"/>',
   // chevron-left / chevron-right：顶部栏的上一章 / 下一章入口
   chevronLeft: '<path d="m15 18-6-6 6-6"/>',
-  chevronRight: '<path d="m9 18 6-6-6-6"/>'
+  chevronRight: '<path d="m9 18 6-6-6-6"/>',
+  // repeat：悬浮窗换源入口（从已有搜索结果里切换书源）
+  repeat: '<path d="m17 2 4 4-4 4"/><path d="M3 11v-1a4 4 0 0 1 4-4h14"/><path d="m7 22-4-4 4-4"/><path d="M21 13v1a4 4 0 0 1-4 4H3"/>',
+  // list：悬浮窗章节目录入口（可搜索并直接切章）
+  list: '<path d="M8 6h13"/><path d="M8 12h13"/><path d="M8 18h13"/><path d="M3 6h.01"/><path d="M3 12h.01"/><path d="M3 18h.01"/>'
 };
 
 export function svgIcon(name, size) {

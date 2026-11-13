@@ -38,7 +38,11 @@ var WINDOW_ICONS = {
   book: '<path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H19a1 1 0 0 1 1 1v18a1 1 0 0 1-1 1H6.5a1 1 0 0 1 0-5H20"/>',
   // chevron-left / chevron-right：顶部栏的上一章 / 下一章入口
   chevronLeft: '<path d="m15 18-6-6 6-6"/>',
-  chevronRight: '<path d="m9 18 6-6-6-6"/>'
+  chevronRight: '<path d="m9 18 6-6-6-6"/>',
+  // repeat：悬浮窗换源入口（从已有搜索结果里切换书源）
+  repeat: '<path d="m17 2 4 4-4 4"/><path d="M3 11v-1a4 4 0 0 1 4-4h14"/><path d="m7 22-4-4 4-4"/><path d="M21 13v1a4 4 0 0 1-4 4H3"/>',
+  // list：悬浮窗章节目录入口（可搜索并直接切章）
+  list: '<path d="M8 6h13"/><path d="M8 12h13"/><path d="M8 18h13"/><path d="M3 6h.01"/><path d="M3 12h.01"/><path d="M3 18h.01"/>'
 };
 function svgIcon(name, size) {
   const body = WINDOW_ICONS[name] || "";
@@ -310,7 +314,22 @@ var FALLBACK = {
   "data.sources": "书源数量",
   "data.cache": "缓存章节",
   "data.cacheHint": "章节正文缓存在本机内存，最多保留最近使用的 {{max}} 章；删除书源或清空全部数据时一并清除。",
-  "source.added": "已加入书架"
+  "source.added": "已加入书架",
+  "win.switchSource": "换源",
+  "source.switchTitle": "换源",
+  "source.switchHint": "从搜索结果中选择其它书源；章节按标题对应，阅读位置按比例保留。",
+  "source.switchAll": "没有找到同名搜索结果，以下为其它搜索结果。",
+  "source.switchNoMatch": "没找到与《{{name}}》同名的搜索结果；换源只能切到同一本书，要读别的书请到「搜索」页加入书架。",
+  "source.switchEmpty": "还没有搜索结果。先在「搜索」页搜索这本书，再回来换源。",
+  "source.switchNoOther": "搜索结果里没有其它书源的结果，试试启用更多书源或更换关键词。",
+  "source.switchSearching": "搜索仍在进行（{{done}}/{{total}} 个书源），下面先显示已返回的结果。",
+  "source.switchSame": "已经在该书源上阅读。",
+  "source.switchDuplicate": "书架里已有这本书在该书源上的条目，请直接从书架打开该条目。",
+  "source.switchLocalOnly": "本地 TXT 书籍没有书源，无法换源。",
+  "source.switchNoBook": "还没有打开任何书籍。",
+  "source.switchSearch": "去搜索",
+  "source.switching": "正在换源…",
+  "source.switched": "已切换到「{{source}}」 · {{chapter}}"
 };
 
 // src/utils.js
@@ -3261,12 +3280,14 @@ function createEngine(api) {
   let startToken = 0;
   let panelTab = "books";
   let chapterQuery = "";
+  let chapterScrollSeq = 0;
+  let chapterScrollMode = "active";
   let armedBookId = null;
   let armedSourceId = null;
   let armTimer = 0;
   let statusTimer = 0;
   const listeners = [];
-  const timers = { save: 0, scrollRaf: 0, sleep: 0, autoRaf: 0, snap: 0 };
+  const timers = { save: 0, scrollRaf: 0, sleep: 0, autoRaf: 0, snap: 0, chapterPop: 0 };
   function listen(target, type, handler, options) {
     target.addEventListener(type, handler, options);
     listeners.push({ target, type, handler, options });
@@ -3283,30 +3304,67 @@ function createEngine(api) {
   let winEl = null;
   let barEl = null;
   let titleEl = null;
+  let chapterEl = null;
+  let sourceEl = null;
   let percentEl = null;
   let actionsEl = null;
   let autoBtn = null;
+  let sourceBtn = null;
+  let chapterBtn = null;
   let bodyEl = null;
   let contentEl = null;
   let progressEl = null;
   let resizeEl = null;
   let dotEl = null;
+  let sourcePopEl = null;
+  let sourcePopTitleEl = null;
+  let sourcePopHintEl = null;
+  let sourcePopStatusEl = null;
+  let sourcePopListEl = null;
+  let sourceSwitchPending = false;
+  let chapterPopEl = null;
+  let chapterPopTitleEl = null;
+  let chapterPopSearchEl = null;
+  let chapterPopListEl = null;
+  let chapterPopQuery = "";
+  let chapterJumpPending = false;
   function attachWindow() {
     if (winEl && winEl.parentNode === document.body) return;
     winEl = document.createElement("div");
     winEl.id = WIN_ID;
     winEl.className = "snr-win";
     winEl.style.display = "none";
-    winEl.innerHTML = '<div class="snr-bar"><div class="snr-title"></div><div class="snr-percent"></div><div class="snr-actions"><button class="snr-btn" type="button" data-act="prevChapter" title="' + escapeAttr(tr("keys.prevChapter")) + '">' + svgIcon("chevronLeft", 14) + '</button><button class="snr-btn" type="button" data-act="nextChapter" title="' + escapeAttr(tr("keys.nextChapter")) + '">' + svgIcon("chevronRight", 14) + '</button><span class="snr-sep"></span><button class="snr-btn" type="button" data-act="autoscroll" title="' + escapeAttr(tr("settings.autoScroll")) + '">' + svgIcon("play", 14) + '</button><button class="snr-btn" type="button" data-act="panel" title="' + escapeAttr(tr("tab.settings")) + '">' + svgIcon("panel", 14) + '</button><button class="snr-btn" type="button" data-act="close" title="' + escapeAttr(tr("win.hide")) + '">' + svgIcon("close", 14) + '</button></div></div><div class="snr-body"><div class="snr-content"></div></div><div class="snr-foot"><div class="snr-progress"></div></div><div class="snr-resize"></div>';
+    winEl.innerHTML = '<div class="snr-bar"><div class="snr-heading"><div class="snr-title"></div><div class="snr-chapter"></div></div><div class="snr-meta"><div class="snr-percent"></div><div class="snr-source"></div></div><div class="snr-actions"><button class="snr-btn" type="button" data-act="prevChapter" title="' + escapeAttr(tr("keys.prevChapter")) + '">' + svgIcon("chevronLeft", 14) + '</button><button class="snr-btn" type="button" data-act="nextChapter" title="' + escapeAttr(tr("keys.nextChapter")) + '">' + svgIcon("chevronRight", 14) + '</button><button class="snr-btn" type="button" data-act="chapters" title="' + escapeAttr(tr("tab.chapters")) + '">' + svgIcon("list", 14) + '</button><button class="snr-btn" type="button" data-act="switchSource" title="' + escapeAttr(tr("win.switchSource")) + '">' + svgIcon("repeat", 14) + '</button><span class="snr-sep"></span><button class="snr-btn" type="button" data-act="autoscroll" title="' + escapeAttr(tr("settings.autoScroll")) + '">' + svgIcon("play", 14) + '</button><button class="snr-btn" type="button" data-act="panel" title="' + escapeAttr(tr("tab.settings")) + '">' + svgIcon("panel", 14) + '</button><button class="snr-btn" type="button" data-act="close" title="' + escapeAttr(tr("win.hide")) + '">' + svgIcon("close", 14) + '</button></div></div><div class="snr-body"><div class="snr-content"></div></div><div class="snr-foot"><div class="snr-progress"></div></div><div class="snr-resize"></div>';
     barEl = winEl.querySelector(".snr-bar");
     titleEl = winEl.querySelector(".snr-title");
+    chapterEl = winEl.querySelector(".snr-chapter");
+    sourceEl = winEl.querySelector(".snr-source");
     percentEl = winEl.querySelector(".snr-percent");
     actionsEl = winEl.querySelector(".snr-actions");
     autoBtn = winEl.querySelector('button[data-act="autoscroll"]');
+    sourceBtn = winEl.querySelector('button[data-act="switchSource"]');
+    chapterBtn = winEl.querySelector('button[data-act="chapters"]');
     bodyEl = winEl.querySelector(".snr-body");
     contentEl = winEl.querySelector(".snr-content");
     progressEl = winEl.querySelector(".snr-progress");
     resizeEl = winEl.querySelector(".snr-resize");
+    sourcePopEl = document.createElement("div");
+    sourcePopEl.className = "snr-source-pop";
+    sourcePopEl.hidden = true;
+    sourcePopEl.innerHTML = '<div class="snr-source-head"><div class="snr-source-title"></div><button class="snr-btn" type="button" data-act="sourceClose">' + svgIcon("close", 12) + '</button></div><div class="snr-source-hint"></div><div class="snr-source-status" role="status"></div><div class="snr-source-list"></div>';
+    sourcePopTitleEl = sourcePopEl.querySelector(".snr-source-title");
+    sourcePopHintEl = sourcePopEl.querySelector(".snr-source-hint");
+    sourcePopStatusEl = sourcePopEl.querySelector(".snr-source-status");
+    sourcePopListEl = sourcePopEl.querySelector(".snr-source-list");
+    chapterPopEl = document.createElement("div");
+    chapterPopEl.className = "snr-chapter-pop";
+    chapterPopEl.hidden = true;
+    chapterPopEl.innerHTML = '<div class="snr-chapter-head"><div class="snr-chapter-pop-title"></div><button class="snr-btn" type="button" data-act="chapterClose">' + svgIcon("close", 12) + '</button></div><input class="snr-chapter-search" type="text" /><div class="snr-chapter-list"></div>';
+    chapterPopTitleEl = chapterPopEl.querySelector(".snr-chapter-pop-title");
+    chapterPopSearchEl = chapterPopEl.querySelector(".snr-chapter-search");
+    chapterPopListEl = chapterPopEl.querySelector(".snr-chapter-list");
+    chapterPopSearchEl.placeholder = tr("search.placeholder");
+    chapterPopSearchEl.setAttribute("aria-label", tr("search.placeholder"));
     dotEl = document.createElement("div");
     dotEl.id = DOT_ID;
     dotEl.className = "snr-dot";
@@ -3315,6 +3373,8 @@ function createEngine(api) {
     dotEl.innerHTML = svgIcon("book", 16);
     document.body.appendChild(winEl);
     document.body.appendChild(dotEl);
+    winEl.appendChild(sourcePopEl);
+    winEl.appendChild(chapterPopEl);
     installDrag();
     listen(winEl, "mouseenter", () => {
       runtime.hover = true;
@@ -3337,9 +3397,31 @@ function createEngine(api) {
       if (act === "autoscroll") setAutoScroll(!state.settings.autoScroll);
       else if (act === "prevChapter") prevSegment();
       else if (act === "nextChapter") nextSegment();
+      else if (act === "chapters") toggleChapterPopover();
+      else if (act === "switchSource") toggleSourcePopover();
       else if (act === "panel") openPluginPanel();
       else if (act === "close") hideWindow();
     });
+    listen(sourcePopEl, "click", onSourcePopClick);
+    listen(chapterPopEl, "click", onChapterPopClick);
+    listen(chapterPopEl, "input", onChapterPopInput);
+    listen(chapterPopEl, "keydown", onChapterPopKeyDown);
+    listen(
+      document,
+      "mousedown",
+      (e) => {
+        const target = e.target;
+        if (sourcePopEl && !sourcePopEl.hidden && !sourcePopEl.contains(target)) {
+          const button = target && target.closest ? target.closest('button[data-act="switchSource"]') : null;
+          if (!button) closeSourcePopover();
+        }
+        if (chapterPopEl && !chapterPopEl.hidden && !chapterPopEl.contains(target)) {
+          const button = target && target.closest ? target.closest('button[data-act="chapters"]') : null;
+          if (!button) closeChapterPopover();
+        }
+      },
+      true
+    );
     listen(bodyEl, "scroll", onBodyScroll, { passive: true });
     listen(bodyEl, "wheel", onWheel, { passive: false });
     listen(document, "keydown", onKeyDown);
@@ -3366,14 +3448,30 @@ function createEngine(api) {
     winEl = null;
     barEl = null;
     titleEl = null;
+    chapterEl = null;
+    sourceEl = null;
     percentEl = null;
     actionsEl = null;
     autoBtn = null;
+    sourceBtn = null;
+    chapterBtn = null;
     bodyEl = null;
     contentEl = null;
     progressEl = null;
     resizeEl = null;
     dotEl = null;
+    sourcePopEl = null;
+    sourcePopTitleEl = null;
+    sourcePopHintEl = null;
+    sourcePopStatusEl = null;
+    sourcePopListEl = null;
+    sourceSwitchPending = false;
+    chapterPopEl = null;
+    chapterPopTitleEl = null;
+    chapterPopSearchEl = null;
+    chapterPopListEl = null;
+    chapterPopQuery = "";
+    chapterJumpPending = false;
   }
   const panelStore = {
     version: 0,
@@ -3473,7 +3571,8 @@ function createEngine(api) {
       } else {
         meta.chapters = [];
       }
-      meta.chapterIndex = clamp(Number(rawBook.chapterIndex) || 0, 0, Math.max(0, meta.chapters.length - 1));
+      const rawIndex = Math.max(0, Number(rawBook.chapterIndex) || 0);
+      meta.chapterIndex = meta.chapters.length ? clamp(rawIndex, 0, meta.chapters.length - 1) : rawIndex;
       meta.encodingRisk = typeof rawBook.encodingRisk === "string" ? rawBook.encodingRisk : "";
     }
     return { meta, inline };
@@ -4067,6 +4166,46 @@ function createEngine(api) {
     if (!item) return false;
     return exactNameMatch(item.name, keyword) || exactNameMatch(item.author, keyword);
   }
+  function normalizeMatchText(text) {
+    return String(text == null ? "" : text).toLowerCase().replace(/[\s\u3000]+/g, "").replace(/[《》「」『』【】\[\]（）()<>·:：,，.。!！?？、_\-—\/\\|"'“”‘’]/g, "");
+  }
+  function normalizeBookTitle(text) {
+    return normalizeMatchText(text).replace(
+      /(?:最新章节|全文阅读|无弹窗|免费阅读|txt下载|完整版|精校版|校对版|笔趣阁|顶点小说|新笔趣阁)/g,
+      ""
+    );
+  }
+  function sameBookTitle(a, b) {
+    const left = normalizeBookTitle(a);
+    const right = normalizeBookTitle(b);
+    if (!left || !right) return false;
+    if (left === right) return true;
+    return left.length >= 4 && right.length >= 4 && (left.indexOf(right) !== -1 || right.indexOf(left) !== -1);
+  }
+  function sameBookNameForSwitch(a, b) {
+    if (sameBookTitle(a, b)) return true;
+    return sameBookTitle(convertScript(a, "simplified"), convertScript(b, "simplified"));
+  }
+  function isSameBookResult(meta, item) {
+    if (!meta || !item) return false;
+    if (!sameBookNameForSwitch(item.name, meta.name)) return false;
+    const left = normalizeMatchText(meta.author);
+    const right = normalizeMatchText(item.author);
+    if (!left || !right) return true;
+    return left.indexOf(right) !== -1 || right.indexOf(left) !== -1;
+  }
+  function normalizeChapterTitle(text) {
+    return normalizeMatchText(text).replace(/第0+(\d)/g, "第$1");
+  }
+  function matchChapterIndex(newChapters, oldIndex, oldTitle) {
+    const title = normalizeChapterTitle(oldTitle);
+    if (title) {
+      for (let i = 0; i < newChapters.length; i += 1) {
+        if (normalizeChapterTitle(newChapters[i].title) === title) return { index: i, matched: true };
+      }
+    }
+    return { index: clamp(oldIndex, 0, Math.max(0, newChapters.length - 1)), matched: false };
+  }
   async function searchAllSources(keyword, hooks, token) {
     const onItems = hooks && typeof hooks.onItems === "function" ? hooks.onItems : null;
     const sources = searchableSources();
@@ -4152,14 +4291,9 @@ function createEngine(api) {
     }
     return { ok: true, text, error: "", encodingRisk: response.encodingRisk };
   }
-  async function addOnlineBook(result) {
-    const epoch = dataEpoch;
-    const source = state.sources.find((item) => item.id === result.sourceId);
-    if (!source) return { ok: false, error: tr("source.addFailed", { error: sourceErrorText("source-missing") }) };
-    const bookUrl = result.bookUrl;
+  async function fetchOnlineBookData(source, result, epoch) {
+    const bookUrl = result && result.bookUrl;
     if (!bookUrl) return { ok: false, error: tr("source.addFailed", { error: sourceErrorText("no-book-url") }) };
-    const shelfBook = state.books.find((item) => item.sourceId === source.id && item.bookUrl === bookUrl);
-    const shelfBookId = shelfBook ? shelfBook.id : "";
     let detailHtml = "";
     const detailRequest = buildSourceRequest(source, bookUrl, {});
     const detailResponse = await sourceFetch(api, source, detailRequest);
@@ -4202,6 +4336,27 @@ function createEngine(api) {
       nextTocUrl = resolveSourceUrl(tocRequest.url, parseTocNextUrl(source, tocContext));
     }
     if (!chapters.length) return { ok: false, error: tr("source.tocFailed", { error: sourceErrorText("empty-toc") }) };
+    return {
+      ok: true,
+      bookUrl,
+      name,
+      author,
+      coverUrl,
+      intro,
+      chapters,
+      encodingRisk: tocRisk
+    };
+  }
+  async function addOnlineBook(result) {
+    const epoch = dataEpoch;
+    const source = state.sources.find((item) => item.id === result.sourceId);
+    if (!source) return { ok: false, error: tr("source.addFailed", { error: sourceErrorText("source-missing") }) };
+    const bookUrl = result.bookUrl;
+    if (!bookUrl) return { ok: false, error: tr("source.addFailed", { error: sourceErrorText("no-book-url") }) };
+    const shelfBook = state.books.find((item) => item.sourceId === source.id && item.bookUrl === bookUrl);
+    const shelfBookId = shelfBook ? shelfBook.id : "";
+    const data = await fetchOnlineBookData(source, result, epoch);
+    if (!data.ok) return data;
     let existing = false;
     let meta = state.books.find((item) => item.sourceId === source.id && item.bookUrl === bookUrl);
     if (!meta && shelfBookId && removedBookIds.has(shelfBookId)) {
@@ -4211,7 +4366,7 @@ function createEngine(api) {
       const id = "s" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
       meta = {
         id,
-        name,
+        name: data.name,
         size: 0,
         addedAt: Date.now(),
         lastOpenedAt: Date.now(),
@@ -4219,22 +4374,161 @@ function createEngine(api) {
         sourceId: source.id,
         sourceName: source.name,
         bookUrl,
-        author,
-        coverUrl,
-        intro,
-        chapters,
+        author: data.author,
+        coverUrl: data.coverUrl,
+        intro: data.intro,
+        chapters: data.chapters,
         chapterIndex: 0,
-        encodingRisk: tocRisk || ""
+        encodingRisk: data.encodingRisk || ""
       };
       state.books.unshift(meta);
     } else {
       existing = true;
-      meta.chapters = chapters;
+      meta.chapters = data.chapters;
     }
     markChaptersDirty(meta.id);
     saveStateNow();
     refreshPanel();
-    return { ok: true, bookId: meta.id, error: "", chapters: chapters.length, existing };
+    return { ok: true, bookId: meta.id, error: "", chapters: data.chapters.length, existing };
+  }
+  async function switchBookSource(index) {
+    const result = searchState.items[index];
+    if (!result) return { ok: false, error: tr("err.unknown") };
+    const bookId = state.currentBookId;
+    const meta = state.books.find((item) => item.id === bookId);
+    if (!meta) return { ok: false, error: tr("source.switchNoBook") };
+    if (!meta.sourceId) return { ok: false, error: tr("source.switchLocalOnly") };
+    const source = state.sources.find((item) => item.id === result.sourceId);
+    if (!source) return { ok: false, error: tr("source.addFailed", { error: sourceErrorText("source-missing") }) };
+    if (result.sourceId === meta.sourceId && result.bookUrl === meta.bookUrl) {
+      return { ok: false, error: tr("source.switchSame") };
+    }
+    const epoch = dataEpoch;
+    const oldIndex = typeof meta.chapterIndex === "number" ? meta.chapterIndex : 0;
+    const oldChapter = meta.chapters && meta.chapters[oldIndex] ? meta.chapters[oldIndex] : null;
+    const oldTitle = oldChapter ? oldChapter.title : "";
+    const cur = runtime.current && runtime.current.id === bookId ? runtime.current : null;
+    const ratio = cur && cur.text && cur.text.length ? clamp(currentOffset() / cur.text.length, 0, 1) : 0;
+    const shelfTarget = state.books.find(
+      (item) => item.id !== bookId && item.sourceId === result.sourceId && item.bookUrl === result.bookUrl
+    );
+    if (shelfTarget) {
+      if (!Array.isArray(shelfTarget.chapters) || !shelfTarget.chapters.length) await loadBookChapters(shelfTarget);
+      if (disposed) return { ok: false, silent: true };
+      if (!Array.isArray(shelfTarget.chapters) || !shelfTarget.chapters.length) {
+        let refilled;
+        try {
+          refilled = await fetchOnlineBookData(source, result, epoch);
+        } catch (err) {
+          log("switch source detail failed", err);
+          return { ok: false, error: tr("source.addFailed", { error: sourceErrorText(err && err.message || String(err)) }) };
+        }
+        if (disposed) return { ok: false, silent: true };
+        if (epoch !== dataEpoch) return { ok: false, silent: true };
+        if (!refilled.ok) {
+          if (refilled.error === "stale" || refilled.error === "disposed") return { ok: false, silent: true };
+          return { ok: false, error: refilled.error };
+        }
+        shelfTarget.chapters = refilled.chapters;
+        shelfTarget.encodingRisk = refilled.encodingRisk || shelfTarget.encodingRisk || "";
+        shelfTarget.chapterIndex = clamp(Number(shelfTarget.chapterIndex) || 0, 0, refilled.chapters.length - 1);
+        markChaptersDirty(shelfTarget.id);
+        saveStateNow();
+      }
+      if (Array.isArray(shelfTarget.chapters) && shelfTarget.chapters.length) {
+        const target = matchChapterIndex(shelfTarget.chapters, oldIndex, oldTitle);
+        const targetChapter2 = shelfTarget.chapters[target.index];
+        let probe2;
+        try {
+          probe2 = await fetchChapterContent(shelfTarget, targetChapter2);
+        } catch (err) {
+          log("switch source content failed", err);
+          return { ok: false, error: tr("source.contentFailed", { error: sourceErrorText(err && err.message || String(err)) }) };
+        }
+        if (disposed) return { ok: false, silent: true };
+        if (!probe2.ok) return { ok: false, error: tr("source.contentFailed", { error: sourceErrorText(probe2.error) }) };
+        if (!probe2.text) return { ok: false, error: tr("source.contentEmpty") };
+        const offset2 = target.matched ? Math.round(ratio * probe2.text.length) : 0;
+        chapterQuery = "";
+        await openOnlineChapter(shelfTarget.id, target.index, offset2);
+        if (disposed) return { ok: false, silent: true };
+        if (!runtime.current || runtime.current.id !== shelfTarget.id || runtime.current.chapterIndex !== target.index) {
+          return { ok: false, silent: true };
+        }
+        return {
+          ok: true,
+          sourceName: shelfTarget.sourceName || source.name,
+          chapterTitle: targetChapter2.title || tr("seg.fallback", { n: target.index + 1 })
+        };
+      }
+    }
+    if (!isSameBookResult(meta, result)) {
+      return { ok: false, error: tr("source.switchNoMatch", { name: meta.name }) };
+    }
+    let data;
+    try {
+      data = await fetchOnlineBookData(source, result, epoch);
+    } catch (err) {
+      log("switch source detail failed", err);
+      return { ok: false, error: tr("source.addFailed", { error: sourceErrorText(err && err.message || String(err)) }) };
+    }
+    if (disposed) return { ok: false, silent: true };
+    if (!data.ok) {
+      if (data.error === "stale" || data.error === "disposed") return { ok: false, silent: true };
+      return { ok: false, error: data.error };
+    }
+    const match = matchChapterIndex(data.chapters, oldIndex, oldTitle);
+    const targetIndex = match.index;
+    const targetChapter = data.chapters[targetIndex];
+    let probe;
+    try {
+      probe = await fetchChapterContent({ sourceId: source.id }, targetChapter);
+    } catch (err) {
+      log("switch source content failed", err);
+      return { ok: false, error: tr("source.contentFailed", { error: sourceErrorText(err && err.message || String(err)) }) };
+    }
+    if (disposed) return { ok: false, silent: true };
+    if (!probe.ok) return { ok: false, error: tr("source.contentFailed", { error: sourceErrorText(probe.error) }) };
+    if (!probe.text) return { ok: false, error: tr("source.contentEmpty") };
+    if (state.currentBookId !== bookId || !state.books.some((item) => item.id === bookId)) {
+      return { ok: false, silent: true };
+    }
+    if (epoch !== dataEpoch) return { ok: false, silent: true };
+    const duplicated = state.books.find(
+      (item) => item.id !== bookId && item.sourceId === source.id && item.bookUrl === data.bookUrl
+    );
+    if (duplicated) return { ok: false, error: tr("source.switchDuplicate") };
+    if (!isSameBookResult(meta, { name: data.name, author: data.author })) {
+      return { ok: false, error: tr("source.switchNoMatch", { name: meta.name }) };
+    }
+    meta.sourceId = source.id;
+    meta.sourceName = source.name;
+    meta.bookUrl = data.bookUrl;
+    meta.name = data.name || meta.name;
+    meta.author = data.author || meta.author;
+    meta.coverUrl = data.coverUrl || meta.coverUrl;
+    meta.intro = data.intro || meta.intro;
+    meta.chapters = data.chapters;
+    meta.chapterIndex = targetIndex;
+    meta.encodingRisk = data.encodingRisk || "";
+    meta.lastOpenedAt = Date.now();
+    if (!meta.progress) meta.progress = { offset: 0, percent: 0 };
+    meta.progress.offset = 0;
+    meta.progress.percent = Math.round(clamp(targetIndex / data.chapters.length, 0, 1) * 1e3) / 10;
+    markChaptersDirty(meta.id);
+    saveStateNow();
+    chapterQuery = "";
+    const offset = match.matched ? Math.round(ratio * probe.text.length) : 0;
+    await openOnlineChapter(meta.id, targetIndex, offset);
+    if (disposed || epoch !== dataEpoch) return { ok: false, silent: true };
+    if (!runtime.current || runtime.current.id !== bookId || runtime.current.chapterIndex !== targetIndex) {
+      return { ok: false, silent: true };
+    }
+    return {
+      ok: true,
+      sourceName: source.name,
+      chapterTitle: targetChapter.title || tr("seg.fallback", { n: targetIndex + 1 })
+    };
   }
   async function openOnlineChapter(bookId, chapterIndex, anchorOffset, atEnd) {
     const meta = state.books.find((item) => item.id === bookId);
@@ -4291,6 +4585,8 @@ function createEngine(api) {
     if (recoveryAdopted.has(bookId)) recoveryTouched.add(bookId);
     endOpenLoading(token, tr("source.loadingContent"));
     saveStateSoon();
+    chapterScrollMode = "active";
+    chapterScrollSeq += 1;
     refreshPanel();
   }
   function updateSearchProgress() {
@@ -4304,6 +4600,7 @@ function createEngine(api) {
       setStatus(tr("source.searchNoSource"), "error");
       return;
     }
+    closeSourcePopover();
     searchState.searched = true;
     searchState.items = [];
     searchState.error = "";
@@ -4652,6 +4949,8 @@ function createEngine(api) {
     panelStore.notify("shell");
   }
   function hideWindow(silent) {
+    closeSourcePopover();
+    closeChapterPopover();
     if (runtime.current && winVisible()) runtime.pendingLine = lineIndexAt(bodyEl.scrollTop);
     state.settings.winVisible = false;
     if (!winEl) return;
@@ -4662,6 +4961,316 @@ function createEngine(api) {
       saveStateNow();
       panelStore.notify("shell");
     }
+  }
+  function setSourcePopStatus(text, level) {
+    if (!sourcePopStatusEl) return;
+    sourcePopStatusEl.textContent = text || "";
+    sourcePopStatusEl.className = "snr-source-status" + (level === "error" ? " is-error" : level === "loading" ? " is-loading" : "");
+  }
+  function renderSourcePopover() {
+    if (!sourcePopEl || !sourcePopListEl) return;
+    const meta = state.books.find((item) => item.id === state.currentBookId);
+    if (!meta || !meta.sourceId) {
+      closeSourcePopover();
+      return;
+    }
+    if (sourcePopTitleEl) sourcePopTitleEl.textContent = tr("source.switchTitle") + " · " + conv(meta.name);
+    const entries = [];
+    for (let i = 0; i < searchState.items.length; i += 1) {
+      const item = searchState.items[i];
+      if (!item || !item.bookUrl) continue;
+      if (item.sourceId === meta.sourceId && item.bookUrl === meta.bookUrl) continue;
+      entries.push({ item, index: i });
+    }
+    const matched = entries.filter((entry) => isSameBookResult(meta, entry.item));
+    const list = matched;
+    if (sourcePopHintEl) {
+      sourcePopHintEl.textContent = matched.length ? tr("source.switchHint") : entries.length ? tr("source.switchNoMatch", { name: meta.name }) : "";
+    }
+    setSourcePopStatus(sourceSwitchPending ? tr("source.switching") : "", sourceSwitchPending ? "loading" : "");
+    sourcePopListEl.replaceChildren();
+    sourcePopListEl.scrollTop = 0;
+    if (!list.length) {
+      const empty = document.createElement("div");
+      empty.className = "snr-source-empty";
+      empty.textContent = searchState.running ? tr("source.switchSearching", { done: searchState.done, total: searchState.total }) : entries.length ? tr("source.switchNoMatch", { name: meta.name }) : searchState.items.length ? tr("source.switchNoOther") : tr("source.switchEmpty");
+      sourcePopListEl.appendChild(empty);
+      if (!searchState.running) {
+        const action = document.createElement("button");
+        action.type = "button";
+        action.className = "snr-source-action";
+        action.dataset.act = "sourceSearch";
+        action.textContent = tr("source.switchSearch");
+        sourcePopListEl.appendChild(action);
+      }
+      return;
+    }
+    for (const entry of list) {
+      const item = entry.item;
+      const row = document.createElement("button");
+      row.type = "button";
+      row.className = "snr-source-item";
+      row.dataset.sourceIndex = String(entry.index);
+      row.disabled = sourceSwitchPending;
+      const name = document.createElement("div");
+      name.className = "snr-source-name";
+      name.textContent = conv(item.name) || item.bookUrl;
+      row.appendChild(name);
+      const parts = [];
+      if (item.author) parts.push(conv(item.author));
+      if (item.sourceName) parts.push(item.sourceName);
+      if (item.lastChapter) parts.push(conv(item.lastChapter));
+      const sub = document.createElement("div");
+      sub.className = "snr-source-sub";
+      sub.textContent = parts.join("  ·  ") || item.bookUrl;
+      row.appendChild(sub);
+      sourcePopListEl.appendChild(row);
+    }
+  }
+  function openSourcePopover() {
+    if (!sourcePopEl) return;
+    if (!runtime.current) {
+      setStatus(tr("source.switchNoBook"), "info");
+      return;
+    }
+    const meta = state.books.find((item) => item.id === state.currentBookId);
+    if (!meta || !meta.sourceId) {
+      setStatus(tr("source.switchLocalOnly"), "info");
+      return;
+    }
+    closeChapterPopover();
+    sourcePopEl.hidden = false;
+    renderSourcePopover();
+    wake();
+  }
+  function closeSourcePopover() {
+    if (!sourcePopEl) return;
+    sourcePopEl.hidden = true;
+    setSourcePopStatus("", "");
+  }
+  function toggleSourcePopover() {
+    if (sourcePopEl && !sourcePopEl.hidden) closeSourcePopover();
+    else openSourcePopover();
+  }
+  function onSourcePopClick(e) {
+    const target = e.target;
+    if (!target || !target.closest) return;
+    const closeButton = target.closest('button[data-act="sourceClose"]');
+    if (closeButton) {
+      closeSourcePopover();
+      return;
+    }
+    const searchButton = target.closest('button[data-act="sourceSearch"]');
+    if (searchButton) {
+      panelTab = "search";
+      closeSourcePopover();
+      panelStore.notify();
+      openPluginPanel();
+      return;
+    }
+    const row = target.closest("[data-source-index]");
+    if (!row || sourceSwitchPending || row.disabled) return;
+    const index = Number(row.dataset.sourceIndex);
+    if (!isFinite(index)) return;
+    handleSwitchSource(index);
+  }
+  async function handleSwitchSource(index) {
+    if (sourceSwitchPending) return;
+    sourceSwitchPending = true;
+    setSourcePopStatus(tr("source.switching"), "loading");
+    setStatus(tr("source.switching"), "loading");
+    let result;
+    try {
+      result = await switchBookSource(index);
+    } catch (err) {
+      log("switch source failed", err);
+      result = {
+        ok: false,
+        error: tr("source.addFailed", { error: sourceErrorText(err && err.message || String(err)) })
+      };
+    }
+    if (disposed) return;
+    sourceSwitchPending = false;
+    if (result && result.ok) {
+      closeSourcePopover();
+      setStatus(tr("source.switched", { source: result.sourceName, chapter: result.chapterTitle }), "success");
+      showWindow();
+      panelStore.notify();
+      return;
+    }
+    if (result && result.silent) {
+      closeSourcePopover();
+      if (statusLevel === "loading" && statusText === tr("source.switching")) clearStatus();
+      return;
+    }
+    const message = result && result.error || tr("err.unknown");
+    setSourcePopStatus(message, "error");
+    setStatus(message, "error");
+  }
+  function renderChapterPopover(mode) {
+    if (!chapterPopEl || !chapterPopTitleEl || !chapterPopListEl) return;
+    const cur = runtime.current;
+    if (!cur) {
+      closeChapterPopover();
+      return;
+    }
+    const meta = state.books.find((item) => item.id === cur.id);
+    const isOnline = !!cur.online;
+    const chapters = isOnline && meta && Array.isArray(meta.chapters) ? meta.chapters : [];
+    const total = isOnline ? chapters.length : cur.blocks.length;
+    chapterPopTitleEl.textContent = tr("tab.chapters") + " · " + tr("source.chapterCount", { count: total });
+    const query = chapterPopQuery.trim().toLowerCase();
+    const currentIndex = isOnline && typeof cur.chapterIndex === "number" ? cur.chapterIndex : runtime.segIndex;
+    chapterPopListEl.replaceChildren();
+    const frag = document.createDocumentFragment();
+    for (let i = 0; i < total; i += 1) {
+      const title = isOnline ? conv(chapters[i] && chapters[i].title) || tr("seg.fallback", { n: i + 1 }) : blockDisplayTitle(i) || tr("seg.fallback", { n: i + 1 });
+      if (query && title.toLowerCase().indexOf(query) < 0) continue;
+      const row = document.createElement("button");
+      row.type = "button";
+      row.className = "snr-chapter-item" + (i === currentIndex ? " active" : "");
+      row.dataset.chapterIndex = String(i);
+      row.title = title;
+      row.disabled = chapterJumpPending;
+      const name = document.createElement("span");
+      name.className = "snr-chapter-name";
+      name.textContent = title;
+      row.appendChild(name);
+      if (i === currentIndex) {
+        const badge = document.createElement("span");
+        badge.className = "snr-chapter-badge";
+        badge.textContent = tr("chapter.current");
+        row.appendChild(badge);
+      }
+      frag.appendChild(row);
+    }
+    if (!frag.childNodes.length) {
+      const empty = document.createElement("div");
+      empty.className = "snr-chapter-empty";
+      empty.textContent = query ? tr("search.empty") : tr("err.emptyToc");
+      chapterPopListEl.appendChild(empty);
+      return;
+    }
+    chapterPopListEl.appendChild(frag);
+    if (mode === "active") {
+      const active = chapterPopListEl.querySelector(".snr-chapter-item.active");
+      if (!active) {
+        chapterPopListEl.scrollTop = 0;
+        return;
+      }
+      const listRect = chapterPopListEl.getBoundingClientRect();
+      const itemRect = active.getBoundingClientRect();
+      chapterPopListEl.scrollTop += itemRect.top - listRect.top - (listRect.height - itemRect.height) / 2;
+    } else {
+      chapterPopListEl.scrollTop = 0;
+    }
+  }
+  function clearChapterPopoverDebounce() {
+    if (!timers.chapterPop) return;
+    clearTimeout(timers.chapterPop);
+    timers.chapterPop = 0;
+  }
+  function renderChapterPopoverDebounced() {
+    clearChapterPopoverDebounce();
+    timers.chapterPop = window.setTimeout(() => {
+      timers.chapterPop = 0;
+      if (disposed || !chapterPopEl || chapterPopEl.hidden) return;
+      renderChapterPopover(chapterPopQuery.trim() ? "top" : "active");
+    }, 150);
+  }
+  function flushChapterPopoverRender() {
+    if (!timers.chapterPop) return;
+    clearChapterPopoverDebounce();
+    if (disposed || !chapterPopEl || chapterPopEl.hidden) return;
+    renderChapterPopover(chapterPopQuery.trim() ? "top" : "active");
+  }
+  function openChapterPopover() {
+    if (!chapterPopEl) return;
+    if (!runtime.current) {
+      setStatus(tr("empty.reader"), "info");
+      return;
+    }
+    closeSourcePopover();
+    clearChapterPopoverDebounce();
+    chapterPopQuery = "";
+    if (chapterPopSearchEl) chapterPopSearchEl.value = "";
+    chapterPopEl.hidden = false;
+    renderChapterPopover("active");
+    wake();
+    if (chapterPopSearchEl) {
+      window.setTimeout(() => {
+        if (!disposed && chapterPopEl && !chapterPopEl.hidden) chapterPopSearchEl.focus();
+      }, 0);
+    }
+  }
+  function closeChapterPopover() {
+    if (!chapterPopEl) return;
+    clearChapterPopoverDebounce();
+    chapterPopEl.hidden = true;
+    chapterPopQuery = "";
+    if (chapterPopSearchEl) {
+      chapterPopSearchEl.value = "";
+      chapterPopSearchEl.blur();
+    }
+  }
+  function toggleChapterPopover() {
+    if (chapterPopEl && !chapterPopEl.hidden) closeChapterPopover();
+    else openChapterPopover();
+  }
+  function onChapterPopInput(e) {
+    if (e.target !== chapterPopSearchEl) return;
+    chapterPopQuery = e.target.value;
+    renderChapterPopoverDebounced();
+  }
+  function onChapterPopKeyDown(e) {
+    if (e.key === "Escape") {
+      closeChapterPopover();
+      e.stopPropagation();
+      return;
+    }
+    if (e.key !== "Enter" || e.target !== chapterPopSearchEl) return;
+    flushChapterPopoverRender();
+    const first = chapterPopListEl && chapterPopListEl.querySelector("[data-chapter-index]");
+    if (!first || chapterJumpPending) return;
+    const index = Number(first.dataset.chapterIndex);
+    if (!isFinite(index)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    jumpChapterFromWindow(index);
+  }
+  function onChapterPopClick(e) {
+    const target = e.target;
+    if (!target || !target.closest) return;
+    if (target.closest('button[data-act="chapterClose"]')) {
+      closeChapterPopover();
+      return;
+    }
+    const row = target.closest("[data-chapter-index]");
+    if (!row || chapterJumpPending || row.disabled) return;
+    const index = Number(row.dataset.chapterIndex);
+    if (!isFinite(index)) return;
+    jumpChapterFromWindow(index);
+  }
+  function jumpChapterFromWindow(index) {
+    const cur = runtime.current;
+    if (!cur || chapterJumpPending) return;
+    const meta = state.books.find((item) => item.id === cur.id);
+    closeChapterPopover();
+    if (cur.online && meta && meta.sourceId) {
+      chapterJumpPending = true;
+      const bookId = meta.id;
+      Promise.resolve(openOnlineChapter(bookId, index, 0)).then(() => {
+        if (disposed) return;
+        chapterJumpPending = false;
+        if (state.currentBookId === bookId) showWindow();
+      }).catch((err) => {
+        chapterJumpPending = false;
+        failStatus("source.contentFailed", err);
+      });
+      return;
+    }
+    jumpToChapter(index);
+    showWindow();
   }
   function blockDisplayTitle(index) {
     const cur = runtime.current;
@@ -4690,12 +5299,26 @@ function createEngine(api) {
   function updateHeader() {
     if (!titleEl) return;
     const cur = runtime.current;
+    if (sourceBtn) sourceBtn.hidden = !(cur && cur.online);
+    if (chapterBtn) chapterBtn.hidden = !cur;
     if (!cur) {
       titleEl.textContent = tr("empty.reader");
+      if (chapterEl) chapterEl.textContent = "";
+      if (sourceEl) {
+        sourceEl.textContent = "";
+        sourceEl.hidden = true;
+      }
       return;
     }
-    const seg = blockDisplayTitle(runtime.segIndex);
-    titleEl.textContent = seg ? cur.name + "  ·  " + seg : cur.name;
+    titleEl.textContent = cur.name;
+    if (chapterEl) chapterEl.textContent = blockDisplayTitle(runtime.segIndex);
+    if (sourceEl) {
+      const meta = state.books.find((book) => book.id === cur.id);
+      const sourceName = cur.online && meta ? meta.sourceName || "" : "";
+      sourceEl.textContent = sourceName;
+      sourceEl.title = sourceName ? tr("source.title") : "";
+      sourceEl.hidden = !sourceName;
+    }
   }
   function renderSegment(index, anchorOffset) {
     const cur = runtime.current;
@@ -5056,12 +5679,16 @@ function createEngine(api) {
     const target = clamp(index, 0, cur.blocks.length - 1);
     renderSegment(target, cur.blocks[target].start);
     showWindow();
+    chapterScrollMode = "active";
+    chapterScrollSeq += 1;
     renderView();
   }
   async function openBook(bookId, anchorOffset) {
     if (disposed || !bookId) return;
     const meta = state.books.find((b) => b.id === bookId);
     if (!meta) return;
+    closeSourcePopover();
+    closeChapterPopover();
     if (meta.sourceId) {
       if (!Array.isArray(meta.chapters) || !meta.chapters.length) await loadBookChapters(meta);
       if (disposed) return;
@@ -5110,6 +5737,8 @@ function createEngine(api) {
   }
   async function removeBook(bookId) {
     armedBookId = null;
+    closeSourcePopover();
+    closeChapterPopover();
     openToken += 1;
     if (statusLoadingBookId === bookId && statusLevel === "loading") {
       statusLoadingToken = 0;
@@ -5137,6 +5766,8 @@ function createEngine(api) {
   }
   async function clearAllData() {
     const viewWin = winEl;
+    closeSourcePopover();
+    closeChapterPopover();
     openToken += 1;
     stateCleared = true;
     dataEpoch += 1;
@@ -5373,14 +6004,39 @@ function createEngine(api) {
         );
       });
     }, []);
+    const chapterListRef = R.useRef(null);
     const chapterScope = panelStore.scopes.chapters || 0;
     const allScope = panelStore.scopes.all || 0;
     const chaptersBody = R.useMemo(
       () => panelTab === "chapters" ? chaptersView() : null,
       [panelTab, chapterScope, allScope]
     );
+    R.useEffect(() => {
+      if (panelTab !== "chapters") return;
+      const list = chapterListRef.current;
+      if (!list || typeof list.closest !== "function") return;
+      const scroller = list.closest(".nr-view");
+      if (!scroller) return;
+      if (chapterScrollMode === "top") {
+        scroller.scrollTop = 0;
+        return;
+      }
+      const active = list.querySelector(".nr-item.active");
+      if (!active) {
+        scroller.scrollTop = 0;
+        return;
+      }
+      const scrollerRect = scroller.getBoundingClientRect();
+      const itemRect = active.getBoundingClientRect();
+      if (itemRect.top >= scrollerRect.top && itemRect.bottom <= scrollerRect.bottom) return;
+      scroller.scrollTop += itemRect.top - scrollerRect.top - (scrollerRect.height - itemRect.height) / 2;
+    }, [panelTab, chapterScrollSeq]);
     const goTab = (next) => {
       panelTab = next;
+      if (panelTab === "chapters") {
+        chapterScrollMode = "active";
+        chapterScrollSeq += 1;
+      }
       if (panelTab !== "keys") recordingKey = null;
       panelStore.notify();
     };
@@ -5561,11 +6217,15 @@ function createEngine(api) {
           value: chapterQuery,
           onChange: (e) => {
             chapterQuery = e.target.value;
+            chapterScrollMode = chapterQuery.trim() ? "top" : "active";
+            chapterScrollSeq += 1;
             panelStore.notify("chapters");
           },
           onKeyDown: (e) => {
             if (e.key !== "Escape" || !chapterQuery) return;
             chapterQuery = "";
+            chapterScrollMode = "active";
+            chapterScrollSeq += 1;
             panelStore.notify("chapters");
             e.stopPropagation();
           }
@@ -5594,7 +6254,7 @@ function createEngine(api) {
           { className: "nr-view-body" },
           h("div", { className: "nr-hint" }, conv(meta.name) + "  ·  " + tr("source.chapterCount", { count: chapters.length })),
           searchBox,
-          h("div", { className: "nr-list" }, items2)
+          h("div", { className: "nr-list", ref: chapterListRef }, items2)
         );
       }
       const cur = runtime.current;
@@ -5620,7 +6280,7 @@ function createEngine(api) {
         { className: "nr-view-body" },
         hasChapters ? null : h("div", { className: "nr-hint" }, tr("empty.chapters")),
         searchBox,
-        h("div", { className: "nr-list" }, items)
+        h("div", { className: "nr-list", ref: chapterListRef }, items)
       );
     }
     function searchView() {
@@ -6707,6 +7367,7 @@ function createEngine(api) {
     if (timers.scrollRaf) clearTimeout(timers.scrollRaf);
     if (timers.sleep) clearTimeout(timers.sleep);
     if (timers.snap) clearTimeout(timers.snap);
+    if (timers.chapterPop) clearTimeout(timers.chapterPop);
     cancelSnapAnim();
     cancelSegmentAnchor();
     if (statusTimer) clearTimeout(statusTimer);

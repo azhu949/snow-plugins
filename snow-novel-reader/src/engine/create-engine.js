@@ -141,12 +141,18 @@ export function createEngine(api) {
   let startToken = 0;
   let panelTab = "books";
   let chapterQuery = "";
+  // 目录自动滚动请求序号：切到目录页、过滤目录或切章时自增，
+  // PanelView 据此把当前章滚到可视区，避免上千章的列表停在顶部。
+  let chapterScrollSeq = 0;
+  // 本次请求的落点：active = 当前章，top = 列表顶部。
+  // 过滤目录时只回到顶部展示第一条命中，不因当前章恰好也在结果里而跳过前面的命中。
+  let chapterScrollMode = "active";
   let armedBookId = null;
   let armedSourceId = null;
   let armTimer = 0;
   let statusTimer = 0;
   const listeners = [];
-  const timers = { save: 0, scrollRaf: 0, sleep: 0, autoRaf: 0, snap: 0 };
+  const timers = { save: 0, scrollRaf: 0, sleep: 0, autoRaf: 0, snap: 0, chapterPop: 0 };
 
   function listen(target, type, handler, options) {
     target.addEventListener(type, handler, options);
@@ -170,14 +176,32 @@ export function createEngine(api) {
   let winEl = null;
   let barEl = null;
   let titleEl = null;
+  let chapterEl = null;
+  let sourceEl = null;
   let percentEl = null;
   let actionsEl = null;
   let autoBtn = null;
+  let sourceBtn = null;
+  let chapterBtn = null;
   let bodyEl = null;
   let contentEl = null;
   let progressEl = null;
   let resizeEl = null;
   let dotEl = null;
+  // 悬浮窗换源弹层：候选来源直接取自面板搜索结果 searchState.items
+  let sourcePopEl = null;
+  let sourcePopTitleEl = null;
+  let sourcePopHintEl = null;
+  let sourcePopStatusEl = null;
+  let sourcePopListEl = null;
+  let sourceSwitchPending = false;
+  // 悬浮窗章节目录：在线书取 meta.chapters，本地书取 runtime.current.blocks
+  let chapterPopEl = null;
+  let chapterPopTitleEl = null;
+  let chapterPopSearchEl = null;
+  let chapterPopListEl = null;
+  let chapterPopQuery = "";
+  let chapterJumpPending = false;
 
   // 幂等：窗口仍在宿主文档里就直接返回，避免重复注册监听
   function attachWindow() {
@@ -189,13 +213,24 @@ export function createEngine(api) {
     winEl.style.display = "none";
     winEl.innerHTML =
       '<div class="snr-bar">' +
+      '<div class="snr-heading">' +
       '<div class="snr-title"></div>' +
+      // 第二行：章节名；右侧的 meta 列放进度与当前书源
+      '<div class="snr-chapter"></div>' +
+      "</div>" +
+      '<div class="snr-meta">' +
       '<div class="snr-percent"></div>' +
+      '<div class="snr-source"></div>' +
+      "</div>" +
       '<div class="snr-actions">' +
       // 上一章 / 下一章：与快捷键（默认 Ctrl+ArrowLeft / Ctrl+ArrowRight）走同一条路径，
       // 没有快捷键入口时也能直接点。本地书或目录为空时点击给出提示，与快捷键行为一致。
       '<button class="snr-btn" type="button" data-act="prevChapter" title="' + escapeAttr(tr("keys.prevChapter")) + '">' + svgIcon("chevronLeft", 14) + "</button>" +
       '<button class="snr-btn" type="button" data-act="nextChapter" title="' + escapeAttr(tr("keys.nextChapter")) + '">' + svgIcon("chevronRight", 14) + "</button>" +
+      // 目录：在悬浮窗内直接查看 / 搜索章节并切章
+      '<button class="snr-btn" type="button" data-act="chapters" title="' + escapeAttr(tr("tab.chapters")) + '">' + svgIcon("list", 14) + "</button>" +
+      // 换源：从面板已搜索到的结果里直接切换到另一个书源，保持当前阅读位置
+      '<button class="snr-btn" type="button" data-act="switchSource" title="' + escapeAttr(tr("win.switchSource")) + '">' + svgIcon("repeat", 14) + "</button>" +
       // 分隔线：区分「章节导航」与「窗口操作」两组按钮
       '<span class="snr-sep"></span>' +
       '<button class="snr-btn" type="button" data-act="autoscroll" title="' + escapeAttr(tr("settings.autoScroll")) + '">' + svgIcon("play", 14) + "</button>" +
@@ -208,13 +243,51 @@ export function createEngine(api) {
       '<div class="snr-resize"></div>';
     barEl = winEl.querySelector(".snr-bar");
     titleEl = winEl.querySelector(".snr-title");
+    chapterEl = winEl.querySelector(".snr-chapter");
+    sourceEl = winEl.querySelector(".snr-source");
     percentEl = winEl.querySelector(".snr-percent");
     actionsEl = winEl.querySelector(".snr-actions");
     autoBtn = winEl.querySelector('button[data-act="autoscroll"]');
+    sourceBtn = winEl.querySelector('button[data-act="switchSource"]');
+    chapterBtn = winEl.querySelector('button[data-act="chapters"]');
     bodyEl = winEl.querySelector(".snr-body");
     contentEl = winEl.querySelector(".snr-content");
     progressEl = winEl.querySelector(".snr-progress");
     resizeEl = winEl.querySelector(".snr-resize");
+
+    // 换源弹层：结构与文案分离，候选条目用 DOM API 构建（书名 / 作者来自书源，不能拼 HTML）
+    sourcePopEl = document.createElement("div");
+    sourcePopEl.className = "snr-source-pop";
+    sourcePopEl.hidden = true;
+    sourcePopEl.innerHTML =
+      '<div class="snr-source-head">' +
+      '<div class="snr-source-title"></div>' +
+      '<button class="snr-btn" type="button" data-act="sourceClose">' + svgIcon("close", 12) + "</button>" +
+      "</div>" +
+      '<div class="snr-source-hint"></div>' +
+      '<div class="snr-source-status" role="status"></div>' +
+      '<div class="snr-source-list"></div>';
+    sourcePopTitleEl = sourcePopEl.querySelector(".snr-source-title");
+    sourcePopHintEl = sourcePopEl.querySelector(".snr-source-hint");
+    sourcePopStatusEl = sourcePopEl.querySelector(".snr-source-status");
+    sourcePopListEl = sourcePopEl.querySelector(".snr-source-list");
+
+    // 章节目录弹层：静态结构与文案分离开，章节行同样用 DOM API 构建
+    chapterPopEl = document.createElement("div");
+    chapterPopEl.className = "snr-chapter-pop";
+    chapterPopEl.hidden = true;
+    chapterPopEl.innerHTML =
+      '<div class="snr-chapter-head">' +
+      '<div class="snr-chapter-pop-title"></div>' +
+      '<button class="snr-btn" type="button" data-act="chapterClose">' + svgIcon("close", 12) + "</button>" +
+      "</div>" +
+      '<input class="snr-chapter-search" type="text" />' +
+      '<div class="snr-chapter-list"></div>';
+    chapterPopTitleEl = chapterPopEl.querySelector(".snr-chapter-pop-title");
+    chapterPopSearchEl = chapterPopEl.querySelector(".snr-chapter-search");
+    chapterPopListEl = chapterPopEl.querySelector(".snr-chapter-list");
+    chapterPopSearchEl.placeholder = tr("search.placeholder");
+    chapterPopSearchEl.setAttribute("aria-label", tr("search.placeholder"));
 
     dotEl = document.createElement("div");
     dotEl.id = DOT_ID;
@@ -225,6 +298,9 @@ export function createEngine(api) {
 
     document.body.appendChild(winEl);
     document.body.appendChild(dotEl);
+    // 弹层放在窗口内部，随窗口一起隐藏 / 卸载
+    winEl.appendChild(sourcePopEl);
+    winEl.appendChild(chapterPopEl);
 
     installDrag();
 
@@ -250,9 +326,34 @@ export function createEngine(api) {
       if (act === "autoscroll") setAutoScroll(!state.settings.autoScroll);
       else if (act === "prevChapter") prevSegment();
       else if (act === "nextChapter") nextSegment();
+      else if (act === "chapters") toggleChapterPopover();
+      else if (act === "switchSource") toggleSourcePopover();
       else if (act === "panel") openPluginPanel();
       else if (act === "close") hideWindow();
     });
+    // 弹层内的按钮与候选项：数据属性只存 searchState.items 的原始下标
+    listen(sourcePopEl, "click", onSourcePopClick);
+    // 章节目录弹层：行数据只存章节下标，点击 / 过滤都在窗口内完成
+    listen(chapterPopEl, "click", onChapterPopClick);
+    listen(chapterPopEl, "input", onChapterPopInput);
+    listen(chapterPopEl, "keydown", onChapterPopKeyDown);
+    // 点击窗口其它区域或窗口外时收起弹层；点各自的开关按钮不收起（交给 toggle 处理）
+    listen(
+      document,
+      "mousedown",
+      (e) => {
+        const target = e.target;
+        if (sourcePopEl && !sourcePopEl.hidden && !sourcePopEl.contains(target)) {
+          const button = target && target.closest ? target.closest('button[data-act="switchSource"]') : null;
+          if (!button) closeSourcePopover();
+        }
+        if (chapterPopEl && !chapterPopEl.hidden && !chapterPopEl.contains(target)) {
+          const button = target && target.closest ? target.closest('button[data-act="chapters"]') : null;
+          if (!button) closeChapterPopover();
+        }
+      },
+      true
+    );
     listen(bodyEl, "scroll", onBodyScroll, { passive: true });
     listen(bodyEl, "wheel", onWheel, { passive: false });
     listen(document, "keydown", onKeyDown);
@@ -286,14 +387,30 @@ export function createEngine(api) {
     winEl = null;
     barEl = null;
     titleEl = null;
+    chapterEl = null;
+    sourceEl = null;
     percentEl = null;
     actionsEl = null;
     autoBtn = null;
+    sourceBtn = null;
+    chapterBtn = null;
     bodyEl = null;
     contentEl = null;
     progressEl = null;
     resizeEl = null;
     dotEl = null;
+    sourcePopEl = null;
+    sourcePopTitleEl = null;
+    sourcePopHintEl = null;
+    sourcePopStatusEl = null;
+    sourcePopListEl = null;
+    sourceSwitchPending = false;
+    chapterPopEl = null;
+    chapterPopTitleEl = null;
+    chapterPopSearchEl = null;
+    chapterPopListEl = null;
+    chapterPopQuery = "";
+    chapterJumpPending = false;
   }
 
   // 面板状态仓库：按数据域记录版本号，notify(scope) 只推进对应域。
@@ -417,7 +534,10 @@ export function createEngine(api) {
       } else {
         meta.chapters = [];
       }
-      meta.chapterIndex = clamp(Number(rawBook.chapterIndex) || 0, 0, Math.max(0, meta.chapters.length - 1));
+      // 目录已拆到 book-chapters:<id> 时这里还没有章节表，不能按空目录夹到 0，
+      // 否则每次冷启动都会把阅读进度拉回第一章（章节水合后再由 applyStoredChapters 收敛）。
+      const rawIndex = Math.max(0, Number(rawBook.chapterIndex) || 0);
+      meta.chapterIndex = meta.chapters.length ? clamp(rawIndex, 0, meta.chapters.length - 1) : rawIndex;
       meta.encodingRisk = typeof rawBook.encodingRisk === "string" ? rawBook.encodingRisk : "";
     }
     return { meta: meta, inline: inline };
@@ -1121,6 +1241,67 @@ export function createEngine(api) {
     return exactNameMatch(item.name, keyword) || exactNameMatch(item.author, keyword);
   }
 
+  // 书名 / 章节名的匹配规范化：忽略空白、标点与全半角差异无关的装饰字符。
+  // 换源时候选列表据此挑出「同名书」，目录跳转据此找到「同一章」。
+  function normalizeMatchText(text) {
+    return String(text == null ? "" : text)
+      .toLowerCase()
+      .replace(/[\s\u3000]+/g, "")
+      .replace(/[《》「」『』【】\[\]（）()<>·:：,，.。!！?？、_\-—\/\\|"'“”‘’]/g, "");
+  }
+
+  // 搜索结果里的书名常带站点后缀，先去掉再比较
+  function normalizeBookTitle(text) {
+    return normalizeMatchText(text).replace(
+      /(?:最新章节|全文阅读|无弹窗|免费阅读|txt下载|完整版|精校版|校对版|笔趣阁|顶点小说|新笔趣阁)/g,
+      ""
+    );
+  }
+
+  // 同名判定：完全一致，或一方包含另一方（长度 >= 4 才允许包含，避免短名误配）
+  function sameBookTitle(a, b) {
+    const left = normalizeBookTitle(a);
+    const right = normalizeBookTitle(b);
+    if (!left || !right) return false;
+    if (left === right) return true;
+    return left.length >= 4 && right.length >= 4 && (left.indexOf(right) !== -1 || right.indexOf(left) !== -1);
+  }
+
+  // 换源的同书判定：书名先按归一后的包含关系比较；简繁字形差异再把两侧都转简体比一次，
+  // 固定转简体（不跟随显示设置），否则同一本书在简体书目与繁体书源之间会被误判成两本书。
+  function sameBookNameForSwitch(a, b) {
+    if (sameBookTitle(a, b)) return true;
+    return sameBookTitle(convertScript(a, "simplified"), convertScript(b, "simplified"));
+  }
+
+  // 搜索结果是否就是书架上的这本书：书名必须同名；作者只在两侧都有内容时做宽松的互含比对，
+  // 作者缺失或带「著」等修饰时不拦截，避免把正常的换源拦死。
+  function isSameBookResult(meta, item) {
+    if (!meta || !item) return false;
+    if (!sameBookNameForSwitch(item.name, meta.name)) return false;
+    const left = normalizeMatchText(meta.author);
+    const right = normalizeMatchText(item.author);
+    if (!left || !right) return true;
+    return left.indexOf(right) !== -1 || right.indexOf(left) !== -1;
+  }
+
+  // 章节名可能带「第001章」这类补零写法，统一成「第1章」后再比较
+  function normalizeChapterTitle(text) {
+    return normalizeMatchText(text).replace(/第0+(\d)/g, "第$1");
+  }
+
+  // 换源时在新目录里定位当前章：标题一致优先，否则退回同一序号。
+  // 返回 matched 供调用方决定是否按章内比例恢复阅读位置。
+  function matchChapterIndex(newChapters, oldIndex, oldTitle) {
+    const title = normalizeChapterTitle(oldTitle);
+    if (title) {
+      for (let i = 0; i < newChapters.length; i += 1) {
+        if (normalizeChapterTitle(newChapters[i].title) === title) return { index: i, matched: true };
+      }
+    }
+    return { index: clamp(oldIndex, 0, Math.max(0, newChapters.length - 1)), matched: false };
+  }
+
   // 并发搜索：按 SEARCH_CONCURRENCY 限流的并发 worker，单源失败不影响其它源。
   // hooks.onItems 在每个书源解析完成后立刻回调该源新增的条目：调用方据此「搜到一个就显示一个」，
   // 不必等全部书源跑完。返回值仍是完整结果，供调用方做收尾判定。
@@ -1225,18 +1406,11 @@ export function createEngine(api) {
     return { ok: true, text: text, error: "", encodingRisk: response.encodingRisk };
   }
 
-  // 把在线书加入书架：先抓目录，再以「目录 + 章节正文」的形态写入书架
-  async function addOnlineBook(result) {
-    // 本轮数据代次：清空全部数据后，在途的目录抓取不得再把书写回书架
-    const epoch = dataEpoch;
-    const source = state.sources.find((item) => item.id === result.sourceId);
-    if (!source) return { ok: false, error: tr("source.addFailed", { error: sourceErrorText("source-missing") }) };
-    const bookUrl = result.bookUrl;
+  // 抓取在线书的详情与完整目录：加入书架与换源共用这条网络路径。
+  // 返回值里的 name / author / coverUrl / intro 已按「详情页优先、搜索结果兜底」补齐。
+  async function fetchOnlineBookData(source, result, epoch) {
+    const bookUrl = result && result.bookUrl;
     if (!bookUrl) return { ok: false, error: tr("source.addFailed", { error: sourceErrorText("no-book-url") }) };
-    // 抓取开始前记录该书在书架上的条目 id：目录抓取期间用户可能删掉它。
-    // 结束时若查不到同地址条目、原 id 又已进墓碑，说明书是被删掉的，不能以新 id 重建。
-    const shelfBook = state.books.find((item) => item.sourceId === source.id && item.bookUrl === bookUrl);
-    const shelfBookId = shelfBook ? shelfBook.id : "";
     // 详情页：补全书名/作者，封面与简介同样「详情页优先、搜索结果兜底」
     let detailHtml = "";
     const detailRequest = buildSourceRequest(source, bookUrl, {});
@@ -1283,6 +1457,32 @@ export function createEngine(api) {
       nextTocUrl = resolveSourceUrl(tocRequest.url, parseTocNextUrl(source, tocContext));
     }
     if (!chapters.length) return { ok: false, error: tr("source.tocFailed", { error: sourceErrorText("empty-toc") }) };
+    return {
+      ok: true,
+      bookUrl: bookUrl,
+      name: name,
+      author: author,
+      coverUrl: coverUrl,
+      intro: intro,
+      chapters: chapters,
+      encodingRisk: tocRisk
+    };
+  }
+
+  // 把在线书加入书架：先抓目录，再以「目录 + 章节正文」的形态写入书架
+  async function addOnlineBook(result) {
+    // 本轮数据代次：清空全部数据后，在途的目录抓取不得再把书写回书架
+    const epoch = dataEpoch;
+    const source = state.sources.find((item) => item.id === result.sourceId);
+    if (!source) return { ok: false, error: tr("source.addFailed", { error: sourceErrorText("source-missing") }) };
+    const bookUrl = result.bookUrl;
+    if (!bookUrl) return { ok: false, error: tr("source.addFailed", { error: sourceErrorText("no-book-url") }) };
+    // 抓取开始前记录该书在书架上的条目 id：目录抓取期间用户可能删掉它。
+    // 结束时若查不到同地址条目、原 id 又已进墓碑，说明书是被删掉的，不能以新 id 重建。
+    const shelfBook = state.books.find((item) => item.sourceId === source.id && item.bookUrl === bookUrl);
+    const shelfBookId = shelfBook ? shelfBook.id : "";
+    const data = await fetchOnlineBookData(source, result, epoch);
+    if (!data.ok) return data;
     // 复用已有条目，避免重复添加
     let existing = false;
     let meta = state.books.find((item) => item.sourceId === source.id && item.bookUrl === bookUrl);
@@ -1294,7 +1494,7 @@ export function createEngine(api) {
       const id = "s" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
       meta = {
         id: id,
-        name: name,
+        name: data.name,
         size: 0,
         addedAt: Date.now(),
         lastOpenedAt: Date.now(),
@@ -1302,24 +1502,190 @@ export function createEngine(api) {
         sourceId: source.id,
         sourceName: source.name,
         bookUrl: bookUrl,
-        author: author,
-        coverUrl: coverUrl,
-        intro: intro,
-        chapters: chapters,
+        author: data.author,
+        coverUrl: data.coverUrl,
+        intro: data.intro,
+        chapters: data.chapters,
         chapterIndex: 0,
-        encodingRisk: tocRisk || ""
+        encodingRisk: data.encodingRisk || ""
       };
       state.books.unshift(meta);
     } else {
       // 已在书架：只刷新目录，chapterIndex / progress 一律保留，避免阅读进度被拉回第一章
       existing = true;
-      meta.chapters = chapters;
+      meta.chapters = data.chapters;
     }
     // 目录发生变化：标记后由保存写链先落 book-chapters:<id>，再落不含 chapters 的 reader-state。
     markChaptersDirty(meta.id);
     saveStateNow();
     refreshPanel();
-    return { ok: true, bookId: meta.id, error: "", chapters: chapters.length, existing: existing };
+    return { ok: true, bookId: meta.id, error: "", chapters: data.chapters.length, existing: existing };
+  }
+
+  // 换源：把当前在线阅读的同一本书切到另一书源，保留书架条目与阅读位置。
+  // 目录按章节标题对应（忽略空白 / 标点 / 补零），标题对不上时退回同一序号。
+  async function switchBookSource(index) {
+    const result = searchState.items[index];
+    if (!result) return { ok: false, error: tr("err.unknown") };
+    const bookId = state.currentBookId;
+    const meta = state.books.find((item) => item.id === bookId);
+    if (!meta) return { ok: false, error: tr("source.switchNoBook") };
+    if (!meta.sourceId) return { ok: false, error: tr("source.switchLocalOnly") };
+    const source = state.sources.find((item) => item.id === result.sourceId);
+    if (!source) return { ok: false, error: tr("source.addFailed", { error: sourceErrorText("source-missing") }) };
+    if (result.sourceId === meta.sourceId && result.bookUrl === meta.bookUrl) {
+      return { ok: false, error: tr("source.switchSame") };
+    }
+    const epoch = dataEpoch;
+    const oldIndex = typeof meta.chapterIndex === "number" ? meta.chapterIndex : 0;
+    const oldChapter = meta.chapters && meta.chapters[oldIndex] ? meta.chapters[oldIndex] : null;
+    const oldTitle = oldChapter ? oldChapter.title : "";
+    // 换源前后章节长度不同：按「旧章内比例」在目标章同一位置落位，而不是照搬字符偏移。
+    const cur = runtime.current && runtime.current.id === bookId ? runtime.current : null;
+    const ratio = cur && cur.text && cur.text.length ? clamp(currentOffset() / cur.text.length, 0, 1) : 0;
+    // 目标源已在书架上：直接打开那条记录并落到对应章节，避免同一书目出现两条相同来源的条目。
+    const shelfTarget = state.books.find(
+      (item) => item.id !== bookId && item.sourceId === result.sourceId && item.bookUrl === result.bookUrl
+    );
+    if (shelfTarget) {
+      if (!Array.isArray(shelfTarget.chapters) || !shelfTarget.chapters.length) await loadBookChapters(shelfTarget);
+      if (disposed) return { ok: false, silent: true };
+      // 目录键丢失或水合失败：按目标结果重抓该源目录写回已有条目，命中后仍走「打开已有条目」。
+      // 直接落到下面的网络抓取分支会把当前条目改写成与 shelfTarget 同源同址的第二条记录。
+      if (!Array.isArray(shelfTarget.chapters) || !shelfTarget.chapters.length) {
+        let refilled;
+        try {
+          refilled = await fetchOnlineBookData(source, result, epoch);
+        } catch (err) {
+          log("switch source detail failed", err);
+          return { ok: false, error: tr("source.addFailed", { error: sourceErrorText((err && err.message) || String(err)) }) };
+        }
+        if (disposed) return { ok: false, silent: true };
+        if (epoch !== dataEpoch) return { ok: false, silent: true };
+        if (!refilled.ok) {
+          if (refilled.error === "stale" || refilled.error === "disposed") return { ok: false, silent: true };
+          // 重抓不到目录就明确报错返回，不降级改写当前条目。
+          return { ok: false, error: refilled.error };
+        }
+        shelfTarget.chapters = refilled.chapters;
+        shelfTarget.encodingRisk = refilled.encodingRisk || shelfTarget.encodingRisk || "";
+        shelfTarget.chapterIndex = clamp(Number(shelfTarget.chapterIndex) || 0, 0, refilled.chapters.length - 1);
+        markChaptersDirty(shelfTarget.id);
+        saveStateNow();
+      }
+      if (Array.isArray(shelfTarget.chapters) && shelfTarget.chapters.length) {
+        const target = matchChapterIndex(shelfTarget.chapters, oldIndex, oldTitle);
+        const targetChapter = shelfTarget.chapters[target.index];
+        let probe;
+        try {
+          probe = await fetchChapterContent(shelfTarget, targetChapter);
+        } catch (err) {
+          log("switch source content failed", err);
+          return { ok: false, error: tr("source.contentFailed", { error: sourceErrorText((err && err.message) || String(err)) }) };
+        }
+        if (disposed) return { ok: false, silent: true };
+        if (!probe.ok) return { ok: false, error: tr("source.contentFailed", { error: sourceErrorText(probe.error) }) };
+        if (!probe.text) return { ok: false, error: tr("source.contentEmpty") };
+        const offset = target.matched ? Math.round(ratio * probe.text.length) : 0;
+        chapterQuery = "";
+        await openOnlineChapter(shelfTarget.id, target.index, offset);
+        if (disposed) return { ok: false, silent: true };
+        // 章节加载失败或已被其它切章请求覆盖：不谎报换源成功，具体原因由状态栏给出。
+        if (
+          !runtime.current ||
+          runtime.current.id !== shelfTarget.id ||
+          runtime.current.chapterIndex !== target.index
+        ) {
+          return { ok: false, silent: true };
+        }
+        return {
+          ok: true,
+          sourceName: shelfTarget.sourceName || source.name,
+          chapterTitle: targetChapter.title || tr("seg.fallback", { n: target.index + 1 })
+        };
+      }
+    }
+    // 换源只能切到同一本书：搜索结果可能来自另一本书（例如上次搜索的关键词不是这本），
+    // 直接覆盖会把书架条目的书名、目录与进度整条改写，这里先做同书校验。
+    if (!isSameBookResult(meta, result)) {
+      return { ok: false, error: tr("source.switchNoMatch", { name: meta.name }) };
+    }
+    let data;
+    try {
+      data = await fetchOnlineBookData(source, result, epoch);
+    } catch (err) {
+      log("switch source detail failed", err);
+      return { ok: false, error: tr("source.addFailed", { error: sourceErrorText((err && err.message) || String(err)) }) };
+    }
+    if (disposed) return { ok: false, silent: true };
+    if (!data.ok) {
+      if (data.error === "stale" || data.error === "disposed") return { ok: false, silent: true };
+      return { ok: false, error: data.error };
+    }
+    const match = matchChapterIndex(data.chapters, oldIndex, oldTitle);
+    const targetIndex = match.index;
+    const targetChapter = data.chapters[targetIndex];
+    // 先试读目标章：正文取不到就保持原源不动，避免「目录换过去了、阅读窗还停在旧源」。
+    // 试读结果会写入章节缓存，随后 openOnlineChapter 直接命中，不会重复请求。
+    let probe;
+    try {
+      probe = await fetchChapterContent({ sourceId: source.id }, targetChapter);
+    } catch (err) {
+      log("switch source content failed", err);
+      return { ok: false, error: tr("source.contentFailed", { error: sourceErrorText((err && err.message) || String(err)) }) };
+    }
+    if (disposed) return { ok: false, silent: true };
+    if (!probe.ok) return { ok: false, error: tr("source.contentFailed", { error: sourceErrorText(probe.error) }) };
+    if (!probe.text) return { ok: false, error: tr("source.contentEmpty") };
+    // 试读期间用户可能已切书 / 删书 / 清空：本次换源作废，不得改写书架。
+    if (state.currentBookId !== bookId || !state.books.some((item) => item.id === bookId)) {
+      return { ok: false, silent: true };
+    }
+    if (epoch !== dataEpoch) return { ok: false, silent: true };
+    // 目标书已在书架（并发加入等竞态）：改写当前条目会留下同源同址的重复记录，直接拒绝。
+    const duplicated = state.books.find(
+      (item) => item.id !== bookId && item.sourceId === source.id && item.bookUrl === data.bookUrl
+    );
+    if (duplicated) return { ok: false, error: tr("source.switchDuplicate") };
+    // 详情页书名才是这本书的权威书名：搜索页标题与详情页不一致时再拦一次。
+    if (!isSameBookResult(meta, { name: data.name, author: data.author })) {
+      return { ok: false, error: tr("source.switchNoMatch", { name: meta.name }) };
+    }
+    meta.sourceId = source.id;
+    meta.sourceName = source.name;
+    meta.bookUrl = data.bookUrl;
+    meta.name = data.name || meta.name;
+    meta.author = data.author || meta.author;
+    meta.coverUrl = data.coverUrl || meta.coverUrl;
+    meta.intro = data.intro || meta.intro;
+    meta.chapters = data.chapters;
+    meta.chapterIndex = targetIndex;
+    meta.encodingRisk = data.encodingRisk || "";
+    meta.lastOpenedAt = Date.now();
+    // 旧源的章内偏移不能带到新源：先按目标章序号写一个一致值，openOnlineChapter 会按实际落点重算。
+    if (!meta.progress) meta.progress = { offset: 0, percent: 0 };
+    meta.progress.offset = 0;
+    meta.progress.percent = Math.round(clamp(targetIndex / data.chapters.length, 0, 1) * 1000) / 10;
+    markChaptersDirty(meta.id);
+    saveStateNow();
+    // 目录已换成新源：清掉过滤词，目录页会把对应章节滚到可视区。
+    chapterQuery = "";
+    const offset = match.matched ? Math.round(ratio * probe.text.length) : 0;
+    await openOnlineChapter(meta.id, targetIndex, offset);
+    if (disposed || epoch !== dataEpoch) return { ok: false, silent: true };
+    // 切章请求可能被用户随后打开的书作废：只有阅读窗里确实是目标书的目标章才算换源成功。
+    if (
+      !runtime.current ||
+      runtime.current.id !== bookId ||
+      runtime.current.chapterIndex !== targetIndex
+    ) {
+      return { ok: false, silent: true };
+    }
+    return {
+      ok: true,
+      sourceName: source.name,
+      chapterTitle: targetChapter.title || tr("seg.fallback", { n: targetIndex + 1 })
+    };
   }
 
   // 在线阅读：按章抓正文，写入 runtime.current 供阅读窗渲染
@@ -1389,6 +1755,9 @@ export function createEngine(api) {
     // 否则状态栏会永久停在「正在加载正文…」（正文其实早就出来了）。
     endOpenLoading(token, tr("source.loadingContent"));
     saveStateSoon();
+    // 目录页若正开着，当前章的高亮已经变化：推进滚动请求，把它带到可视区。
+    chapterScrollMode = "active";
+    chapterScrollSeq += 1;
     refreshPanel();
   }
 
@@ -1409,6 +1778,8 @@ export function createEngine(api) {
       setStatus(tr("source.searchNoSource"), "error");
       return;
     }
+    // 重新搜索会重置 searchState.items：换源弹层里的下标随即失效，先收起。
+    closeSourcePopover();
     searchState.searched = true;
     searchState.items = [];
     searchState.error = "";
@@ -1837,6 +2208,8 @@ export function createEngine(api) {
     panelStore.notify("shell");
   }
   function hideWindow(silent) {
+    closeSourcePopover();
+    closeChapterPopover();
     // display:none 会让滚动容器丢失布局盒并把滚动位置归零，隐藏前把当前阅读行记入
     // pendingLine，由 showWindow 统一落位，与「隐藏期间重新渲染」共用同一恢复路径。
     // 仅在窗口确实可见时记录：boot 以隐藏状态启动时，openBook 已按存档进度写入有效
@@ -1852,6 +2225,375 @@ export function createEngine(api) {
       saveStateNow();
       panelStore.notify("shell");
     }
+  }
+
+  // ---------------- 悬浮窗：换源弹层 ----------------
+  // 候选来源直接复用面板「搜索」页的结果（searchState.items），不额外发搜索请求；
+  // 用户先搜书，再在悬浮窗里点「换源」，从已返回的若干书源中挑一个继续读。
+  function setSourcePopStatus(text, level) {
+    if (!sourcePopStatusEl) return;
+    sourcePopStatusEl.textContent = text || "";
+    sourcePopStatusEl.className =
+      "snr-source-status" + (level === "error" ? " is-error" : level === "loading" ? " is-loading" : "");
+  }
+
+  function renderSourcePopover() {
+    if (!sourcePopEl || !sourcePopListEl) return;
+    const meta = state.books.find((item) => item.id === state.currentBookId);
+    if (!meta || !meta.sourceId) {
+      closeSourcePopover();
+      return;
+    }
+    if (sourcePopTitleEl) sourcePopTitleEl.textContent = tr("source.switchTitle") + " · " + conv(meta.name);
+    // 按原始下标收集候选：点击时据此回查 searchState.items，过滤后的下标会指到别的书。
+    const entries = [];
+    for (let i = 0; i < searchState.items.length; i += 1) {
+      const item = searchState.items[i];
+      if (!item || !item.bookUrl) continue;
+      if (item.sourceId === meta.sourceId && item.bookUrl === meta.bookUrl) continue;
+      entries.push({ item: item, index: i });
+    }
+    const matched = entries.filter((entry) => isSameBookResult(meta, entry.item));
+    // 换源只能切到同一本书：没有同名结果时就保持空列表，不再退化为「其它搜索结果」，
+    // 否则用户点错一次就会把当前书架条目整条改写成另一本书。
+    const list = matched;
+    if (sourcePopHintEl) {
+      sourcePopHintEl.textContent = matched.length
+        ? tr("source.switchHint")
+        : entries.length
+          ? tr("source.switchNoMatch", { name: meta.name })
+          : "";
+    }
+    setSourcePopStatus(sourceSwitchPending ? tr("source.switching") : "", sourceSwitchPending ? "loading" : "");
+    sourcePopListEl.replaceChildren();
+    sourcePopListEl.scrollTop = 0;
+    if (!list.length) {
+      const empty = document.createElement("div");
+      empty.className = "snr-source-empty";
+      empty.textContent = searchState.running
+        ? tr("source.switchSearching", { done: searchState.done, total: searchState.total })
+        : entries.length
+          ? tr("source.switchNoMatch", { name: meta.name })
+          : searchState.items.length
+            ? tr("source.switchNoOther")
+            : tr("source.switchEmpty");
+      sourcePopListEl.appendChild(empty);
+      // 没有同名结果时也给出「去搜索」出口：用户可以换个关键词重新搜这本书。
+      if (!searchState.running) {
+        const action = document.createElement("button");
+        action.type = "button";
+        action.className = "snr-source-action";
+        action.dataset.act = "sourceSearch";
+        action.textContent = tr("source.switchSearch");
+        sourcePopListEl.appendChild(action);
+      }
+      return;
+    }
+    for (const entry of list) {
+      const item = entry.item;
+      const row = document.createElement("button");
+      row.type = "button";
+      row.className = "snr-source-item";
+      row.dataset.sourceIndex = String(entry.index);
+      row.disabled = sourceSwitchPending;
+      const name = document.createElement("div");
+      name.className = "snr-source-name";
+      name.textContent = conv(item.name) || item.bookUrl;
+      row.appendChild(name);
+      const parts = [];
+      if (item.author) parts.push(conv(item.author));
+      if (item.sourceName) parts.push(item.sourceName);
+      if (item.lastChapter) parts.push(conv(item.lastChapter));
+      const sub = document.createElement("div");
+      sub.className = "snr-source-sub";
+      sub.textContent = parts.join("  ·  ") || item.bookUrl;
+      row.appendChild(sub);
+      sourcePopListEl.appendChild(row);
+    }
+  }
+
+  function openSourcePopover() {
+    if (!sourcePopEl) return;
+    if (!runtime.current) {
+      setStatus(tr("source.switchNoBook"), "info");
+      return;
+    }
+    const meta = state.books.find((item) => item.id === state.currentBookId);
+    if (!meta || !meta.sourceId) {
+      setStatus(tr("source.switchLocalOnly"), "info");
+      return;
+    }
+    // 两个弹层互斥：打开换源时收起目录
+    closeChapterPopover();
+    sourcePopEl.hidden = false;
+    renderSourcePopover();
+    wake();
+  }
+
+  function closeSourcePopover() {
+    if (!sourcePopEl) return;
+    sourcePopEl.hidden = true;
+    setSourcePopStatus("", "");
+  }
+
+  function toggleSourcePopover() {
+    if (sourcePopEl && !sourcePopEl.hidden) closeSourcePopover();
+    else openSourcePopover();
+  }
+
+  function onSourcePopClick(e) {
+    const target = e.target;
+    if (!target || !target.closest) return;
+    const closeButton = target.closest('button[data-act="sourceClose"]');
+    if (closeButton) {
+      closeSourcePopover();
+      return;
+    }
+    const searchButton = target.closest('button[data-act="sourceSearch"]');
+    if (searchButton) {
+      panelTab = "search";
+      closeSourcePopover();
+      panelStore.notify();
+      openPluginPanel();
+      return;
+    }
+    const row = target.closest("[data-source-index]");
+    if (!row || sourceSwitchPending || row.disabled) return;
+    const index = Number(row.dataset.sourceIndex);
+    if (!isFinite(index)) return;
+    handleSwitchSource(index);
+  }
+
+  async function handleSwitchSource(index) {
+    if (sourceSwitchPending) return;
+    sourceSwitchPending = true;
+    setSourcePopStatus(tr("source.switching"), "loading");
+    setStatus(tr("source.switching"), "loading");
+    let result;
+    try {
+      result = await switchBookSource(index);
+    } catch (err) {
+      log("switch source failed", err);
+      result = {
+        ok: false,
+        error: tr("source.addFailed", { error: sourceErrorText((err && err.message) || String(err)) })
+      };
+    }
+    if (disposed) return;
+    sourceSwitchPending = false;
+    if (result && result.ok) {
+      closeSourcePopover();
+      setStatus(tr("source.switched", { source: result.sourceName, chapter: result.chapterTitle }), "success");
+      showWindow();
+      panelStore.notify();
+      return;
+    }
+    if (result && result.silent) {
+      closeSourcePopover();
+      // 用户切书 / 删书 / 清空导致的作废：收掉本次换源自己设置的加载提示，
+      // 不覆盖期间其它操作已经给出的新提示。
+      if (statusLevel === "loading" && statusText === tr("source.switching")) clearStatus();
+      return;
+    }
+    const message = (result && result.error) || tr("err.unknown");
+    setSourcePopStatus(message, "error");
+    setStatus(message, "error");
+  }
+
+  // ---------------- 悬浮窗：章节目录 ----------------
+  // 在线书取 meta.chapters，本地书取 runtime.current.blocks；打开时滚到当前章，
+  // 输入关键词只过滤标题，点行直接切章（在线书仍走正文抓取与缓存）。
+  function renderChapterPopover(mode) {
+    if (!chapterPopEl || !chapterPopTitleEl || !chapterPopListEl) return;
+    const cur = runtime.current;
+    if (!cur) {
+      closeChapterPopover();
+      return;
+    }
+    const meta = state.books.find((item) => item.id === cur.id);
+    const isOnline = !!cur.online;
+    const chapters = isOnline && meta && Array.isArray(meta.chapters) ? meta.chapters : [];
+    const total = isOnline ? chapters.length : cur.blocks.length;
+    chapterPopTitleEl.textContent =
+      tr("tab.chapters") + " · " + tr("source.chapterCount", { count: total });
+    const query = chapterPopQuery.trim().toLowerCase();
+    const currentIndex =
+      isOnline && typeof cur.chapterIndex === "number" ? cur.chapterIndex : runtime.segIndex;
+    chapterPopListEl.replaceChildren();
+    const frag = document.createDocumentFragment();
+    for (let i = 0; i < total; i += 1) {
+      const title = isOnline
+        ? conv(chapters[i] && chapters[i].title) || tr("seg.fallback", { n: i + 1 })
+        : blockDisplayTitle(i) || tr("seg.fallback", { n: i + 1 });
+      if (query && title.toLowerCase().indexOf(query) < 0) continue;
+      const row = document.createElement("button");
+      row.type = "button";
+      row.className = "snr-chapter-item" + (i === currentIndex ? " active" : "");
+      row.dataset.chapterIndex = String(i);
+      row.title = title;
+      row.disabled = chapterJumpPending;
+      const name = document.createElement("span");
+      name.className = "snr-chapter-name";
+      name.textContent = title;
+      row.appendChild(name);
+      if (i === currentIndex) {
+        const badge = document.createElement("span");
+        badge.className = "snr-chapter-badge";
+        badge.textContent = tr("chapter.current");
+        row.appendChild(badge);
+      }
+      frag.appendChild(row);
+    }
+    if (!frag.childNodes.length) {
+      const empty = document.createElement("div");
+      empty.className = "snr-chapter-empty";
+      empty.textContent = query ? tr("search.empty") : tr("err.emptyToc");
+      chapterPopListEl.appendChild(empty);
+      return;
+    }
+    chapterPopListEl.appendChild(frag);
+    // 打开时把当前章滚到列表中部；过滤时从第一条命中开始看
+    if (mode === "active") {
+      const active = chapterPopListEl.querySelector(".snr-chapter-item.active");
+      if (!active) {
+        chapterPopListEl.scrollTop = 0;
+        return;
+      }
+      const listRect = chapterPopListEl.getBoundingClientRect();
+      const itemRect = active.getBoundingClientRect();
+      chapterPopListEl.scrollTop +=
+        itemRect.top - listRect.top - (listRect.height - itemRect.height) / 2;
+    } else {
+      chapterPopListEl.scrollTop = 0;
+    }
+  }
+
+  // 目录弹层输入防抖：章节行是裸 DOM 全量重建，长目录逐字符重建会明显掉帧，
+  // 停止输入一小段时间后只渲染一次；关闭、重开与卸载都要清掉挂起的定时器。
+  function clearChapterPopoverDebounce() {
+    if (!timers.chapterPop) return;
+    clearTimeout(timers.chapterPop);
+    timers.chapterPop = 0;
+  }
+
+  function renderChapterPopoverDebounced() {
+    clearChapterPopoverDebounce();
+    timers.chapterPop = window.setTimeout(() => {
+      timers.chapterPop = 0;
+      // 定时器可能晚于关闭弹层或引擎卸载：这两种状态都不再渲染。
+      if (disposed || !chapterPopEl || chapterPopEl.hidden) return;
+      renderChapterPopover(chapterPopQuery.trim() ? "top" : "active");
+    }, 150);
+  }
+
+  // 回车等需要立即读列表的操作先按当前关键词渲染完，避免读到上一轮过滤结果。
+  function flushChapterPopoverRender() {
+    if (!timers.chapterPop) return;
+    clearChapterPopoverDebounce();
+    if (disposed || !chapterPopEl || chapterPopEl.hidden) return;
+    renderChapterPopover(chapterPopQuery.trim() ? "top" : "active");
+  }
+
+  function openChapterPopover() {
+    if (!chapterPopEl) return;
+    if (!runtime.current) {
+      setStatus(tr("empty.reader"), "info");
+      return;
+    }
+    // 两个弹层互斥：打开目录时收起换源，避免叠在一起
+    closeSourcePopover();
+    // 上一轮挂起的过滤渲染不能留到重开之后：它会把刚居中到当前章的列表滚回顶部。
+    clearChapterPopoverDebounce();
+    chapterPopQuery = "";
+    if (chapterPopSearchEl) chapterPopSearchEl.value = "";
+    chapterPopEl.hidden = false;
+    renderChapterPopover("active");
+    wake();
+    if (chapterPopSearchEl) {
+      window.setTimeout(() => {
+        if (!disposed && chapterPopEl && !chapterPopEl.hidden) chapterPopSearchEl.focus();
+      }, 0);
+    }
+  }
+
+  function closeChapterPopover() {
+    if (!chapterPopEl) return;
+    clearChapterPopoverDebounce();
+    chapterPopEl.hidden = true;
+    chapterPopQuery = "";
+    if (chapterPopSearchEl) {
+      chapterPopSearchEl.value = "";
+      chapterPopSearchEl.blur();
+    }
+  }
+
+  function toggleChapterPopover() {
+    if (chapterPopEl && !chapterPopEl.hidden) closeChapterPopover();
+    else openChapterPopover();
+  }
+
+  function onChapterPopInput(e) {
+    if (e.target !== chapterPopSearchEl) return;
+    chapterPopQuery = e.target.value;
+    renderChapterPopoverDebounced();
+  }
+
+  function onChapterPopKeyDown(e) {
+    if (e.key === "Escape") {
+      closeChapterPopover();
+      e.stopPropagation();
+      return;
+    }
+    if (e.key !== "Enter" || e.target !== chapterPopSearchEl) return;
+    // 防抖窗口内列表仍是上一轮过滤结果：先按当前关键词渲染完再取第一条，避免跳到错误章节。
+    flushChapterPopoverRender();
+    // 回车切到过滤结果的第一条，键盘上不用再点一次
+    const first = chapterPopListEl && chapterPopListEl.querySelector("[data-chapter-index]");
+    if (!first || chapterJumpPending) return;
+    const index = Number(first.dataset.chapterIndex);
+    if (!isFinite(index)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    jumpChapterFromWindow(index);
+  }
+
+  function onChapterPopClick(e) {
+    const target = e.target;
+    if (!target || !target.closest) return;
+    if (target.closest('button[data-act="chapterClose"]')) {
+      closeChapterPopover();
+      return;
+    }
+    const row = target.closest("[data-chapter-index]");
+    if (!row || chapterJumpPending || row.disabled) return;
+    const index = Number(row.dataset.chapterIndex);
+    if (!isFinite(index)) return;
+    jumpChapterFromWindow(index);
+  }
+
+  function jumpChapterFromWindow(index) {
+    const cur = runtime.current;
+    if (!cur || chapterJumpPending) return;
+    const meta = state.books.find((item) => item.id === cur.id);
+    closeChapterPopover();
+    if (cur.online && meta && meta.sourceId) {
+      chapterJumpPending = true;
+      const bookId = meta.id;
+      // openOnlineChapter 自己会写 loading 与错误提示；这里只负责在收尾后恢复窗口
+      Promise.resolve(openOnlineChapter(bookId, index, 0))
+        .then(() => {
+          if (disposed) return;
+          chapterJumpPending = false;
+          if (state.currentBookId === bookId) showWindow();
+        })
+        .catch((err) => {
+          chapterJumpPending = false;
+          failStatus("source.contentFailed", err);
+        });
+      return;
+    }
+    jumpToChapter(index);
+    showWindow();
   }
 
   // ---------------- 阅读窗口：内容渲染 ----------------
@@ -1888,12 +2630,29 @@ export function createEngine(api) {
   function updateHeader() {
     if (!titleEl) return;
     const cur = runtime.current;
+    // 换源只对在线书有意义：本地 TXT 没有书源，按钮直接收起（否则每个本地书读者都会看到一个点了只弹提示的按钮）
+    if (sourceBtn) sourceBtn.hidden = !(cur && cur.online);
+    // 目录按钮对所有已打开的书可用；没有当前书时收起
+    if (chapterBtn) chapterBtn.hidden = !cur;
     if (!cur) {
       titleEl.textContent = tr("empty.reader");
+      if (chapterEl) chapterEl.textContent = "";
+      if (sourceEl) {
+        sourceEl.textContent = "";
+        sourceEl.hidden = true;
+      }
       return;
     }
-    const seg = blockDisplayTitle(runtime.segIndex);
-    titleEl.textContent = seg ? cur.name + "  ·  " + seg : cur.name;
+    titleEl.textContent = cur.name;
+    // 第二行：当前章节（块标题 / 在线章节名 / 段序号）与当前书源分开显示
+    if (chapterEl) chapterEl.textContent = blockDisplayTitle(runtime.segIndex);
+    if (sourceEl) {
+      const meta = state.books.find((book) => book.id === cur.id);
+      const sourceName = cur.online && meta ? meta.sourceName || "" : "";
+      sourceEl.textContent = sourceName;
+      sourceEl.title = sourceName ? tr("source.title") : "";
+      sourceEl.hidden = !sourceName;
+    }
   }
 
   function renderSegment(index, anchorOffset) {
@@ -2341,6 +3100,8 @@ export function createEngine(api) {
     const target = clamp(index, 0, cur.blocks.length - 1);
     renderSegment(target, cur.blocks[target].start);
     showWindow();
+    chapterScrollMode = "active";
+    chapterScrollSeq += 1;
     renderView();
   }
 
@@ -2349,6 +3110,9 @@ export function createEngine(api) {
     if (disposed || !bookId) return;
     const meta = state.books.find((b) => b.id === bookId);
     if (!meta) return;
+    // 换书后候选列表里的「当前书」已变化，旧弹层不再有效。
+    closeSourcePopover();
+    closeChapterPopover();
     // 在线书：按章拉取，走独立路径
     if (meta.sourceId) {
       // 书架先可见后目录仍在限流水合：用户此刻点开书时按需补读目录。
@@ -2418,6 +3182,8 @@ export function createEngine(api) {
 
   async function removeBook(bookId) {
     armedBookId = null;
+    closeSourcePopover();
+    closeChapterPopover();
     // 作废在途打开请求，避免被删除的书在读取完成后又被打开
     openToken += 1;
     // 删除的正是加载中的书：立即收掉 loading，别让状态栏停到请求返回为止
@@ -2456,6 +3222,8 @@ export function createEngine(api) {
   // 避免「清空后书源还在」这类半清空状态；同时作废在途请求与二次确认态。
   async function clearAllData() {
     const viewWin = winEl;
+    closeSourcePopover();
+    closeChapterPopover();
     // 作废在途打开请求，避免清空后又被旧读取结果填回
     openToken += 1;
     // 恢复模式下，清空意图要随快照一起落盘，读取成功后才能整体替换主档。
@@ -2742,6 +3510,7 @@ export function createEngine(api) {
     // 状态提示 / 搜索进度 / 纯视觉设置只推进各自域，目录元素整批复用，
     // React 协调时可直接跳过引用相同的子树，不再为每章重建 React 元素。
     // 定义必须放在 selectChapter / ChapterRow 之后：首次渲染时 useMemo 回调会立即执行 chaptersView。
+    const chapterListRef = R.useRef(null);
     const chapterScope = panelStore.scopes.chapters || 0;
     const allScope = panelStore.scopes.all || 0;
     const chaptersBody = R.useMemo(
@@ -2749,9 +3518,38 @@ export function createEngine(api) {
       [panelTab, chapterScope, allScope]
     );
 
+    // 目录自动定位：切到目录页、过滤目录或切章后，把当前章滚到可视区中部。
+    // 面板真正的滚动容器是外层 .nr-view（.nr-list 只是纵向排列），因此按视口矩形换算。
+    // 依赖里的 chapterScrollSeq 只在需要定位时自增，普通状态提示不会打断用户正在浏览的位置。
+    R.useEffect(() => {
+      if (panelTab !== "chapters") return;
+      const list = chapterListRef.current;
+      if (!list || typeof list.closest !== "function") return;
+      const scroller = list.closest(".nr-view");
+      if (!scroller) return;
+      if (chapterScrollMode === "top") {
+        scroller.scrollTop = 0;
+        return;
+      }
+      const active = list.querySelector(".nr-item.active");
+      if (!active) {
+        // 当前章不在过滤结果里：回到顶部，避免停在上一轮的中间位置
+        scroller.scrollTop = 0;
+        return;
+      }
+      const scrollerRect = scroller.getBoundingClientRect();
+      const itemRect = active.getBoundingClientRect();
+      if (itemRect.top >= scrollerRect.top && itemRect.bottom <= scrollerRect.bottom) return;
+      scroller.scrollTop += itemRect.top - scrollerRect.top - (scrollerRect.height - itemRect.height) / 2;
+    }, [panelTab, chapterScrollSeq]);
+
     const goTab = (next) => {
       panelTab = next;
-      // 离开快捷键页时结束录制，避免按键被静默吞掉
+      // 进入目录页时定位到当前章；离开快捷键页时结束录制，避免按键被静默吞掉
+      if (panelTab === "chapters") {
+        chapterScrollMode = "active";
+        chapterScrollSeq += 1;
+      }
       if (panelTab !== "keys") recordingKey = null;
       panelStore.notify();
     };
@@ -2956,12 +3754,17 @@ export function createEngine(api) {
           value: chapterQuery,
           onChange: (e) => {
             chapterQuery = e.target.value;
+            // 过滤后从第一条命中开始看；清空过滤词时回到当前章，点选结果时再由切章请求定位
+            chapterScrollMode = chapterQuery.trim() ? "top" : "active";
+            chapterScrollSeq += 1;
             // 目录过滤结果需要重建，只推进目录域
             panelStore.notify("chapters");
           },
           onKeyDown: (e) => {
             if (e.key !== "Escape" || !chapterQuery) return;
             chapterQuery = "";
+            chapterScrollMode = "active";
+            chapterScrollSeq += 1;
             panelStore.notify("chapters");
             e.stopPropagation();
           }
@@ -2992,7 +3795,7 @@ export function createEngine(api) {
           { className: "nr-view-body" },
           h("div", { className: "nr-hint" }, conv(meta.name) + "  ·  " + tr("source.chapterCount", { count: chapters.length })),
           searchBox,
-          h("div", { className: "nr-list" }, items)
+          h("div", { className: "nr-list", ref: chapterListRef }, items)
         );
       }
 
@@ -3019,7 +3822,7 @@ export function createEngine(api) {
         { className: "nr-view-body" },
         hasChapters ? null : h("div", { className: "nr-hint" }, tr("empty.chapters")),
         searchBox,
-        h("div", { className: "nr-list" }, items)
+        h("div", { className: "nr-list", ref: chapterListRef }, items)
       );
     }
 
@@ -4219,6 +5022,7 @@ export function createEngine(api) {
     if (timers.scrollRaf) clearTimeout(timers.scrollRaf);
     if (timers.sleep) clearTimeout(timers.sleep);
     if (timers.snap) clearTimeout(timers.snap);
+    if (timers.chapterPop) clearTimeout(timers.chapterPop);
     cancelSnapAnim();
     cancelSegmentAnchor();
     if (statusTimer) clearTimeout(statusTimer);

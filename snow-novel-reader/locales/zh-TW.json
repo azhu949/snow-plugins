@@ -167,5 +167,20 @@
   "data.sources": "書源數量",
   "data.cache": "快取章節",
   "data.cacheHint": "章節正文快取在本機記憶體，最多保留最近使用的 {{max}} 章；刪除書源或清空全部資料時一併清除。",
-  "source.added": "已加入書架"
+  "source.added": "已加入書架",
+  "win.switchSource": "換源",
+  "source.switchTitle": "換源",
+  "source.switchHint": "從搜尋結果中選擇其它書源；章節按標題對應，閱讀位置按比例保留。",
+  "source.switchAll": "沒有找到同名搜尋結果，以下為其它搜尋結果。",
+  "source.switchNoMatch": "沒找到與《{{name}}》同名的搜尋結果；換源只能切到同一本書，要讀別的書請到「搜尋」頁加入書架。",
+  "source.switchEmpty": "還沒有搜尋結果。先在「搜尋」頁搜尋這本書，再回來換源。",
+  "source.switchNoOther": "搜尋結果裡沒有其它書源的結果，試試啟用更多書源或更換關鍵字。",
+  "source.switchSearching": "搜尋仍在進行（{{done}}/{{total}} 個書源），下面先顯示已返回的結果。",
+  "source.switchSame": "已經在該書源上閱讀。",
+  "source.switchDuplicate": "書架裡已有這本書在該書源上的條目，請直接從書架開啟該條目。",
+  "source.switchLocalOnly": "本機 TXT 書籍沒有書源，無法換源。",
+  "source.switchNoBook": "還沒有開啟任何書籍。",
+  "source.switchSearch": "去搜尋",
+  "source.switching": "正在換源…",
+  "source.switched": "已切換到「{{source}}」 · {{chapter}}"
 }
