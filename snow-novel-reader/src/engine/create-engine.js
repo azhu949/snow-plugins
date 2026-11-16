@@ -187,6 +187,7 @@ export function createEngine(api) {
   let contentEl = null;
   let progressEl = null;
   let resizeEl = null;
+  let dragEl = null;
   let dotEl = null;
   // 悬浮窗换源弹层：候选来源直接取自面板搜索结果 searchState.items
   let sourcePopEl = null;
@@ -202,6 +203,11 @@ export function createEngine(api) {
   let chapterPopListEl = null;
   let chapterPopQuery = "";
   let chapterJumpPending = false;
+  // 悬浮窗不透明度弹层：顶栏 droplet 按钮的显式入口（Alt+滚轮是同一功能的快捷方式）
+  let opacityBtn = null;
+  let opacityPopEl = null;
+  let opacityPopValueEl = null;
+  let opacityPopRangeEl = null;
 
   // 幂等：窗口仍在宿主文档里就直接返回，避免重复注册监听
   function attachWindow() {
@@ -233,14 +239,17 @@ export function createEngine(api) {
       '<button class="snr-btn" type="button" data-act="switchSource" title="' + escapeAttr(tr("win.switchSource")) + '">' + svgIcon("repeat", 14) + "</button>" +
       // 分隔线：区分「章节导航」与「窗口操作」两组按钮
       '<span class="snr-sep"></span>' +
+      // 不透明度：点开滑杆即时调整（Alt+滚轮是同一功能的快捷方式）
+      '<button class="snr-btn" type="button" data-act="opacity" title="' + escapeAttr(tr("settings.opacity")) + '">' + svgIcon("droplet", 14) + "</button>" +
       '<button class="snr-btn" type="button" data-act="autoscroll" title="' + escapeAttr(tr("settings.autoScroll")) + '">' + svgIcon("play", 14) + "</button>" +
-      '<button class="snr-btn" type="button" data-act="panel" title="' + escapeAttr(tr("tab.settings")) + '">' + svgIcon("panel", 14) + "</button>" +
       '<button class="snr-btn" type="button" data-act="close" title="' + escapeAttr(tr("win.hide")) + '">' + svgIcon("close", 14) + "</button>" +
       "</div>" +
       "</div>" +
       '<div class="snr-body"><div class="snr-content"></div></div>' +
       '<div class="snr-foot"><div class="snr-progress"></div></div>' +
-      '<div class="snr-resize"></div>';
+      // 顶栏隐藏时用来移动窗口的透明拖拽带（覆盖正文上方留白区，不遮挡文字）
+      '<div class="snr-resize"></div>' +
+      '<div class="snr-drag"></div>';
     barEl = winEl.querySelector(".snr-bar");
     titleEl = winEl.querySelector(".snr-title");
     chapterEl = winEl.querySelector(".snr-chapter");
@@ -250,10 +259,12 @@ export function createEngine(api) {
     autoBtn = winEl.querySelector('button[data-act="autoscroll"]');
     sourceBtn = winEl.querySelector('button[data-act="switchSource"]');
     chapterBtn = winEl.querySelector('button[data-act="chapters"]');
+    opacityBtn = winEl.querySelector('button[data-act="opacity"]');
     bodyEl = winEl.querySelector(".snr-body");
     contentEl = winEl.querySelector(".snr-content");
     progressEl = winEl.querySelector(".snr-progress");
     resizeEl = winEl.querySelector(".snr-resize");
+    dragEl = winEl.querySelector(".snr-drag");
 
     // 换源弹层：结构与文案分离，候选条目用 DOM API 构建（书名 / 作者来自书源，不能拼 HTML）
     sourcePopEl = document.createElement("div");
@@ -289,6 +300,21 @@ export function createEngine(api) {
     chapterPopSearchEl.placeholder = tr("search.placeholder");
     chapterPopSearchEl.setAttribute("aria-label", tr("search.placeholder"));
 
+    // 不透明度弹层：滑杆拖动即时应用，数值与 Alt+滚轮共用同一个设置项
+    opacityPopEl = document.createElement("div");
+    opacityPopEl.className = "snr-opacity-pop";
+    opacityPopEl.hidden = true;
+    opacityPopEl.innerHTML =
+      '<div class="snr-opacity-head">' +
+      '<span class="snr-opacity-title"></span>' +
+      '<span class="snr-opacity-value"></span>' +
+      "</div>" +
+      '<input class="snr-opacity-range" type="range" min="5" max="100" step="1" />';
+    opacityPopValueEl = opacityPopEl.querySelector(".snr-opacity-value");
+    opacityPopRangeEl = opacityPopEl.querySelector(".snr-opacity-range");
+    opacityPopEl.querySelector(".snr-opacity-title").textContent = tr("settings.opacity");
+    opacityPopRangeEl.setAttribute("aria-label", tr("settings.opacity"));
+
     dotEl = document.createElement("div");
     dotEl.id = DOT_ID;
     dotEl.className = "snr-dot";
@@ -301,8 +327,12 @@ export function createEngine(api) {
     // 弹层放在窗口内部，随窗口一起隐藏 / 卸载
     winEl.appendChild(sourcePopEl);
     winEl.appendChild(chapterPopEl);
+    winEl.appendChild(opacityPopEl);
 
     installDrag();
+    // 窗口节点刚建好：立即按当前设置应用一次外观（含顶部栏开关），
+    // 避免重挂载后先闪出顶栏、等 start() 的 applyAll 才隐藏。
+    applyVisual();
 
     // ---------------- 事件绑定 ----------------
     listen(winEl, "mouseenter", () => {
@@ -324,11 +354,11 @@ export function createEngine(api) {
       if (!button) return;
       const act = button.dataset.act;
       if (act === "autoscroll") setAutoScroll(!state.settings.autoScroll);
+      else if (act === "opacity") toggleOpacityPopover();
       else if (act === "prevChapter") prevSegment();
       else if (act === "nextChapter") nextSegment();
       else if (act === "chapters") toggleChapterPopover();
       else if (act === "switchSource") toggleSourcePopover();
-      else if (act === "panel") openPluginPanel();
       else if (act === "close") hideWindow();
     });
     // 弹层内的按钮与候选项：数据属性只存 searchState.items 的原始下标
@@ -337,6 +367,8 @@ export function createEngine(api) {
     listen(chapterPopEl, "click", onChapterPopClick);
     listen(chapterPopEl, "input", onChapterPopInput);
     listen(chapterPopEl, "keydown", onChapterPopKeyDown);
+    // 不透明度滑杆：拖动即改设置，松开后由 saveStateSoon（updateSettings 内）落盘
+    listen(opacityPopEl, "input", onOpacityPopInput);
     // 点击窗口其它区域或窗口外时收起弹层；点各自的开关按钮不收起（交给 toggle 处理）
     listen(
       document,
@@ -351,11 +383,17 @@ export function createEngine(api) {
           const button = target && target.closest ? target.closest('button[data-act="chapters"]') : null;
           if (!button) closeChapterPopover();
         }
+        if (opacityPopEl && !opacityPopEl.hidden && !opacityPopEl.contains(target)) {
+          const button = target && target.closest ? target.closest('button[data-act="opacity"]') : null;
+          if (!button) closeOpacityPopover();
+        }
       },
       true
     );
     listen(bodyEl, "scroll", onBodyScroll, { passive: true });
-    listen(bodyEl, "wheel", onWheel, { passive: false });
+    // 滚轮挂在整窗上：鼠标在顶栏 / 底栏 / 顶栏隐藏时的拖拽带上也能 Alt+滚轮调不透明度；
+    // 不按 Alt 的翻页只对正文生效（见 onWheel），弹层内的滚动仍交给弹层自己处理。
+    listen(winEl, "wheel", onWheel, { passive: false });
     listen(document, "keydown", onKeyDown);
     // 录制监听走捕获阶段：先于翻页处理与宿主快捷键执行
     listen(document, "keydown", onRecordKeyDown, true);
@@ -398,6 +436,7 @@ export function createEngine(api) {
     contentEl = null;
     progressEl = null;
     resizeEl = null;
+    dragEl = null;
     dotEl = null;
     sourcePopEl = null;
     sourcePopTitleEl = null;
@@ -411,6 +450,10 @@ export function createEngine(api) {
     chapterPopListEl = null;
     chapterPopQuery = "";
     chapterJumpPending = false;
+    opacityBtn = null;
+    opacityPopEl = null;
+    opacityPopValueEl = null;
+    opacityPopRangeEl = null;
   }
 
   // 面板状态仓库：按数据域记录版本号，notify(scope) 只推进对应域。
@@ -1017,6 +1060,8 @@ export function createEngine(api) {
     if (disposed || token !== startToken) return;
     recoveryMode = false;
     stateLoaded = true;
+    // 读档 / 合并后的高度可能低于当前顶栏下限：先归一，随后随本次落盘一起保存
+    normalizeWinHeight();
     if (statusText === tr("status.loadFailed")) clearStatus();
     pendingSave = true;
     saveStateNow();
@@ -2026,12 +2071,19 @@ export function createEngine(api) {
   }
 
   // ---------------- 阅读窗口：位置与尺寸 ----------------
+  // 窗口最小高度：顶栏隐藏后省掉 44px 顶栏，最小高度同步降低（与 style.css 的
+  // .snr-win.is-bar-hidden 规则一致）；顶栏可见时保持原下限，避免正文被压成一条缝。
+  const MIN_WIN_HEIGHT = 140;
+  const MIN_WIN_HEIGHT_NO_BAR = 96;
+  function minWinHeight() {
+    return state.settings.barVisible === false ? MIN_WIN_HEIGHT_NO_BAR : MIN_WIN_HEIGHT;
+  }
   function currentRect() {
     const settings = state.settings;
     const vw = window.innerWidth || 1200;
     const vh = window.innerHeight || 800;
     const w = clamp(settings.width, 220, Math.max(240, vw - 8));
-    const h = clamp(settings.height, 140, Math.max(160, vh - 8));
+    const h = clamp(settings.height, minWinHeight(), Math.max(160, vh - 8));
     let x = typeof settings.x === "number" ? settings.x : vw - w - 28;
     let y = typeof settings.y === "number" ? settings.y : 64;
     x = clamp(x, 4, Math.max(4, vw - 60));
@@ -2073,13 +2125,26 @@ export function createEngine(api) {
     const vw = window.innerWidth || 1200;
     const vh = window.innerHeight || 800;
     state.settings.width = Math.round(clamp(w, 220, Math.max(240, vw - 8)));
-    state.settings.height = Math.round(clamp(h, 140, Math.max(160, vh - 8)));
+    state.settings.height = Math.round(clamp(h, minWinHeight(), Math.max(160, vh - 8)));
     applyPosition();
+  }
+
+  // 读档 / 合并恢复快照后按当前顶栏状态把高度夹回有效下限：存档里的 height 可能来自
+  // 「顶栏隐藏」时期（下限 96），而顶栏此时可见（下限 140），不归一会让设置页滑杆被夹到
+  // 140、右侧数字仍是旧值、窗口又按 140 渲染，三方不一致。返回是否发生改动，供调用方落盘。
+  // 上界只随宿主视口变化（currentRect 每次渲染已夹取），不属于持久化口径，这里不处理。
+  function normalizeWinHeight() {
+    const next = Math.max(state.settings.height, minWinHeight());
+    if (next === state.settings.height) return false;
+    state.settings.height = next;
+    applyPosition();
+    return true;
   }
 
   // ---------------- 阅读窗口：外观应用 ----------------
   // 纯视觉/纯状态设置：只改 CSS 变量、class 或按钮外观，不参与正文折行与行顶端测量。
   // 未登记在此的键（含未来新增项）默认走全量应用，避免漏掉布局影响。
+  // barVisible 不在列：顶栏显隐会改变窗口最小高度，需走全量应用把高度夹回新下限。
   const VISUAL_ONLY_SETTING_KEYS = [
     "opacity",
     "sleepOpacity",
@@ -2118,10 +2183,16 @@ export function createEngine(api) {
     winEl.style.setProperty("--snr-opacity", String(clamp(settings.opacity, 0.05, 1)));
     winEl.style.setProperty("--snr-sleep-opacity", String(clamp(settings.sleepOpacity, 0.01, 1)));
     winEl.style.setProperty("--snr-font", FONT_STACKS[settings.font] || FONT_STACKS.default);
+    // 顶部栏开关：隐藏后只剩正文；顶部留一条透明拖拽带（.snr-drag）用于移动窗口。
+    winEl.classList.toggle("is-bar-hidden", settings.barVisible === false);
     // 缩进改变首行可用宽度与折行：必须在全量应用测量行顶端之前切换
     contentEl.classList.toggle("indent", !!settings.indent);
     autoBtn.innerHTML = svgIcon(settings.autoScroll ? "pause" : "play", 14);
     autoBtn.classList.toggle("active", !!settings.autoScroll);
+    // 不透明度弹层打开时同步滑杆与数值（Alt+滚轮 / 设置页改动都要反映）
+    if (opacityPopEl && !opacityPopEl.hidden) syncOpacityPopValue();
+    // 按钮 title 里的百分比同样跟随变化（弹层外也能读到当前值）
+    syncOpacityButton();
     syncSleepClasses();
   }
 
@@ -2210,6 +2281,7 @@ export function createEngine(api) {
   function hideWindow(silent) {
     closeSourcePopover();
     closeChapterPopover();
+    closeOpacityPopover();
     // display:none 会让滚动容器丢失布局盒并把滚动位置归零，隐藏前把当前阅读行记入
     // pendingLine，由 showWindow 统一落位，与「隐藏期间重新渲染」共用同一恢复路径。
     // 仅在窗口确实可见时记录：boot 以隐藏状态启动时，openBook 已按存档进度写入有效
@@ -2225,6 +2297,52 @@ export function createEngine(api) {
       saveStateNow();
       panelStore.notify("shell");
     }
+  }
+
+  // ---------------- 悬浮窗：不透明度弹层 ----------------
+  // 顶栏 droplet 按钮的显式入口：滑杆与 Alt+滚轮改的是同一个设置项，
+  // 打开时同步当前值，拖动时即时应用（updateSettings 会顺带排一次保存）。
+  function syncOpacityPopValue() {
+    if (!opacityPopRangeEl || !opacityPopValueEl) return;
+    const percent = Math.round(clamp(state.settings.opacity, 0.05, 1) * 100);
+    const next = String(percent);
+    if (opacityPopRangeEl.value !== next) opacityPopRangeEl.value = next;
+    opacityPopValueEl.textContent = percent + "%";
+  }
+  function syncOpacityButton() {
+    if (!opacityBtn) return;
+    const open = !!opacityPopEl && !opacityPopEl.hidden;
+    opacityBtn.classList.toggle("active", open);
+    // 弹层是窗口的子节点，会整体跟随窗口不透明度变淡：打开期间给窗口加标记，
+    // 由样式把不透明度下限抬到 0.6，否则 5% 时弹层自身几乎看不见。
+    if (winEl) winEl.classList.toggle("is-opacity-open", open);
+    // 百分比同时写进按钮 title：原生提示不受 CSS opacity 影响，低不透明度下也能读到当前值
+    opacityBtn.title = tr("settings.opacity") + " " + Math.round(clamp(state.settings.opacity, 0.05, 1) * 100) + "%";
+  }
+  function closeOpacityPopover() {
+    if (!opacityPopEl || opacityPopEl.hidden) return;
+    opacityPopEl.hidden = true;
+    syncOpacityButton();
+  }
+  function toggleOpacityPopover() {
+    if (!opacityPopEl) return;
+    if (!opacityPopEl.hidden) {
+      closeOpacityPopover();
+      return;
+    }
+    // 弹层互斥：打开不透明度时收起换源与目录
+    closeSourcePopover();
+    closeChapterPopover();
+    syncOpacityPopValue();
+    opacityPopEl.hidden = false;
+    syncOpacityButton();
+    wake();
+  }
+  function onOpacityPopInput(e) {
+    if (e.target !== opacityPopRangeEl) return;
+    const percent = clamp(Number(e.target.value) || 0, 5, 100);
+    updateSettings({ opacity: percent / 100 });
+    syncOpacityPopValue();
   }
 
   // ---------------- 悬浮窗：换源弹层 ----------------
@@ -2323,8 +2441,9 @@ export function createEngine(api) {
       setStatus(tr("source.switchLocalOnly"), "info");
       return;
     }
-    // 两个弹层互斥：打开换源时收起目录
+    // 弹层互斥：打开换源时收起目录与不透明度
     closeChapterPopover();
+    closeOpacityPopover();
     sourcePopEl.hidden = false;
     renderSourcePopover();
     wake();
@@ -2500,8 +2619,9 @@ export function createEngine(api) {
       setStatus(tr("empty.reader"), "info");
       return;
     }
-    // 两个弹层互斥：打开目录时收起换源，避免叠在一起
+    // 弹层互斥：打开目录时收起换源与不透明度，避免叠在一起
     closeSourcePopover();
+    closeOpacityPopover();
     // 上一轮挂起的过滤渲染不能留到重开之后：它会把刚居中到当前章的列表滚回顶部。
     clearChapterPopoverDebounce();
     chapterPopQuery = "";
@@ -4070,6 +4190,9 @@ export function createEngine(api) {
             format: (v) => v + "%",
             onChange: (v) => updateSettings({ opacity: v / 100 })
           }),
+          // 不透明度除了本滑杆，还能在悬浮窗上用 Alt+滚轮即时调整；提示放在滑杆旁，
+          // 用户想调不透明度时就在眼前（快捷键页的那条提示太远，实际没人会找到）。
+          h("div", { className: "nr-hint", key: "opacityHint" }, tr("settings.opacityHint")),
           segRow(
             tr("settings.sleepOnLeave"),
             [
@@ -4104,14 +4227,21 @@ export function createEngine(api) {
             format: (v) => v + " px",
             onChange: (v) => updateSettings({ width: v })
           }),
+          // 下限与窗口渲染同源（顶栏可见 140 / 隐藏 96）：存档高度可能来自另一种顶栏状态，
+          // 这里再夹一次，保证滑杆位置与右侧数字和窗口实际高度一致。
           slider(tr("settings.height"), {
-            min: 140,
+            min: minWinHeight(),
             max: 1200,
             step: 10,
-            get: () => Math.round(settings.height),
+            get: () => Math.max(Math.round(settings.height), minWinHeight()),
             format: (v) => v + " px",
             onChange: (v) => updateSettings({ height: v })
           }),
+          checkRow(
+            tr("settings.bar"),
+            () => settings.barVisible,
+            (v) => updateSettings({ barVisible: v })
+          ),
           h("div", { className: "nr-hint", key: "hint" }, tr("win.hint"))
         ]),
         sec(tr("settings.appearance"), [
@@ -4675,6 +4805,13 @@ export function createEngine(api) {
     const visualOnly = Object.keys(patch).every((key) => VISUAL_ONLY_SETTING_KEYS.indexOf(key) !== -1);
     if (visualOnly) applyVisual();
     else applyAll();
+    // 顶栏显隐改变窗口最小高度：把当前高度夹回新下限（顶栏重新打开时可能低于 140），
+    // 让设置页滑杆与随后写入存档的值都落在有效区间内。
+    if (Object.prototype.hasOwnProperty.call(patch, "barVisible")) {
+      const vh = window.innerHeight || 800;
+      state.settings.height = Math.round(clamp(state.settings.height, minWinHeight(), Math.max(160, vh - 8)));
+      applyPosition();
+    }
     if (Object.prototype.hasOwnProperty.call(patch, "winVisible")) {
       if (patch.winVisible) showWindow();
       else hideWindow(true);
@@ -4707,8 +4844,10 @@ export function createEngine(api) {
     openBook(meta.id);
   }
   // ---------------- 拖拽与缩放 ----------------
-  function installDrag() {
-    barEl.addEventListener("mousedown", (e) => {
+  // 拖动逻辑由顶栏与（顶栏隐藏时的）顶部拖拽带共用
+  function bindWindowDrag(handle) {
+    if (!handle) return;
+    handle.addEventListener("mousedown", (e) => {
       if (e.button !== 0) return;
       if (e.target && e.target.closest && e.target.closest("button")) return;
       const rect = winEl.getBoundingClientRect();
@@ -4732,6 +4871,11 @@ export function createEngine(api) {
       document.addEventListener("mouseup", onUp);
       e.preventDefault();
     });
+  }
+
+  function installDrag() {
+    bindWindowDrag(barEl);
+    bindWindowDrag(dragEl);
     resizeEl.addEventListener("mousedown", (e) => {
       if (e.button !== 0) return;
       const rect = winEl.getBoundingClientRect();
@@ -4968,6 +5112,9 @@ export function createEngine(api) {
       return;
     }
     if (!runtime.current) return;
+    // 普通滚轮只处理正文区的滚动：顶栏 / 底栏 / 拖拽带上滚动不翻页，避免误触；
+    // 弹层（换源 / 章节目录）不在 bodyEl 内，其列表滚动继续走原生行为。
+    if (!bodyEl || !bodyEl.contains(e.target)) return;
     // 用户开始滚动时中断吸附动画与翻段锁定，滚动操作优先
     cancelSnapAnim();
     cancelSegmentAnchor();
@@ -5102,6 +5249,8 @@ export function createEngine(api) {
     }
     await loadSources();
     if (disposed || token !== startToken) return;
+    // 读档 / 合并恢复快照后的高度可能低于当前顶栏下限：先归一，再应用外观与尺寸
+    if (normalizeWinHeight()) saveStateSoon();
     applyAll();
     refreshPanel();
     if (state.currentBookId) {

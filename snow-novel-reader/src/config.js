@@ -3,6 +3,9 @@ import { FONT_STACKS, THEMES } from "./ui/assets.js";
 
 export const DEFAULT_SETTINGS = {
   winVisible: false,
+  // 悬浮窗顶部栏（书名 / 章节 / 进度与操作按钮）：关闭后只显示正文。
+  // 顶部栏同时是窗口的拖拽区，隐藏后窗口不可拖动，需要改窗口位置时先打开它。
+  barVisible: true,
   opacity: 0.92,
   sleepMode: "fade",
   sleepOpacity: 0.06,
@@ -30,8 +33,10 @@ export const DEFAULT_SETTINGS = {
 // nullableNum 数字或 null（如窗口坐标 x/y 的「未设置」语义）。
 // num 型键的 min/max 同时是界面滑杆的取值范围（带单位换算的项按 scale 换算：opacity/sleepOpacity 乘 100、lineHeight 乘 10）；
 // 滑杆必须直接引用本表，不得另写字面量。
+// 例外：height 的下界取「顶栏隐藏」时的最小高度，滑杆与窗口下限按当前顶栏状态动态取值（见 create-engine.js 的 minWinHeight）。
 export const SETTINGS_SPEC = {
   winVisible: { kind: "bool" },
+  barVisible: { kind: "bool" },
   opacity: { kind: "num", min: 0.05, max: 1 },
   sleepMode: { kind: "oneOf", values: () => ["always", "fade", "hide"] },
   sleepOpacity: { kind: "num", min: 0.01, max: 1 },
@@ -39,7 +44,7 @@ export const SETTINGS_SPEC = {
   x: { kind: "nullableNum" },
   y: { kind: "nullableNum" },
   width: { kind: "num", min: 220, max: 1400 },
-  height: { kind: "num", min: 140, max: 1200 },
+  height: { kind: "num", min: 96, max: 1200 },
   theme: { kind: "oneOf", values: () => ["auto"].concat(Object.keys(THEMES)) },
   fontSize: { kind: "num", min: 11, max: 36 },
   lineHeight: { kind: "num", min: 1.2, max: 3 },

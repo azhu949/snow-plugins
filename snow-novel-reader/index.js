@@ -33,7 +33,6 @@ var THEMES = {
 var WINDOW_ICONS = {
   play: '<path d="M5 5a2 2 0 0 1 3.008-1.728l11.997 6.998a2 2 0 0 1 .003 3.458l-12 7A2 2 0 0 1 5 19z"/>',
   pause: '<rect x="14" y="3" width="5" height="18" rx="1"/><rect x="5" y="3" width="5" height="18" rx="1"/>',
-  panel: '<rect width="18" height="18" x="3" y="3" rx="2"/><path d="M15 3v18"/>',
   close: '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
   book: '<path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H19a1 1 0 0 1 1 1v18a1 1 0 0 1-1 1H6.5a1 1 0 0 1 0-5H20"/>',
   // chevron-left / chevron-right：顶部栏的上一章 / 下一章入口
@@ -42,7 +41,9 @@ var WINDOW_ICONS = {
   // repeat：悬浮窗换源入口（从已有搜索结果里切换书源）
   repeat: '<path d="m17 2 4 4-4 4"/><path d="M3 11v-1a4 4 0 0 1 4-4h14"/><path d="m7 22-4-4 4-4"/><path d="M21 13v1a4 4 0 0 1-4 4H3"/>',
   // list：悬浮窗章节目录入口（可搜索并直接切章）
-  list: '<path d="M8 6h13"/><path d="M8 12h13"/><path d="M8 18h13"/><path d="M3 6h.01"/><path d="M3 12h.01"/><path d="M3 18h.01"/>'
+  list: '<path d="M8 6h13"/><path d="M8 12h13"/><path d="M8 18h13"/><path d="M3 6h.01"/><path d="M3 12h.01"/><path d="M3 18h.01"/>',
+  // droplet：悬浮窗不透明度入口（点开滑杆即时调整）
+  droplet: '<path d="M12 22a7 7 0 0 0 7-7c0-2-1-3.9-3-5.5s-3.5-4-4-6.5c-.5 2.5-2 4.9-4 6.5C6 11.1 5 13 5 15a7 7 0 0 0 7 7z"/>'
 };
 function svgIcon(name, size) {
   const body = WINDOW_ICONS[name] || "";
@@ -62,6 +63,9 @@ var PANEL_TABS = [
 // src/config.js
 var DEFAULT_SETTINGS = {
   winVisible: false,
+  // 悬浮窗顶部栏（书名 / 章节 / 进度与操作按钮）：关闭后只显示正文。
+  // 顶部栏同时是窗口的拖拽区，隐藏后窗口不可拖动，需要改窗口位置时先打开它。
+  barVisible: true,
   opacity: 0.92,
   sleepMode: "fade",
   sleepOpacity: 0.06,
@@ -84,6 +88,7 @@ var DEFAULT_SETTINGS = {
 };
 var SETTINGS_SPEC = {
   winVisible: { kind: "bool" },
+  barVisible: { kind: "bool" },
   opacity: { kind: "num", min: 0.05, max: 1 },
   sleepMode: { kind: "oneOf", values: () => ["always", "fade", "hide"] },
   sleepOpacity: { kind: "num", min: 0.01, max: 1 },
@@ -91,7 +96,7 @@ var SETTINGS_SPEC = {
   x: { kind: "nullableNum" },
   y: { kind: "nullableNum" },
   width: { kind: "num", min: 220, max: 1400 },
-  height: { kind: "num", min: 140, max: 1200 },
+  height: { kind: "num", min: 96, max: 1200 },
   theme: { kind: "oneOf", values: () => ["auto"].concat(Object.keys(THEMES)) },
   fontSize: { kind: "num", min: 11, max: 36 },
   lineHeight: { kind: "num", min: 1.2, max: 3 },
@@ -174,7 +179,7 @@ var FALLBACK = {
   "books.progress": "进度 {{percent}}%",
   "win.show": "显示阅读窗口",
   "win.hide": "隐藏阅读窗口",
-  "win.hint": "阅读窗口仅在插件面板打开期间显示，拖动顶部栏可移动位置。",
+  "win.hint": "阅读窗口仅在插件面板打开期间显示；拖动顶部栏（隐藏顶部栏时为窗口顶部边缘）可移动位置。",
   "win.firstChapter": "已经是第一章了",
   "win.lastChapter": "已经是最后一章了",
   "chapter.current": "当前",
@@ -185,6 +190,7 @@ var FALLBACK = {
   "settings.interaction": "快捷键与滚动",
   "settings.data": "数据",
   "settings.opacity": "不透明度",
+  "settings.opacityHint": "点悬浮窗顶栏的水滴图标，或在悬浮窗任意位置按住 Alt 滚动滚轮，可调整不透明度。",
   "settings.sleepOnLeave": "鼠标移出时",
   "settings.sleep.always": "保持显示",
   "settings.sleep.fade": "淡化",
@@ -193,6 +199,7 @@ var FALLBACK = {
   "settings.sleepDelay": "隐藏延迟（毫秒）",
   "settings.width": "宽度",
   "settings.height": "高度",
+  "settings.bar": "显示顶部栏",
   "settings.theme": "阅读主题",
   "settings.theme.auto": "跟随应用",
   "settings.theme.light": "浅色",
@@ -3315,6 +3322,7 @@ function createEngine(api) {
   let contentEl = null;
   let progressEl = null;
   let resizeEl = null;
+  let dragEl = null;
   let dotEl = null;
   let sourcePopEl = null;
   let sourcePopTitleEl = null;
@@ -3328,13 +3336,17 @@ function createEngine(api) {
   let chapterPopListEl = null;
   let chapterPopQuery = "";
   let chapterJumpPending = false;
+  let opacityBtn = null;
+  let opacityPopEl = null;
+  let opacityPopValueEl = null;
+  let opacityPopRangeEl = null;
   function attachWindow() {
     if (winEl && winEl.parentNode === document.body) return;
     winEl = document.createElement("div");
     winEl.id = WIN_ID;
     winEl.className = "snr-win";
     winEl.style.display = "none";
-    winEl.innerHTML = '<div class="snr-bar"><div class="snr-heading"><div class="snr-title"></div><div class="snr-chapter"></div></div><div class="snr-meta"><div class="snr-percent"></div><div class="snr-source"></div></div><div class="snr-actions"><button class="snr-btn" type="button" data-act="prevChapter" title="' + escapeAttr(tr("keys.prevChapter")) + '">' + svgIcon("chevronLeft", 14) + '</button><button class="snr-btn" type="button" data-act="nextChapter" title="' + escapeAttr(tr("keys.nextChapter")) + '">' + svgIcon("chevronRight", 14) + '</button><button class="snr-btn" type="button" data-act="chapters" title="' + escapeAttr(tr("tab.chapters")) + '">' + svgIcon("list", 14) + '</button><button class="snr-btn" type="button" data-act="switchSource" title="' + escapeAttr(tr("win.switchSource")) + '">' + svgIcon("repeat", 14) + '</button><span class="snr-sep"></span><button class="snr-btn" type="button" data-act="autoscroll" title="' + escapeAttr(tr("settings.autoScroll")) + '">' + svgIcon("play", 14) + '</button><button class="snr-btn" type="button" data-act="panel" title="' + escapeAttr(tr("tab.settings")) + '">' + svgIcon("panel", 14) + '</button><button class="snr-btn" type="button" data-act="close" title="' + escapeAttr(tr("win.hide")) + '">' + svgIcon("close", 14) + '</button></div></div><div class="snr-body"><div class="snr-content"></div></div><div class="snr-foot"><div class="snr-progress"></div></div><div class="snr-resize"></div>';
+    winEl.innerHTML = '<div class="snr-bar"><div class="snr-heading"><div class="snr-title"></div><div class="snr-chapter"></div></div><div class="snr-meta"><div class="snr-percent"></div><div class="snr-source"></div></div><div class="snr-actions"><button class="snr-btn" type="button" data-act="prevChapter" title="' + escapeAttr(tr("keys.prevChapter")) + '">' + svgIcon("chevronLeft", 14) + '</button><button class="snr-btn" type="button" data-act="nextChapter" title="' + escapeAttr(tr("keys.nextChapter")) + '">' + svgIcon("chevronRight", 14) + '</button><button class="snr-btn" type="button" data-act="chapters" title="' + escapeAttr(tr("tab.chapters")) + '">' + svgIcon("list", 14) + '</button><button class="snr-btn" type="button" data-act="switchSource" title="' + escapeAttr(tr("win.switchSource")) + '">' + svgIcon("repeat", 14) + '</button><span class="snr-sep"></span><button class="snr-btn" type="button" data-act="opacity" title="' + escapeAttr(tr("settings.opacity")) + '">' + svgIcon("droplet", 14) + '</button><button class="snr-btn" type="button" data-act="autoscroll" title="' + escapeAttr(tr("settings.autoScroll")) + '">' + svgIcon("play", 14) + '</button><button class="snr-btn" type="button" data-act="close" title="' + escapeAttr(tr("win.hide")) + '">' + svgIcon("close", 14) + '</button></div></div><div class="snr-body"><div class="snr-content"></div></div><div class="snr-foot"><div class="snr-progress"></div></div><div class="snr-resize"></div><div class="snr-drag"></div>';
     barEl = winEl.querySelector(".snr-bar");
     titleEl = winEl.querySelector(".snr-title");
     chapterEl = winEl.querySelector(".snr-chapter");
@@ -3344,10 +3356,12 @@ function createEngine(api) {
     autoBtn = winEl.querySelector('button[data-act="autoscroll"]');
     sourceBtn = winEl.querySelector('button[data-act="switchSource"]');
     chapterBtn = winEl.querySelector('button[data-act="chapters"]');
+    opacityBtn = winEl.querySelector('button[data-act="opacity"]');
     bodyEl = winEl.querySelector(".snr-body");
     contentEl = winEl.querySelector(".snr-content");
     progressEl = winEl.querySelector(".snr-progress");
     resizeEl = winEl.querySelector(".snr-resize");
+    dragEl = winEl.querySelector(".snr-drag");
     sourcePopEl = document.createElement("div");
     sourcePopEl.className = "snr-source-pop";
     sourcePopEl.hidden = true;
@@ -3365,6 +3379,14 @@ function createEngine(api) {
     chapterPopListEl = chapterPopEl.querySelector(".snr-chapter-list");
     chapterPopSearchEl.placeholder = tr("search.placeholder");
     chapterPopSearchEl.setAttribute("aria-label", tr("search.placeholder"));
+    opacityPopEl = document.createElement("div");
+    opacityPopEl.className = "snr-opacity-pop";
+    opacityPopEl.hidden = true;
+    opacityPopEl.innerHTML = '<div class="snr-opacity-head"><span class="snr-opacity-title"></span><span class="snr-opacity-value"></span></div><input class="snr-opacity-range" type="range" min="5" max="100" step="1" />';
+    opacityPopValueEl = opacityPopEl.querySelector(".snr-opacity-value");
+    opacityPopRangeEl = opacityPopEl.querySelector(".snr-opacity-range");
+    opacityPopEl.querySelector(".snr-opacity-title").textContent = tr("settings.opacity");
+    opacityPopRangeEl.setAttribute("aria-label", tr("settings.opacity"));
     dotEl = document.createElement("div");
     dotEl.id = DOT_ID;
     dotEl.className = "snr-dot";
@@ -3375,7 +3397,9 @@ function createEngine(api) {
     document.body.appendChild(dotEl);
     winEl.appendChild(sourcePopEl);
     winEl.appendChild(chapterPopEl);
+    winEl.appendChild(opacityPopEl);
     installDrag();
+    applyVisual();
     listen(winEl, "mouseenter", () => {
       runtime.hover = true;
       wake();
@@ -3395,17 +3419,18 @@ function createEngine(api) {
       if (!button) return;
       const act = button.dataset.act;
       if (act === "autoscroll") setAutoScroll(!state.settings.autoScroll);
+      else if (act === "opacity") toggleOpacityPopover();
       else if (act === "prevChapter") prevSegment();
       else if (act === "nextChapter") nextSegment();
       else if (act === "chapters") toggleChapterPopover();
       else if (act === "switchSource") toggleSourcePopover();
-      else if (act === "panel") openPluginPanel();
       else if (act === "close") hideWindow();
     });
     listen(sourcePopEl, "click", onSourcePopClick);
     listen(chapterPopEl, "click", onChapterPopClick);
     listen(chapterPopEl, "input", onChapterPopInput);
     listen(chapterPopEl, "keydown", onChapterPopKeyDown);
+    listen(opacityPopEl, "input", onOpacityPopInput);
     listen(
       document,
       "mousedown",
@@ -3419,11 +3444,15 @@ function createEngine(api) {
           const button = target && target.closest ? target.closest('button[data-act="chapters"]') : null;
           if (!button) closeChapterPopover();
         }
+        if (opacityPopEl && !opacityPopEl.hidden && !opacityPopEl.contains(target)) {
+          const button = target && target.closest ? target.closest('button[data-act="opacity"]') : null;
+          if (!button) closeOpacityPopover();
+        }
       },
       true
     );
     listen(bodyEl, "scroll", onBodyScroll, { passive: true });
-    listen(bodyEl, "wheel", onWheel, { passive: false });
+    listen(winEl, "wheel", onWheel, { passive: false });
     listen(document, "keydown", onKeyDown);
     listen(document, "keydown", onRecordKeyDown, true);
     listen(document, "mousedown", onDocumentMouseDown, true);
@@ -3459,6 +3488,7 @@ function createEngine(api) {
     contentEl = null;
     progressEl = null;
     resizeEl = null;
+    dragEl = null;
     dotEl = null;
     sourcePopEl = null;
     sourcePopTitleEl = null;
@@ -3472,6 +3502,10 @@ function createEngine(api) {
     chapterPopListEl = null;
     chapterPopQuery = "";
     chapterJumpPending = false;
+    opacityBtn = null;
+    opacityPopEl = null;
+    opacityPopValueEl = null;
+    opacityPopRangeEl = null;
   }
   const panelStore = {
     version: 0,
@@ -3981,6 +4015,7 @@ function createEngine(api) {
     if (disposed || token !== startToken) return;
     recoveryMode = false;
     stateLoaded = true;
+    normalizeWinHeight();
     if (statusText === tr("status.loadFailed")) clearStatus();
     pendingSave = true;
     saveStateNow();
@@ -4799,12 +4834,17 @@ function createEngine(api) {
     const count = Math.max(1, runtime.lineOffsets ? runtime.lineOffsets.length : 1);
     return clamp(Math.round(scrollTop / lineHeightPx()), 0, count - 1);
   }
+  const MIN_WIN_HEIGHT = 140;
+  const MIN_WIN_HEIGHT_NO_BAR = 96;
+  function minWinHeight() {
+    return state.settings.barVisible === false ? MIN_WIN_HEIGHT_NO_BAR : MIN_WIN_HEIGHT;
+  }
   function currentRect() {
     const settings = state.settings;
     const vw = window.innerWidth || 1200;
     const vh = window.innerHeight || 800;
     const w = clamp(settings.width, 220, Math.max(240, vw - 8));
-    const h = clamp(settings.height, 140, Math.max(160, vh - 8));
+    const h = clamp(settings.height, minWinHeight(), Math.max(160, vh - 8));
     let x = typeof settings.x === "number" ? settings.x : vw - w - 28;
     let y = typeof settings.y === "number" ? settings.y : 64;
     x = clamp(x, 4, Math.max(4, vw - 60));
@@ -4841,8 +4881,15 @@ function createEngine(api) {
     const vw = window.innerWidth || 1200;
     const vh = window.innerHeight || 800;
     state.settings.width = Math.round(clamp(w, 220, Math.max(240, vw - 8)));
-    state.settings.height = Math.round(clamp(h, 140, Math.max(160, vh - 8)));
+    state.settings.height = Math.round(clamp(h, minWinHeight(), Math.max(160, vh - 8)));
     applyPosition();
+  }
+  function normalizeWinHeight() {
+    const next = Math.max(state.settings.height, minWinHeight());
+    if (next === state.settings.height) return false;
+    state.settings.height = next;
+    applyPosition();
+    return true;
   }
   const VISUAL_ONLY_SETTING_KEYS = [
     "opacity",
@@ -4877,9 +4924,12 @@ function createEngine(api) {
     winEl.style.setProperty("--snr-opacity", String(clamp(settings.opacity, 0.05, 1)));
     winEl.style.setProperty("--snr-sleep-opacity", String(clamp(settings.sleepOpacity, 0.01, 1)));
     winEl.style.setProperty("--snr-font", FONT_STACKS[settings.font] || FONT_STACKS.default);
+    winEl.classList.toggle("is-bar-hidden", settings.barVisible === false);
     contentEl.classList.toggle("indent", !!settings.indent);
     autoBtn.innerHTML = svgIcon(settings.autoScroll ? "pause" : "play", 14);
     autoBtn.classList.toggle("active", !!settings.autoScroll);
+    if (opacityPopEl && !opacityPopEl.hidden) syncOpacityPopValue();
+    syncOpacityButton();
     syncSleepClasses();
   }
   function applyAll() {
@@ -4951,6 +5001,7 @@ function createEngine(api) {
   function hideWindow(silent) {
     closeSourcePopover();
     closeChapterPopover();
+    closeOpacityPopover();
     if (runtime.current && winVisible()) runtime.pendingLine = lineIndexAt(bodyEl.scrollTop);
     state.settings.winVisible = false;
     if (!winEl) return;
@@ -4961,6 +5012,44 @@ function createEngine(api) {
       saveStateNow();
       panelStore.notify("shell");
     }
+  }
+  function syncOpacityPopValue() {
+    if (!opacityPopRangeEl || !opacityPopValueEl) return;
+    const percent = Math.round(clamp(state.settings.opacity, 0.05, 1) * 100);
+    const next = String(percent);
+    if (opacityPopRangeEl.value !== next) opacityPopRangeEl.value = next;
+    opacityPopValueEl.textContent = percent + "%";
+  }
+  function syncOpacityButton() {
+    if (!opacityBtn) return;
+    const open = !!opacityPopEl && !opacityPopEl.hidden;
+    opacityBtn.classList.toggle("active", open);
+    if (winEl) winEl.classList.toggle("is-opacity-open", open);
+    opacityBtn.title = tr("settings.opacity") + " " + Math.round(clamp(state.settings.opacity, 0.05, 1) * 100) + "%";
+  }
+  function closeOpacityPopover() {
+    if (!opacityPopEl || opacityPopEl.hidden) return;
+    opacityPopEl.hidden = true;
+    syncOpacityButton();
+  }
+  function toggleOpacityPopover() {
+    if (!opacityPopEl) return;
+    if (!opacityPopEl.hidden) {
+      closeOpacityPopover();
+      return;
+    }
+    closeSourcePopover();
+    closeChapterPopover();
+    syncOpacityPopValue();
+    opacityPopEl.hidden = false;
+    syncOpacityButton();
+    wake();
+  }
+  function onOpacityPopInput(e) {
+    if (e.target !== opacityPopRangeEl) return;
+    const percent = clamp(Number(e.target.value) || 0, 5, 100);
+    updateSettings({ opacity: percent / 100 });
+    syncOpacityPopValue();
   }
   function setSourcePopStatus(text, level) {
     if (!sourcePopStatusEl) return;
@@ -5039,6 +5128,7 @@ function createEngine(api) {
       return;
     }
     closeChapterPopover();
+    closeOpacityPopover();
     sourcePopEl.hidden = false;
     renderSourcePopover();
     wake();
@@ -5191,6 +5281,7 @@ function createEngine(api) {
       return;
     }
     closeSourcePopover();
+    closeOpacityPopover();
     clearChapterPopoverDebounce();
     chapterPopQuery = "";
     if (chapterPopSearchEl) chapterPopSearchEl.value = "";
@@ -6507,6 +6598,9 @@ function createEngine(api) {
             format: (v) => v + "%",
             onChange: (v) => updateSettings({ opacity: v / 100 })
           }),
+          // 不透明度除了本滑杆，还能在悬浮窗上用 Alt+滚轮即时调整；提示放在滑杆旁，
+          // 用户想调不透明度时就在眼前（快捷键页的那条提示太远，实际没人会找到）。
+          h("div", { className: "nr-hint", key: "opacityHint" }, tr("settings.opacityHint")),
           segRow(
             tr("settings.sleepOnLeave"),
             [
@@ -6541,14 +6635,21 @@ function createEngine(api) {
             format: (v) => v + " px",
             onChange: (v) => updateSettings({ width: v })
           }),
+          // 下限与窗口渲染同源（顶栏可见 140 / 隐藏 96）：存档高度可能来自另一种顶栏状态，
+          // 这里再夹一次，保证滑杆位置与右侧数字和窗口实际高度一致。
           slider(tr("settings.height"), {
-            min: 140,
+            min: minWinHeight(),
             max: 1200,
             step: 10,
-            get: () => Math.round(settings.height),
+            get: () => Math.max(Math.round(settings.height), minWinHeight()),
             format: (v) => v + " px",
             onChange: (v) => updateSettings({ height: v })
           }),
+          checkRow(
+            tr("settings.bar"),
+            () => settings.barVisible,
+            (v) => updateSettings({ barVisible: v })
+          ),
           h("div", { className: "nr-hint", key: "hint" }, tr("win.hint"))
         ]),
         sec(tr("settings.appearance"), [
@@ -7072,6 +7173,11 @@ function createEngine(api) {
     const visualOnly = Object.keys(patch).every((key) => VISUAL_ONLY_SETTING_KEYS.indexOf(key) !== -1);
     if (visualOnly) applyVisual();
     else applyAll();
+    if (Object.prototype.hasOwnProperty.call(patch, "barVisible")) {
+      const vh = window.innerHeight || 800;
+      state.settings.height = Math.round(clamp(state.settings.height, minWinHeight(), Math.max(160, vh - 8)));
+      applyPosition();
+    }
     if (Object.prototype.hasOwnProperty.call(patch, "winVisible")) {
       if (patch.winVisible) showWindow();
       else hideWindow(true);
@@ -7095,8 +7201,9 @@ function createEngine(api) {
     runtime.current = null;
     openBook(meta.id);
   }
-  function installDrag() {
-    barEl.addEventListener("mousedown", (e) => {
+  function bindWindowDrag(handle) {
+    if (!handle) return;
+    handle.addEventListener("mousedown", (e) => {
       if (e.button !== 0) return;
       if (e.target && e.target.closest && e.target.closest("button")) return;
       const rect = winEl.getBoundingClientRect();
@@ -7120,6 +7227,10 @@ function createEngine(api) {
       document.addEventListener("mouseup", onUp);
       e.preventDefault();
     });
+  }
+  function installDrag() {
+    bindWindowDrag(barEl);
+    bindWindowDrag(dragEl);
     resizeEl.addEventListener("mousedown", (e) => {
       if (e.button !== 0) return;
       const rect = winEl.getBoundingClientRect();
@@ -7325,6 +7436,7 @@ function createEngine(api) {
       return;
     }
     if (!runtime.current) return;
+    if (!bodyEl || !bodyEl.contains(e.target)) return;
     cancelSnapAnim();
     cancelSegmentAnchor();
     if (e.ctrlKey || e.metaKey || e.shiftKey) return;
@@ -7423,6 +7535,7 @@ function createEngine(api) {
     }
     await loadSources();
     if (disposed || token !== startToken) return;
+    if (normalizeWinHeight()) saveStateSoon();
     applyAll();
     refreshPanel();
     if (state.currentBookId) {

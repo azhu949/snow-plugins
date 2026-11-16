@@ -638,6 +638,13 @@
   font-family: var(--snr-font, system-ui, sans-serif);
 }
 
+/* 不透明度弹层打开期间抬升窗口不透明度下限：弹层是窗口的子节点，会整体继承
+   --snr-opacity，低不透明度下滑杆与百分比同样看不清，无法就地调回去。
+   特异性低于休眠态规则（多一个 class），休眠淡出 / 隐藏仍按原规则生效。 */
+#snow-novel-reader-window.snr-win.is-opacity-open {
+  opacity: max(var(--snr-opacity, 1), 0.6);
+}
+
 #snow-novel-reader-window.snr-win.is-sleeping.mode-fade {
   opacity: var(--snr-sleep-opacity, 0.06);
 }
@@ -645,6 +652,96 @@
 #snow-novel-reader-window.snr-win.is-sleeping.mode-hide {
   opacity: 0;
   pointer-events: none;
+}
+
+/* 顶栏隐藏：去掉顶部栏，最小高度同步降低（数值与 create-engine.js 的 MIN_WIN_HEIGHT_NO_BAR 一致） */
+#snow-novel-reader-window.snr-win.is-bar-hidden {
+  min-height: 96px;
+}
+
+#snow-novel-reader-window.snr-win.is-bar-hidden .snr-bar {
+  display: none;
+}
+
+/* 顶栏隐藏时的窗口拖拽带：只覆盖正文上方的 10px 留白（.snr-body 的上边距），不遮挡文字 */
+.snr-drag {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 10px;
+  display: none;
+  cursor: grab;
+}
+
+#snow-novel-reader-window.snr-win.is-bar-hidden .snr-drag {
+  display: block;
+}
+
+.snr-drag:active {
+  cursor: grabbing;
+}
+
+/* 顶栏的不透明度弹层：点 droplet 图标弹出，滑杆与 Alt+滚轮共用同一设置 */
+.snr-opacity-pop {
+  position: absolute;
+  top: 46px;
+  right: 6px;
+  z-index: 4;
+  width: 180px;
+  padding: 8px 10px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  background: var(--snr-bg, #ffffff);
+  color: var(--snr-text, #23262b);
+  border: 1px solid var(--snr-border, rgba(0, 0, 0, 0.12));
+  border-radius: 9px;
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.3);
+}
+
+.snr-opacity-pop[hidden] {
+  display: none;
+}
+
+.snr-opacity-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 11px;
+}
+
+.snr-opacity-value {
+  color: var(--snr-sub, #7a8290);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 滑杆：轨道与滑块取主题色，四种阅读主题下都能看清 */
+.snr-opacity-range {
+  width: 100%;
+  height: 14px;
+  margin: 0;
+  appearance: none;
+  -webkit-appearance: none;
+  background: transparent;
+  cursor: pointer;
+}
+
+.snr-opacity-range::-webkit-slider-runnable-track {
+  height: 3px;
+  border-radius: 2px;
+  background: var(--snr-border, rgba(0, 0, 0, 0.12));
+}
+
+.snr-opacity-range::-webkit-slider-thumb {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 12px;
+  height: 12px;
+  margin-top: -4.5px;
+  border-radius: 50%;
+  background: var(--snr-accent, #4f8cff);
 }
 
 .snr-bar {
