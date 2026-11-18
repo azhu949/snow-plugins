@@ -264,6 +264,7 @@ var ROUTES = {
   suggest: "/search/suggest",
   hotSearch: "/search/hot",
   series: "/series",
+  seasons: "/seasons",
   episodes: "/episodes",
   playback: "/playback",
   cover: "/cover",
@@ -281,6 +282,8 @@ var LIMITS = {
   /** 分集翻页保护：异常 has_more 不会把请求拖死。 */
   episodesMaxPages: 8,
   episodesMaxItems: 2e3,
+  /** 多季剧最多返回多少季。 */
+  seasonsMaxItems: 64,
   /** 封面单张 3 MB（面板 5 MB 上限内，留出 base64 膨胀空间），磁盘保留 300 张。 */
   coverMaxBytes: 3 * 1024 * 1024,
   coverKeep: 300,
@@ -2761,6 +2764,8 @@ function createSdk({
     suggest: (prefix) => execute("suggest", "suggest", "suggest", [String(prefix ?? "")]),
     hotSearch: () => execute("hotSearch", "hotSearch", "hotSearch", []),
     getSeries: (seriesId) => execute("getSeries", "getSeries", "getSeries", [String(seriesId)]),
+    /** 多季剧的全部季；单季剧上游以 ALBUM_UNAVAILABLE 表示没有其他季。 */
+    seasons: (seriesId) => execute("seasons", "seasons", "seasons", [String(seriesId)]),
     listEpisodes: (seriesId, options = {}) => execute("listEpisodes", "listEpisodes", "listEpisodes", [String(seriesId), compactOptions(options)]),
     /**
      * 同一 episodeId 的并发调用只跑一次；返回原始结果（含 streams 与 contentKey）。
@@ -3482,7 +3487,13 @@ var toSeriesDetail = (series) => {
     if (text && !tags.includes(text) && tags.length < 12) tags.push(text.slice(0, 24));
   };
   if (series?.category) pushTag(series.category);
+  let seasonLabel = null;
   for (const row of rows) {
+    if (row?.kind === 0) {
+      const text = String(row?.text ?? "").trim();
+      if (text && !seasonLabel) seasonLabel = truncateChars(text, 24);
+      continue;
+    }
     if (![3, 9, 40].includes(row?.kind)) continue;
     for (const part of String(row?.text ?? "").split(/[,，、/|]+/)) pushTag(part);
   }
@@ -3499,9 +3510,36 @@ var toSeriesDetail = (series) => {
     rightText: series?.right_text ?? null,
     isMultiSeason: series?.is_multi_season === true,
     seasonIndex: Number.isFinite(series?.season_index) ? series.season_index : null,
+    seasonLabel,
+    albumId: typeof series?.related_album_id === "string" && series.related_album_id ? series.related_album_id : null,
     heat: toCount(series?.heat),
     playCount: toCount(series?.play_count),
     subtitles: Array.isArray(series?.subtitles) ? series.subtitles.slice(0, 6).map(String) : []
+  };
+};
+var toSeasonList = (seriesId, album) => {
+  const seen = /* @__PURE__ */ new Set();
+  const seasons = [];
+  for (const raw of Array.isArray(album?.seasons) ? album.seasons : []) {
+    const id = String(raw?.series_id ?? "");
+    if (!ID_PATTERN.test(id) || seen.has(id)) continue;
+    seen.add(id);
+    seasons.push({
+      id,
+      index: Number.isFinite(raw?.index) ? raw.index : null,
+      title: truncateChars(raw?.title, 80),
+      count: toCount(raw?.episode_count)
+    });
+    if (seasons.length >= LIMITS.seasonsMaxItems) break;
+  }
+  const rank = (season) => Number.isFinite(season.index) ? season.index : Number.MAX_SAFE_INTEGER;
+  seasons.sort((a, b) => rank(a) - rank(b));
+  return {
+    seriesId,
+    albumId: typeof album?.id === "string" ? album.id : null,
+    title: truncateChars(album?.title, 160),
+    count: Number.isFinite(album?.season_count) ? album.season_count : seasons.length,
+    seasons
   };
 };
 var compactEpisodes = (seriesId, episodes, { cursor = null, hasMore = false } = {}) => {
@@ -3597,6 +3635,8 @@ function createRequestHandler({
   if (!cache) throw new TypeError("createRequestHandler 需要 cache");
   const seriesCache = createTtlCache({ ttlMs: LIMITS.seriesCacheTtlMs, max: LIMITS.seriesCacheMax });
   const seriesInflight = /* @__PURE__ */ new Map();
+  const seasonsCache = createTtlCache({ ttlMs: LIMITS.seriesCacheTtlMs, max: LIMITS.seriesCacheMax });
+  const seasonsInflight = /* @__PURE__ */ new Map();
   const covers = createCoverResolver({ cache, log });
   const encodeBinary = (bytes, label) => {
     if (base64Length(bytes.length) > MEDIA_LIMITS.maxBase64Bytes) {
@@ -3706,6 +3746,37 @@ function createRequestHandler({
       const id = readId(query, "id");
       const series = await loadSeries(id);
       return { status: 200, payload: toSeriesDetail(series) };
+    },
+    /** 多季剧的其他季。单季剧、匿名读不到的合集都返回空列表，不阻断详情页。 */
+    seasons: async ({ query }) => {
+      const seriesId = readId(query, "seriesId");
+      if (typeof sdk.seasons !== "function") return { status: 200, payload: toSeasonList(seriesId, null) };
+      const cached = seasonsCache.get(seriesId);
+      if (cached) return { status: 200, payload: cached };
+      const payload = await withSingleFlight(seasonsInflight, seriesId, async () => {
+        try {
+          const result = toSeasonList(seriesId, await sdk.seasons(seriesId));
+          seasonsCache.set(seriesId, result);
+          return result;
+        } catch (error) {
+          const mapped = mapSdkError(error);
+          const empty = toSeasonList(seriesId, null);
+          if (mapped.code === "ALBUM_UNAVAILABLE" || mapped.code === "CONTENT_UNAVAILABLE") {
+            log(`[seasons] ${seriesId} 无季信息：${mapped.code} ${mapped.rawMessage}`);
+            seasonsCache.set(seriesId, empty);
+            return empty;
+          }
+          log(`[seasons] ${seriesId} 读取失败：${mapped.code} ${mapped.rawMessage}`);
+          return {
+            ...empty,
+            partial: true,
+            errorCode: mapped.code,
+            retryable: mapped.retryable === true,
+            ...mapped.retryAfterMs ? { retryAfterMs: mapped.retryAfterMs } : {}
+          };
+        }
+      });
+      return { status: 200, payload };
     },
     episodes: async ({ query }) => {
       const seriesId = readId(query, "seriesId");
@@ -3872,6 +3943,7 @@ function createRequestHandler({
     [ROUTES.suggest, { method: "GET", handler: handles.suggest }],
     [ROUTES.hotSearch, { method: "GET", handler: handles.hotSearch }],
     [ROUTES.series, { method: "GET", handler: handles.series }],
+    [ROUTES.seasons, { method: "GET", handler: handles.seasons }],
     [ROUTES.episodes, { method: "GET", handler: handles.episodes }],
     [ROUTES.playback, { method: "GET", handler: handles.playback }],
     [ROUTES.cover, { method: "GET", handler: handles.cover }],

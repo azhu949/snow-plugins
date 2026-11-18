@@ -22,6 +22,7 @@ export const ROUTES = {
   suggest: "/search/suggest",
   hotSearch: "/search/hot",
   series: "/series",
+  seasons: "/seasons",
   episodes: "/episodes",
   playback: "/playback",
   cover: "/cover",
@@ -40,6 +41,8 @@ export const LIMITS = {
   /** 分集翻页保护：异常 has_more 不会把请求拖死。 */
   episodesMaxPages: 8,
   episodesMaxItems: 2000,
+  /** 多季剧最多返回多少季。 */
+  seasonsMaxItems: 64,
   /** 封面单张 3 MB（面板 5 MB 上限内，留出 base64 膨胀空间），磁盘保留 300 张。 */
   coverMaxBytes: 3 * 1024 * 1024,
   coverKeep: 300,

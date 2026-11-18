@@ -1265,6 +1265,47 @@
   -webkit-line-clamp: 4;
 }
 
+.hg-season-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+
+.hg-season-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+
+.hg-season {
+  max-width: 100%;
+  padding: 4px 10px;
+  overflow: hidden;
+  border: 1px solid var(--hg-border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--hg-sub);
+  font-size: 10.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.hg-season:hover:not(:disabled) {
+  background: var(--hg-hover);
+}
+
+.hg-season.is-current {
+  border-color: var(--hg-primary);
+  background: rgba(59, 130, 246, 0.1);
+  background: color-mix(in srgb, var(--hg-primary) 10%, transparent);
+  color: var(--hg-primary);
+  font-weight: 600;
+  cursor: default;
+}
+
 .hg-episode-picker {
   display: flex;
   flex-direction: column;

@@ -22,6 +22,7 @@ export const PANEL_ROUTES = {
   suggest: "/search/suggest",
   hotSearch: "/search/hot",
   series: "/series",
+  seasons: "/seasons",
   episodes: "/episodes",
   playback: "/playback",
   cover: "/cover",
@@ -356,6 +357,12 @@ export function createRpc(api, { log = () => {} } = {}) {
     getSeries: (id) =>
       call(PANEL_ROUTES.series, {
         query: { id },
+        timeoutMs: TIMEOUTS.detail,
+      }),
+    /** 多季剧的其他季；后台读不到时返回空列表。 */
+    getSeasons: (seriesId) =>
+      call(PANEL_ROUTES.seasons, {
+        query: { seriesId },
         timeoutMs: TIMEOUTS.detail,
       }),
     getEpisodes: (seriesId) =>

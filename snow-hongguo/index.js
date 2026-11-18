@@ -68,6 +68,9 @@ var zh_CN_default = {
   "search.loadingMore": "正在加载更多…",
   "search.clearInput": "清空输入",
   "detail.episodes": "选集",
+  "detail.seasons": "季数",
+  "detail.seasonLabel": "第 {{index}} 季",
+  "detail.seasonCount": "共 {{count}} 季",
   "detail.episodeGroups": "集数分组",
   "detail.episodeRange": "第 {{start}}–{{end}} 集",
   "detail.backToCurrent": "回到当前集",
@@ -86,6 +89,7 @@ var zh_CN_default = {
   "detail.unplayable": "该集暂不可播放",
   "detail.recordFailed": "写入观看历史失败",
   "detail.episodesFailed": "分集加载失败",
+  "detail.seasonsFailed": "季列表加载失败",
   "player.region": "视频播放器",
   "player.loading": "正在加载视频…",
   "player.buffering": "缓冲中…",
@@ -286,6 +290,9 @@ var zh_TW_default = {
   "search.loadingMore": "正在載入更多…",
   "search.clearInput": "清空輸入",
   "detail.episodes": "選集",
+  "detail.seasons": "季數",
+  "detail.seasonLabel": "第 {{index}} 季",
+  "detail.seasonCount": "共 {{count}} 季",
   "detail.episodeGroups": "集數分組",
   "detail.episodeRange": "第 {{start}}–{{end}} 集",
   "detail.backToCurrent": "回到目前集數",
@@ -304,6 +311,7 @@ var zh_TW_default = {
   "detail.unplayable": "該集暫不可播放",
   "detail.recordFailed": "寫入觀看歷史失敗",
   "detail.episodesFailed": "分集載入失敗",
+  "detail.seasonsFailed": "季列表載入失敗",
   "player.region": "影片播放器",
   "player.loading": "正在載入影片…",
   "player.buffering": "緩衝中…",
@@ -504,6 +512,9 @@ var en_default = {
   "search.loadingMore": "Loading more…",
   "search.clearInput": "Clear input",
   "detail.episodes": "Episodes",
+  "detail.seasons": "Seasons",
+  "detail.seasonLabel": "Season {{index}}",
+  "detail.seasonCount": "{{count}} seasons",
   "detail.episodeGroups": "Episode groups",
   "detail.episodeRange": "Episodes {{start}}–{{end}}",
   "detail.backToCurrent": "Back to current",
@@ -522,6 +533,7 @@ var en_default = {
   "detail.unplayable": "This episode is not playable",
   "detail.recordFailed": "Failed to save watch history",
   "detail.episodesFailed": "Failed to load episodes",
+  "detail.seasonsFailed": "Failed to load seasons",
   "player.region": "Video player",
   "player.loading": "Loading video…",
   "player.buffering": "Buffering…",
@@ -727,6 +739,8 @@ var LIMITS = {
   /** 分集翻页保护：异常 has_more 不会把请求拖死。 */
   episodesMaxPages: 8,
   episodesMaxItems: 2e3,
+  /** 多季剧最多返回多少季。 */
+  seasonsMaxItems: 64,
   /** 封面单张 3 MB（面板 5 MB 上限内，留出 base64 膨胀空间），磁盘保留 300 张。 */
   coverMaxBytes: 3 * 1024 * 1024,
   coverKeep: 300,
@@ -754,6 +768,7 @@ var PANEL_ROUTES = {
   suggest: "/search/suggest",
   hotSearch: "/search/hot",
   series: "/series",
+  seasons: "/seasons",
   episodes: "/episodes",
   playback: "/playback",
   cover: "/cover",
@@ -1045,6 +1060,11 @@ function createRpc(api, { log = () => {
     hotSearch: () => call(PANEL_ROUTES.hotSearch, { timeoutMs: TIMEOUTS.list }),
     getSeries: (id) => call(PANEL_ROUTES.series, {
       query: { id },
+      timeoutMs: TIMEOUTS.detail
+    }),
+    /** 多季剧的其他季；后台读不到时返回空列表。 */
+    getSeasons: (seriesId) => call(PANEL_ROUTES.seasons, {
+      query: { seriesId },
       timeoutMs: TIMEOUTS.detail
     }),
     getEpisodes: (seriesId) => call(PANEL_ROUTES.episodes, {
@@ -7590,6 +7610,11 @@ var normalizeEpisodes = (page) => {
   });
   return list;
 };
+var normalizeSeasons = (album) => {
+  const rows = Array.isArray(album?.seasons) ? album.seasons : [];
+  return rows.filter((row) => row && typeof row.id === "string" && row.id);
+};
+var SEASONS_RETRY_CODES = /* @__PURE__ */ new Set(["RATE_LIMITED", "TRANSPORT"]);
 function DetailPage({ ctx, seed, onBack }) {
   const React = getReact();
   const t = ctx.t;
@@ -7601,6 +7626,8 @@ function DetailPage({ ctx, seed, onBack }) {
     error: null,
     series: null,
     episodes: [],
+    seasons: [],
+    seasonsError: null,
     episodesError: null,
     truncated: false,
     total: 0
@@ -7621,6 +7648,8 @@ function DetailPage({ ctx, seed, onBack }) {
   const progressRef = React.useRef(/* @__PURE__ */ new Map());
   const watchingCheckRef = React.useRef(null);
   const lastSaveRef = React.useRef(0);
+  const logRef = React.useRef(ctx.log);
+  logRef.current = ctx.log;
   const pendingSaveRef = React.useRef(null);
   const flushTimerRef = React.useRef(0);
   const persistRef = React.useRef(null);
@@ -7644,10 +7673,49 @@ function DetailPage({ ctx, seed, onBack }) {
   React.useEffect(() => {
     selectedRef.current = selectedIndex;
   }, [selectedIndex]);
+  const fetchSeasons = React.useCallback(
+    async (seq, allowRetry) => {
+      if (typeof rpc.getSeasons !== "function") return;
+      for (let attempt = 0; ; attempt += 1) {
+        let album = null;
+        let failure = null;
+        try {
+          album = await rpc.getSeasons(seriesId);
+        } catch (error) {
+          failure = error;
+        }
+        if (seq !== seqRef.current || !aliveRef.current) return;
+        if (!failure && album?.partial === true) {
+          failure = {
+            code: String(album.errorCode || "UNKNOWN"),
+            retryAfterMs: Number(album.retryAfterMs) || 0
+          };
+        }
+        if (failure && allowRetry && attempt === 0 && SEASONS_RETRY_CODES.has(failure.code)) {
+          const wait = Math.min(Math.max(Number(failure.retryAfterMs) || 0, 600), 3e3);
+          await new Promise((resolve) => setTimeout(resolve, wait));
+          if (seq !== seqRef.current || !aliveRef.current) return;
+          continue;
+        }
+        if (failure) {
+          logRef.current?.("[detail] 读取季列表失败", String(failure?.message || failure?.code || failure));
+          setState((prev) => ({ ...prev, seasons: [], seasonsError: failure }));
+          return;
+        }
+        const list = normalizeSeasons(album);
+        setState((prev) => ({ ...prev, seasons: list.length > 1 ? list : [], seasonsError: null }));
+        return;
+      }
+    },
+    [rpc, seriesId]
+  );
+  const retrySeasons = React.useCallback(() => {
+    void fetchSeasons(seqRef.current, false);
+  }, [fetchSeasons]);
   const load = React.useCallback(async () => {
     const seq = seqRef.current + 1;
     seqRef.current = seq;
-    setState((prev) => ({ ...prev, status: "loading", error: null }));
+    setState((prev) => ({ ...prev, status: "loading", error: null, seasons: [], seasonsError: null }));
     if (!seriesId) {
       const error = new Error(t("detail.missingId"));
       error.code = "MISSING_ID";
@@ -7656,6 +7724,8 @@ function DetailPage({ ctx, seed, onBack }) {
         error,
         series: null,
         episodes: [],
+        seasons: [],
+        seasonsError: null,
         episodesError: null,
         truncated: false,
         total: 0
@@ -7685,6 +7755,8 @@ function DetailPage({ ctx, seed, onBack }) {
         error: null,
         series: series2,
         episodes: episodes2,
+        seasons: [],
+        seasonsError: null,
         episodesError: episodesResult.ok ? null : episodesResult.error,
         truncated: episodesResult.ok ? episodesResult.page?.truncated === true : false,
         total: episodesResult.ok ? Number(episodesResult.page?.total) || episodes2.length : 0
@@ -7692,6 +7764,8 @@ function DetailPage({ ctx, seed, onBack }) {
       setSelectedIndex(resumed);
       setPositionMs(position);
       setHistoryEntry(entry);
+      const wantsSeasons = typeof rpc.getSeasons === "function" && (series2?.isMultiSeason === true || Boolean(series2?.albumId) || Boolean(series2?.seasonLabel) || Number.isFinite(series2?.seasonIndex) && series2.seasonIndex > 1);
+      if (wantsSeasons) void fetchSeasons(seq, true);
     } catch (error) {
       if (seq !== seqRef.current || !aliveRef.current) return;
       setState({
@@ -7699,12 +7773,14 @@ function DetailPage({ ctx, seed, onBack }) {
         error,
         series: null,
         episodes: [],
+        seasons: [],
+        seasonsError: null,
         episodesError: null,
         truncated: false,
         total: 0
       });
     }
-  }, [api, rpc, seriesId, t]);
+  }, [api, fetchSeasons, rpc, seriesId, t]);
   React.useEffect(() => {
     void load();
   }, [load]);
@@ -7873,7 +7949,16 @@ function DetailPage({ ctx, seed, onBack }) {
   else if (episodes.length > 0) meta.push(t("unit.episodes", { count: episodes.length }));
   if (series?.category) meta.push(String(series.category));
   if (series?.rightText) meta.push(String(series.rightText));
+  if (series?.seasonLabel) meta.push(String(series.seasonLabel));
   const topTitle = series?.title || seed?.title || t("detail.loading");
+  const seasons = state.seasons;
+  const showSeasons = seasons.length > 1;
+  const switchSeason = (season) => {
+    if (!season?.id || season.id === seriesId) return;
+    if (typeof ctx.openSeries !== "function") return;
+    ctx.openSeries({ id: season.id, title: season.title || "" });
+  };
+  const seasonLabel = (season) => Number.isFinite(season.index) ? t("detail.seasonLabel", { index: season.index }) : season.title || t("unit.untitled");
   return h(
     "div",
     { className: "hg-page hg-detail" },
@@ -7939,6 +8024,55 @@ function DetailPage({ ctx, seed, onBack }) {
             ) : null
           )
         ),
+        state.seasonsError ? h(
+          "div",
+          { className: "hg-inline-error" },
+          h("span", null, t("detail.seasonsFailed")),
+          h(
+            "button",
+            {
+              type: "button",
+              className: "hg-linkbtn",
+              onClick: () => void retrySeasons()
+            },
+            t("action.retry")
+          )
+        ) : null,
+        showSeasons ? h(
+          "div",
+          { className: "hg-season-bar" },
+          h(
+            "div",
+            { className: "hg-sec-head" },
+            h("span", null, t("detail.seasons")),
+            h("span", { className: "hg-count" }, t("detail.seasonCount", { count: seasons.length }))
+          ),
+          h(
+            "div",
+            { className: "hg-season-nav", role: "group", "aria-label": t("detail.seasons") },
+            seasons.map((season) => {
+              const active = season.id === seriesId;
+              const label = seasonLabel(season);
+              const extra = [];
+              if (season.title && season.title !== label) extra.push(season.title);
+              if (Number.isFinite(season.count)) extra.push(t("unit.episodes", { count: season.count }));
+              return h(
+                "button",
+                {
+                  key: season.id,
+                  type: "button",
+                  className: `hg-season${active ? " is-current" : ""}`,
+                  "aria-pressed": active,
+                  "aria-current": active ? "true" : void 0,
+                  disabled: active,
+                  title: [label, ...extra].join(" · "),
+                  onClick: () => switchSeason(season)
+                },
+                label
+              );
+            })
+          )
+        ) : null,
         h(WatchlistControls, { ctx, series, hasProgress: historyEntry?.episodes?.some((entry) => entry.positionMs > 0) }),
         h(
           "button",

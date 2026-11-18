@@ -60,7 +60,14 @@ export const toSeriesDetail = (series) => {
     if (text && !tags.includes(text) && tags.length < 12) tags.push(text.slice(0, 24));
   };
   if (series?.category) pushTag(series.category);
+  // kind 0 是详情页的「第 N 季」行；它不进标签，单独给面板标明当前季。
+  let seasonLabel = null;
   for (const row of rows) {
+    if (row?.kind === 0) {
+      const text = String(row?.text ?? "").trim();
+      if (text && !seasonLabel) seasonLabel = truncateChars(text, 24);
+      continue;
+    }
     if (![3, 9, 40].includes(row?.kind)) continue;
     for (const part of String(row?.text ?? "").split(/[,，、/|]+/)) pushTag(part);
   }
@@ -77,9 +84,42 @@ export const toSeriesDetail = (series) => {
     rightText: series?.right_text ?? null,
     isMultiSeason: series?.is_multi_season === true,
     seasonIndex: Number.isFinite(series?.season_index) ? series.season_index : null,
+    seasonLabel,
+    albumId: typeof series?.related_album_id === "string" && series.related_album_id ? series.related_album_id : null,
     heat: toCount(series?.heat),
     playCount: toCount(series?.play_count),
     subtitles: Array.isArray(series?.subtitles) ? series.subtitles.slice(0, 6).map(String) : [],
+  };
+};
+
+/**
+ * 季列表：只给面板季序号、标题与集数，用于详情页的季切换。
+ * 上游 album.seasons 的每一项是一整部剧（独立的 series_id）。
+ */
+export const toSeasonList = (seriesId, album) => {
+  const seen = new Set();
+  const seasons = [];
+  for (const raw of Array.isArray(album?.seasons) ? album.seasons : []) {
+    const id = String(raw?.series_id ?? "");
+    if (!ID_PATTERN.test(id) || seen.has(id)) continue;
+    seen.add(id);
+    seasons.push({
+      id,
+      index: Number.isFinite(raw?.index) ? raw.index : null,
+      title: truncateChars(raw?.title, 80),
+      count: toCount(raw?.episode_count),
+    });
+    if (seasons.length >= LIMITS.seasonsMaxItems) break;
+  }
+  // 季序号可能缺失：有编号的按编号升序，其余保持上游顺序排在后面。
+  const rank = (season) => (Number.isFinite(season.index) ? season.index : Number.MAX_SAFE_INTEGER);
+  seasons.sort((a, b) => rank(a) - rank(b));
+  return {
+    seriesId,
+    albumId: typeof album?.id === "string" ? album.id : null,
+    title: truncateChars(album?.title, 160),
+    count: Number.isFinite(album?.season_count) ? album.season_count : seasons.length,
+    seasons,
   };
 };
 
@@ -187,6 +227,9 @@ export function createRequestHandler({
 
   const seriesCache = createTtlCache({ ttlMs: LIMITS.seriesCacheTtlMs, max: LIMITS.seriesCacheMax });
   const seriesInflight = new Map();
+  // 季列表同样短时缓存：来回切季不必每次都打上游。
+  const seasonsCache = createTtlCache({ ttlMs: LIMITS.seriesCacheTtlMs, max: LIMITS.seriesCacheMax });
+  const seasonsInflight = new Map();
   const covers = createCoverResolver({ cache, log });
 
   /** 面板侧 api.net.fetch 的响应上限是 5MB：base64 超了就是实现错误，直接报错而不是截断。 */
@@ -311,6 +354,43 @@ export function createRequestHandler({
       const id = readId(query, "id");
       const series = await loadSeries(id);
       return { status: 200, payload: toSeriesDetail(series) };
+    },
+
+    /** 多季剧的其他季。单季剧、匿名读不到的合集都返回空列表，不阻断详情页。 */
+    seasons: async ({ query }) => {
+      const seriesId = readId(query, "seriesId");
+      if (typeof sdk.seasons !== "function") return { status: 200, payload: toSeasonList(seriesId, null) };
+      const cached = seasonsCache.get(seriesId);
+      if (cached) return { status: 200, payload: cached };
+      const payload = await withSingleFlight(seasonsInflight, seriesId, async () => {
+        try {
+          const result = toSeasonList(seriesId, await sdk.seasons(seriesId));
+          seasonsCache.set(seriesId, result);
+          return result;
+        } catch (error) {
+          // ALBUM_UNAVAILABLE 的官方语义就是「读不到合集，或这部短剧没有其他季」。
+          // 这类确定结果也缓存，避免同一部单季剧每次打开详情都白跑一次上游。
+          const mapped = mapSdkError(error);
+          const empty = toSeasonList(seriesId, null);
+          if (mapped.code === "ALBUM_UNAVAILABLE" || mapped.code === "CONTENT_UNAVAILABLE") {
+            log(`[seasons] ${seriesId} 无季信息：${mapped.code} ${mapped.rawMessage}`);
+            seasonsCache.set(seriesId, empty);
+            return empty;
+          }
+          // 限流、传输失败等瞬时错误不能当成「没有其他季」：仍是 200 不阻断详情页，
+          // 但带 partial 标记让面板显示重试入口，并且不缓存，重试才能真的回到上游。
+          // 注意不能叫 error：面板 rpc 会把顶层 error 当成失败并丢弃整个响应。
+          log(`[seasons] ${seriesId} 读取失败：${mapped.code} ${mapped.rawMessage}`);
+          return {
+            ...empty,
+            partial: true,
+            errorCode: mapped.code,
+            retryable: mapped.retryable === true,
+            ...(mapped.retryAfterMs ? { retryAfterMs: mapped.retryAfterMs } : {}),
+          };
+        }
+      });
+      return { status: 200, payload };
     },
 
     episodes: async ({ query }) => {
@@ -492,6 +572,7 @@ export function createRequestHandler({
     [ROUTES.suggest, { method: "GET", handler: handles.suggest }],
     [ROUTES.hotSearch, { method: "GET", handler: handles.hotSearch }],
     [ROUTES.series, { method: "GET", handler: handles.series }],
+    [ROUTES.seasons, { method: "GET", handler: handles.seasons }],
     [ROUTES.episodes, { method: "GET", handler: handles.episodes }],
     [ROUTES.playback, { method: "GET", handler: handles.playback }],
     [ROUTES.cover, { method: "GET", handler: handles.cover }],

@@ -30,6 +30,15 @@ const normalizeEpisodes = (page) => {
   return list;
 };
 
+/** 季列表：后台已裁剪，这里只挡住缺 id 的脏数据。 */
+const normalizeSeasons = (album) => {
+  const rows = Array.isArray(album?.seasons) ? album.seasons : [];
+  return rows.filter((row) => row && typeof row.id === "string" && row.id);
+};
+
+/** 这类错误属于瞬时故障：自动补一次请求，避免一次限流就把多季剧退化成单季。 */
+const SEASONS_RETRY_CODES = new Set(["RATE_LIMITED", "TRANSPORT"]);
+
 export function DetailPage({ ctx, seed, onBack }) {
   const React = getReact();
   const t = ctx.t;
@@ -42,6 +51,8 @@ export function DetailPage({ ctx, seed, onBack }) {
     error: null,
     series: null,
     episodes: [],
+    seasons: [],
+    seasonsError: null,
     episodesError: null,
     truncated: false,
     total: 0,
@@ -63,6 +74,9 @@ export function DetailPage({ ctx, seed, onBack }) {
   const progressRef = React.useRef(new Map());
   const watchingCheckRef = React.useRef(null);
   const lastSaveRef = React.useRef(0);
+  // load 不依赖 ctx，日志通过 ref 取，避免 ctx 变化触发重复加载。
+  const logRef = React.useRef(ctx.log);
+  logRef.current = ctx.log;
   // 5 秒节流的尾随补写：暂停 / 关闭面板时把最后一次进度落盘。
   const pendingSaveRef = React.useRef(null);
   const flushTimerRef = React.useRef(0);
@@ -91,10 +105,53 @@ export function DetailPage({ ctx, seed, onBack }) {
     selectedRef.current = selectedIndex;
   }, [selectedIndex]);
 
+  // 季列表失败必须能被看见：瞬时限流/传输错误自动补一次，仍失败则交给页面上的重试入口。
+  const fetchSeasons = React.useCallback(
+    async (seq, allowRetry) => {
+      if (typeof rpc.getSeasons !== "function") return;
+      for (let attempt = 0; ; attempt += 1) {
+        let album = null;
+        let failure = null;
+        try {
+          album = await rpc.getSeasons(seriesId);
+        } catch (error) {
+          failure = error;
+        }
+        if (seq !== seqRef.current || !aliveRef.current) return;
+        // 后台用 partial + errorCode 标记读取失败：仍是 200，数据为空，但不是「没有其他季」。
+        if (!failure && album?.partial === true) {
+          failure = {
+            code: String(album.errorCode || "UNKNOWN"),
+            retryAfterMs: Number(album.retryAfterMs) || 0,
+          };
+        }
+        if (failure && allowRetry && attempt === 0 && SEASONS_RETRY_CODES.has(failure.code)) {
+          const wait = Math.min(Math.max(Number(failure.retryAfterMs) || 0, 600), 3000);
+          await new Promise((resolve) => setTimeout(resolve, wait));
+          if (seq !== seqRef.current || !aliveRef.current) return;
+          continue;
+        }
+        if (failure) {
+          logRef.current?.("[detail] 读取季列表失败", String(failure?.message || failure?.code || failure));
+          setState((prev) => ({ ...prev, seasons: [], seasonsError: failure }));
+          return;
+        }
+        const list = normalizeSeasons(album);
+        setState((prev) => ({ ...prev, seasons: list.length > 1 ? list : [], seasonsError: null }));
+        return;
+      }
+    },
+    [rpc, seriesId]
+  );
+
+  const retrySeasons = React.useCallback(() => {
+    void fetchSeasons(seqRef.current, false);
+  }, [fetchSeasons]);
+
   const load = React.useCallback(async () => {
     const seq = seqRef.current + 1;
     seqRef.current = seq;
-    setState((prev) => ({ ...prev, status: "loading", error: null }));
+    setState((prev) => ({ ...prev, status: "loading", error: null, seasons: [], seasonsError: null }));
 
     if (!seriesId) {
       const error = new Error(t("detail.missingId"));
@@ -104,6 +161,8 @@ export function DetailPage({ ctx, seed, onBack }) {
         error,
         series: null,
         episodes: [],
+        seasons: [],
+        seasonsError: null,
         episodesError: null,
         truncated: false,
         total: 0,
@@ -141,6 +200,8 @@ export function DetailPage({ ctx, seed, onBack }) {
         error: null,
         series,
         episodes,
+        seasons: [],
+        seasonsError: null,
         episodesError: episodesResult.ok ? null : episodesResult.error,
         truncated: episodesResult.ok ? episodesResult.page?.truncated === true : false,
         total: episodesResult.ok ? Number(episodesResult.page?.total) || episodes.length : 0,
@@ -148,6 +209,15 @@ export function DetailPage({ ctx, seed, onBack }) {
       setSelectedIndex(resumed);
       setPositionMs(position);
       setHistoryEntry(entry);
+
+      // 季列表不阻塞首屏：只有明确是多季剧才补查，单季剧不多打一次上游。
+      const wantsSeasons =
+        typeof rpc.getSeasons === "function" &&
+        (series?.isMultiSeason === true ||
+          Boolean(series?.albumId) ||
+          Boolean(series?.seasonLabel) ||
+          (Number.isFinite(series?.seasonIndex) && series.seasonIndex > 1));
+      if (wantsSeasons) void fetchSeasons(seq, true);
     } catch (error) {
       if (seq !== seqRef.current || !aliveRef.current) return;
       setState({
@@ -155,12 +225,14 @@ export function DetailPage({ ctx, seed, onBack }) {
         error,
         series: null,
         episodes: [],
+        seasons: [],
+        seasonsError: null,
         episodesError: null,
         truncated: false,
         total: 0,
       });
     }
-  }, [api, rpc, seriesId, t]);
+  }, [api, fetchSeasons, rpc, seriesId, t]);
 
   React.useEffect(() => {
     void load();
@@ -348,8 +420,22 @@ export function DetailPage({ ctx, seed, onBack }) {
   else if (episodes.length > 0) meta.push(t("unit.episodes", { count: episodes.length }));
   if (series?.category) meta.push(String(series.category));
   if (series?.rightText) meta.push(String(series.rightText));
+  if (series?.seasonLabel) meta.push(String(series.seasonLabel));
 
   const topTitle = series?.title || seed?.title || t("detail.loading");
+
+  // 多季剧：同一部剧的每一季是独立 series_id，切换季等于换一部剧的详情。
+  const seasons = state.seasons;
+  const showSeasons = seasons.length > 1;
+  const switchSeason = (season) => {
+    if (!season?.id || season.id === seriesId) return;
+    if (typeof ctx.openSeries !== "function") return;
+    ctx.openSeries({ id: season.id, title: season.title || "" });
+  };
+  const seasonLabel = (season) =>
+    Number.isFinite(season.index)
+      ? t("detail.seasonLabel", { index: season.index })
+      : season.title || t("unit.untitled");
 
   return h(
     "div",
@@ -425,6 +511,59 @@ export function DetailPage({ ctx, seed, onBack }) {
                   : null
               )
             ),
+            state.seasonsError
+              ? h(
+                  "div",
+                  { className: "hg-inline-error" },
+                  h("span", null, t("detail.seasonsFailed")),
+                  h(
+                    "button",
+                    {
+                      type: "button",
+                      className: "hg-linkbtn",
+                      onClick: () => void retrySeasons(),
+                    },
+                    t("action.retry")
+                  )
+                )
+              : null,
+            showSeasons
+              ? h(
+                  "div",
+                  { className: "hg-season-bar" },
+                  h(
+                    "div",
+                    { className: "hg-sec-head" },
+                    h("span", null, t("detail.seasons")),
+                    h("span", { className: "hg-count" }, t("detail.seasonCount", { count: seasons.length }))
+                  ),
+                  h(
+                    "div",
+                    { className: "hg-season-nav", role: "group", "aria-label": t("detail.seasons") },
+                    seasons.map((season) => {
+                      const active = season.id === seriesId;
+                      const label = seasonLabel(season);
+                      const extra = [];
+                      if (season.title && season.title !== label) extra.push(season.title);
+                      if (Number.isFinite(season.count)) extra.push(t("unit.episodes", { count: season.count }));
+                      return h(
+                        "button",
+                        {
+                          key: season.id,
+                          type: "button",
+                          className: `hg-season${active ? " is-current" : ""}`,
+                          "aria-pressed": active,
+                          "aria-current": active ? "true" : undefined,
+                          disabled: active,
+                          title: [label, ...extra].join(" · "),
+                          onClick: () => switchSeason(season),
+                        },
+                        label
+                      );
+                    })
+                  )
+                )
+              : null,
             h(WatchlistControls, { ctx, series, hasProgress: historyEntry?.episodes?.some((entry) => entry.positionMs > 0) }),
             h(
               "button",

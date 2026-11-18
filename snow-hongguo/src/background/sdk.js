@@ -206,6 +206,9 @@ export function createSdk({
 
     getSeries: (seriesId) => execute("getSeries", "getSeries", "getSeries", [String(seriesId)]),
 
+    /** 多季剧的全部季；单季剧上游以 ALBUM_UNAVAILABLE 表示没有其他季。 */
+    seasons: (seriesId) => execute("seasons", "seasons", "seasons", [String(seriesId)]),
+
     listEpisodes: (seriesId, options = {}) =>
       execute("listEpisodes", "listEpisodes", "listEpisodes", [String(seriesId), compactOptions(options)]),
 
