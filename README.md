@@ -10,6 +10,7 @@ Snow App 插件集合仓库。子目录包含两类插件：面板插件（发�
 | 修复工作台 | `com.snow.fix-bench` | 2.14.1 | 客户端脚本插件（`.user.js`）：聊天输入框工具栏扳手入口 + 居中浮层，完成代码审查 → issue 跟踪 → 批量修复 → 结果清理的闭环；另带窗口顶部可拖动的跨项目执行监控胶囊（默认停在 Token 用量仪表右侧），项目切换、严重度筛选、结构化结果回写与清理确认 |
 | Token 用量仪表 | com.snow.token-meter | 1.1.0 | 客户端脚本插件（.user.js）：默认悬浮在窗口顶部中间、与顶栏同一行的胶囊，常驻今日 token 与目录挂牌价估算花费（价格源可选 OpenRouter / models.dev，默认人民币，K/M/B 紧凑计数），浮层含累计/按模型拆分/手动映射 |
 | 红果短剧 | `com.snow.hongguo` | 0.1.8 | 面板插件：推荐、排行、分类筛选、热搜与搜索联想、结果触底加载、收藏追剧、逐集续播与本机 WebCodecs 解码播放（首段起播、增量音画解码、下一集预加载、分块保调倍速、清晰度切换、音量静音记忆、可选连播）；常驻后台模块经本机回环 HTTP 供流，封面与视频分段落盘缓存，支持一键清理 |
+| 翻译助手 | `com.snow.translator` | 0.1.0 | 客户端脚本插件（`.user.js`）：聊天输入工具栏翻译入口（修复工作台扳手右侧），浮层翻译、划词翻译、AI 回复翻译与输入框回写；内置谷歌 / 微软 / 百度 / DeepL / 大模型五引擎，主引擎失败时回退免费引擎 |
 
 ### 修复工作台：功能范围
 
@@ -74,6 +75,15 @@ snow-plugins/
     build.mjs                 esbuild 打包脚本：IIFE + UserScript 元数据头 + 内联样式
     test/                     核心纯函数与 JSDOM 挂载冒烟测试（npm test）
     dist/snow-token-meter.user.js  构建产物（安装到脚本插件的就是它，不入库）
+    locales/ style.css README.md
+  snow-translator/            客户端脚本插件（无 plugin.json）
+    src/                      源码模块（constants / i18n / languages / settings / store / error-text / text-limit）
+      engine/                 谷歌 / 微软 / 百度 / DeepL / 大模型引擎与调度、分片、错误归类
+      host/                   工具栏入口、输入框读写、划词按钮、消息按钮
+      ui/                     内置 Preact 组件（浮层与设置页、结果卡片、图标、下拉、开关）
+      script/                 入口装配（main.js）
+    build.mjs                 esbuild 打包脚本：IIFE + UserScript 元数据头
+    dist/snow-translator.user.js  构建产物（安装到脚本插件的就是它，不入库）
     locales/ style.css README.md
   sources/                    本地 legado 书源合集（已加入 .gitignore，见 sources/README.md）
   scripts/
@@ -176,13 +186,14 @@ config-set scope=userscripts key="new" value={sourcePath: "D:/ai-workspace/snow-
    本地可用 `node app/scripts/validate-registry.mjs`（在 snow-plugin-store 仓库内）先自校验。
 5. CI 校验通过并合并后，客户端「插件市场」刷新即可安装或更新。
 
-### 客户端脚本插件（snow-fix-bench、snow-token-meter）
+### 客户端脚本插件（snow-fix-bench、snow-token-meter、snow-translator）
 
 - 以单文件 `.user.js` 分发，不使用 `scripts/pack.ps1`，也没有 `plugin.json` 与目录 zip。
 - 发布前在 `snow-fix-bench` 下执行 `npm run build`，把 `dist/snow-fix-bench.user.js` 作为 Release 资产上传；元数据头 `@version` 与 `package.json` 版本保持一致。
 - 市场索引条目使用 `kind: "script"`，下载地址指向该 `.user.js` 资产，`sha256` 取构建产物的 SHA-256。
 - `snow-token-meter`：发布前在其目录下执行 `npm run build`，把 `dist/snow-token-meter.user.js` 作为 Release 资产上传；`@version` 由构建脚本从 `package.json` 写入，两者始终一致。
 - `snow-token-meter` 的市场索引条目同样使用 `kind: "script"`，下载地址指向该 `.user.js` 资产，`sha256` 取产物的 SHA-256；`id` 与元数据头 `@namespace` 一致（`com.snow.token-meter`）。
+- `snow-translator`：发布前在其目录下执行 `npm run build`，把 `dist/snow-translator.user.js` 作为 Release 资产上传；`id` 与元数据头 `@namespace` 一致（`com.snow.translator`），不声明 `@snow-privacy`（不读取会话元数据，AI 回复文本经 DOM 取用）。
 
 ## 许可
 
