@@ -1,6 +1,6 @@
 {
   "name": "snow-hongguo",
-  "version": "0.1.9",
+  "version": "0.1.10",
   "private": true,
   "type": "module",
   "license": "MIT",
@@ -14,7 +14,7 @@
     "@soundtouchjs/core": "2.1.1",
     "jpeg-js": "0.4.4",
     "libheif-js": "1.23.5",
-    "openhongguo": "0.2.0"
+    "openhongguo": "0.3.1"
   },
   "devDependencies": {
     "esbuild": "^0.25.0",
