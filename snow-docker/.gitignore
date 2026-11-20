@@ -1,0 +1,5 @@
+node_modules/
+*.tmp
+*.next
+# 运行期生成的配置备份：只用于本机恢复，不能进仓库
+connection-backup.json

@@ -1,0 +1,10 @@
+{
+  "cliPath": "",
+  "dockerHost": "",
+  "context": "",
+  "ssh": {
+    "currentId": "",
+    "servers": []
+  },
+  "runConfigs": {}
+}

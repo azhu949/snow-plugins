@@ -1,0 +1,1523 @@
+/* Docker 面板样式：选择器统一 dk- 前缀，颜色优先取宿主主题变量。 */
+
+.dk-panel {
+  /* 宿主新旧主题变量都兼容：--background/--foreground 优先，其次 --bg-primary/--text-primary。 */
+  --dk-bg: var(--background, var(--bg-primary, #ffffff));
+  --dk-fg: var(--foreground, var(--text-primary, #111827));
+  --dk-sub: var(--muted-foreground, var(--text-tertiary, #6b7280));
+  --dk-border: var(--border, var(--border-color, #e5e7eb));
+  --dk-primary: var(--primary, var(--accent-blue, #3b82f6));
+  --dk-primary-fg: var(--primary-foreground, var(--on-solid, #ffffff));
+  --dk-hover: var(--bg-hover, rgba(127, 127, 127, 0.1));
+  --dk-active: var(--bg-active, rgba(127, 127, 127, 0.16));
+  --dk-elevated: var(--card, var(--bg-secondary, #f9fafb));
+  --dk-danger: var(--destructive, var(--accent-red, #ef4444));
+  --dk-success: var(--accent-green, #16a34a);
+  --dk-warn: var(--accent-yellow, #d97706);
+  --dk-radius: var(--radius-md, 8px);
+
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+  font-family: var(--font-sans, system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--dk-fg);
+  background: transparent;
+}
+
+.dk-panel *,
+.dk-panel *::before,
+.dk-panel *::after {
+  box-sizing: border-box;
+}
+
+.dk-panel button,
+.dk-panel input,
+.dk-panel select {
+  font-family: inherit;
+  font-size: inherit;
+  color: inherit;
+}
+
+.dk-panel button:focus-visible,
+.dk-panel input:focus-visible,
+.dk-panel select:focus-visible {
+  outline: 2px solid var(--dk-primary);
+  outline-offset: 1px;
+}
+
+.dk-panel [hidden] {
+  display: none !important;
+}
+
+/* ---------------- 头部 ---------------- */
+
+.dk-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 10px;
+  border-bottom: 1px solid var(--dk-border);
+}
+
+.dk-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+  font-size: 12.5px;
+  min-width: 0;
+}
+
+.dk-title-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dk-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--dk-sub);
+}
+
+.dk-dot[data-tone="ok"] {
+  background: var(--dk-success);
+}
+
+.dk-dot[data-tone="warn"] {
+  background: var(--dk-warn);
+}
+
+.dk-dot[data-tone="bad"] {
+  background: var(--dk-danger);
+}
+
+.dk-head-sub {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--dk-sub);
+  font-size: 11px;
+}
+
+.dk-head-spacer {
+  flex: 1 1 auto;
+}
+
+/* ---------------- 按钮 ---------------- */
+
+.dk-btn {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  height: 24px;
+  padding: 0 8px;
+  border: 1px solid var(--dk-border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dk-fg);
+  font-size: 11.5px;
+  line-height: 1;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+
+.dk-btn:hover:not(:disabled) {
+  background: var(--dk-hover);
+}
+
+.dk-btn:active:not(:disabled) {
+  background: var(--dk-active);
+}
+
+.dk-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.dk-btn[data-variant="primary"] {
+  background: var(--dk-primary);
+  border-color: var(--dk-primary);
+  color: var(--dk-primary-fg);
+}
+
+.dk-btn[data-variant="primary"]:hover:not(:disabled) {
+  filter: brightness(1.05);
+  background: var(--dk-primary);
+}
+
+.dk-btn[data-variant="danger"] {
+  color: var(--dk-danger);
+  border-color: color-mix(in srgb, var(--dk-danger) 45%, transparent);
+}
+
+.dk-btn[data-variant="danger"]:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--dk-danger) 12%, transparent);
+}
+
+.dk-btn[data-variant="ghost"] {
+  border-color: transparent;
+  padding: 0 6px;
+}
+
+.dk-btn[data-size="sm"] {
+  height: 21px;
+  font-size: 11px;
+  padding: 0 6px;
+}
+
+/* ---------------- 标签页 ---------------- */
+
+.dk-tabs {
+  flex: none;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px;
+  padding: 6px 8px 0;
+  border-bottom: 1px solid var(--dk-border);
+}
+
+.dk-tab {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: 0 0 auto;
+  min-width: 0;
+  padding: 5px 8px 7px;
+  border: 0;
+  background: transparent;
+  color: var(--dk-sub);
+  font-size: 12px;
+  white-space: nowrap;
+  cursor: pointer;
+  border-radius: 6px 6px 0 0;
+}
+
+.dk-tab-icon {
+  flex: none;
+}
+
+.dk-tab:hover {
+  background: var(--dk-hover);
+  color: var(--dk-fg);
+}
+
+.dk-tab[data-active="1"] {
+  color: var(--dk-fg);
+  font-weight: 600;
+}
+
+.dk-tab[data-active="1"]::after {
+  content: "";
+  position: absolute;
+  left: 6px;
+  right: 6px;
+  bottom: -1px;
+  height: 2px;
+  border-radius: 2px 2px 0 0;
+  background: var(--dk-primary);
+}
+
+.dk-count {
+  min-width: 16px;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: var(--dk-hover);
+  color: var(--dk-sub);
+  font-size: 10px;
+  font-weight: 500;
+  text-align: center;
+  line-height: 15px;
+}
+
+/* ---------------- 工具条 ---------------- */
+
+.dk-toolbar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 10px;
+}
+
+/* 顶部服务器行：和标签栏之间留出呼吸空间，窄面板下按钮跟在提示文字后面。 */
+.dk-target-bar {
+  padding: 9px 10px 8px;
+}
+
+.dk-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 26px;
+  padding: 0 8px;
+  border: 1px solid var(--dk-border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dk-fg);
+}
+
+.dk-input::placeholder {
+  color: var(--dk-sub);
+}
+
+.dk-input:disabled {
+  border-style: dashed;
+  color: var(--dk-sub);
+  cursor: not-allowed;
+}
+
+/* 自研下拉：原生 select 的弹出层不受主题控制，这里用按钮 + fixed 浮层。 */
+
+.dk-select {
+  position: relative;
+  width: 100%;
+  min-width: 0;
+}
+
+.dk-select-trigger {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  width: 100%;
+  min-width: 116px;
+  height: 26px;
+  padding: 4px 8px;
+  border: 1px solid var(--dk-border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dk-fg);
+  font-size: 12px;
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+
+.dk-select-trigger:hover:not(:disabled) {
+  background: var(--dk-hover);
+}
+
+.dk-select-trigger:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.dk-select-trigger svg {
+  flex: none;
+  color: var(--dk-sub);
+}
+
+.dk-select-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dk-select.is-sm .dk-select-trigger {
+  min-width: 0;
+  height: 22px;
+  padding: 2px 6px;
+  font-size: 11px;
+}
+
+.dk-select-menu {
+  position: fixed;
+  z-index: 2147483100;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px;
+  overflow-y: auto;
+  border: 1px solid var(--dk-border);
+  border-radius: 10px;
+  background: var(--dk-elevated);
+  box-shadow: 0 16px 44px rgba(0, 0, 0, 0.28);
+}
+
+.dk-select-item {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dk-fg);
+  font-size: 12px;
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.dk-select-item:hover {
+  background: var(--dk-hover);
+}
+
+/* 搜索框钉在浮层顶部，选项从它下面滚过。 */
+.dk-select-search {
+  position: sticky;
+  top: -6px;
+  z-index: 1;
+  margin: -6px -6px 2px;
+  padding: 6px;
+  background: var(--dk-elevated);
+  border-bottom: 1px solid var(--dk-border);
+}
+
+.dk-select-search input {
+  width: 100%;
+  height: 24px;
+  padding: 0 8px;
+  border: 1px solid var(--dk-border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dk-fg);
+  font-size: 12px;
+  outline: none;
+}
+
+.dk-select-search input::placeholder {
+  color: var(--dk-sub);
+}
+
+.dk-select-search input:focus {
+  border-color: color-mix(in srgb, var(--dk-fg) 45%, transparent);
+}
+
+.dk-select-empty {
+  padding: 6px 8px;
+  color: var(--dk-sub);
+  font-size: 11px;
+}
+
+.dk-select-item.is-active {
+  background: var(--dk-hover);
+}
+
+.dk-select-item.is-selected {
+  background: var(--dk-hover);
+  font-weight: 500;
+}
+
+.dk-toggle {
+  flex: none;
+  display: inline-flex;
+  border: 1px solid var(--dk-border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.dk-toggle button {
+  height: 26px;
+  padding: 0 8px;
+  border: 0;
+  background: transparent;
+  color: var(--dk-sub);
+  cursor: pointer;
+  font-size: 11.5px;
+}
+
+.dk-toggle button + button {
+  border-left: 1px solid var(--dk-border);
+}
+
+.dk-toggle button[data-active="1"] {
+  background: var(--dk-hover);
+  color: var(--dk-fg);
+  font-weight: 600;
+}
+
+/* ---------------- 表单 ---------------- */
+
+.dk-form {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.dk-form-row {
+  display: flex;
+  gap: 6px;
+}
+
+.dk-field {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.dk-field-grow {
+  flex: 1 1 auto;
+}
+
+.dk-field-port {
+  flex: none;
+  width: 70px;
+}
+
+.dk-ok-text {
+  margin-top: 6px;
+  color: var(--dk-success);
+  font-size: 11px;
+  word-break: break-word;
+}
+
+/* ---------------- 运行配置弹窗 ---------------- */
+
+/* 宿主的右侧面板带 backdrop-filter，会为 fixed 后代创建包含块，
+   弹窗就会被困在面板里。弹窗存在时去掉该效果并把面板提到最上层，
+   弹窗才能真正覆盖整个窗口并居中显示；DOM 关掉后规则自动失效。 */
+.right-panel:has(.dk-modal-mask) {
+  backdrop-filter: none !important;
+  z-index: 70 !important;
+}
+
+.dk-modal-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 2147483000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(0, 0, 0, 0.42);
+}
+
+.dk-modal {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  max-width: 780px;
+  /* 既不顶满窗口，也够放下两组配置：内容多时右栏自己滚。 */
+  height: min(640px, calc(100vh - 96px));
+  max-height: 100%;
+  min-height: 0;
+  overflow: hidden;
+  border: 1px solid var(--dk-border);
+  border-radius: 10px;
+  background: var(--dk-bg);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.34);
+}
+
+/* 弹窗里的字段一律左右排布：左边标签固定宽度，右边是值 */
+.dk-modal .dk-field,
+.dk-subdialog .dk-field {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+}
+
+.dk-modal .dk-field > .dk-meta,
+.dk-subdialog .dk-field > .dk-meta {
+  flex: none;
+  width: 96px;
+  text-align: right;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.dk-modal .dk-field > .dk-input,
+.dk-modal .dk-field > .dk-value,
+.dk-modal .dk-field > .dk-checks,
+.dk-subdialog .dk-field > .dk-input,
+.dk-subdialog .dk-field > .dk-value,
+.dk-subdialog .dk-field > .dk-checks {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* 值 + 右侧文件夹图标：点图标在二级弹窗里改值 */
+.dk-value {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.dk-value .dk-select {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.dk-value-text {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  height: 26px;
+  padding: 0 8px;
+  border: 1px solid var(--dk-border);
+  border-radius: 6px;
+  color: var(--dk-sub);
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 值行里的输入框（例如 package.json）与后面的图标按钮并排 */
+.dk-value .dk-input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* 值 + 下方说明：例如服务器选择的作用范围 */
+.dk-value-stack {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 3px;
+}
+
+.dk-value-stack .dk-select {
+  flex: none;
+  width: 100%;
+}
+
+/* 多行值的字段让标签贴顶，和第一行对齐 */
+.dk-modal .dk-field.dk-field-block,
+.dk-subdialog .dk-field.dk-field-block {
+  align-items: flex-start;
+}
+
+/* 说明性小字：脚本列表数量、读取失败的提示等 */
+.dk-note {
+  color: var(--dk-sub);
+  font-size: 10.5px;
+  line-height: 1.5;
+}
+
+/* 标签 + 多行内容（环境变量这类列表） */
+.dk-field-block {
+  align-items: flex-start;
+}
+
+.dk-field-block > .dk-rows {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.dk-modal-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--dk-border);
+}
+
+.dk-modal-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-weight: 600;
+  font-size: 12.5px;
+}
+
+.dk-modal-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+}
+
+/* 左列固定占比，窄面板下也不会把右侧表单挤没。 */
+.dk-modal-side {
+  flex: 0 0 34%;
+  display: flex;
+  flex-direction: column;
+  min-width: 116px;
+  max-width: 190px;
+  min-height: 0;
+  border-right: 1px solid var(--dk-border);
+}
+
+.dk-config-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px;
+  overflow-y: auto;
+}
+
+.dk-config-item {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  width: 100%;
+  padding: 5px 6px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dk-fg);
+  text-align: left;
+  cursor: pointer;
+}
+
+.dk-config-item:hover {
+  background: var(--dk-hover);
+}
+
+.dk-config-item[data-active="1"] {
+  background: var(--dk-active);
+}
+
+.dk-config-item-name {
+  max-width: 100%;
+  font-size: 12px;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dk-config-item-path {
+  max-width: 100%;
+  color: var(--dk-sub);
+  font-size: 10.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dk-config-add {
+  flex: none;
+  padding: 6px;
+  border-top: 1px solid var(--dk-border);
+}
+
+.dk-modal-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  padding: 8px 10px 10px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.dk-pathline {
+  color: var(--dk-sub);
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+  font-size: 10.5px;
+  word-break: break-all;
+}
+
+/* 分组：构建 / 运行，标题右侧挂「修改」下拉 */
+
+.dk-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--dk-border);
+}
+
+.dk-section-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+  font-size: 12px;
+}
+
+.dk-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.dk-row-inputs {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.dk-row-inputs .dk-input {
+  height: 24px;
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+  font-size: 11px;
+}
+
+.dk-inline-check {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: var(--dk-sub);
+  font-size: 10.5px;
+  cursor: pointer;
+}
+
+/* 「修改」下拉：勾选后对应行才出现 */
+
+.dk-option-anchor {
+  position: relative;
+  display: inline-flex;
+}
+
+/* 位置由 JS 按按钮坐标算（fixed），这里只管外观；
+   fixed 才能不被弹窗里的滚动容器裁掉。 */
+
+.dk-option-menu {
+  position: fixed;
+  z-index: 2147483001;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 168px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 6px;
+  border: 1px solid var(--dk-border);
+  border-radius: 8px;
+  background: var(--dk-elevated);
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.28);
+}
+
+.dk-option-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 4px;
+  border-radius: 5px;
+  font-size: 11.5px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.dk-option-item:hover {
+  background: var(--dk-hover);
+}
+
+/* 二级弹窗：编辑单个值或一组列表（端口 / 挂载 / 环境变量 …） */
+
+.dk-submask {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: rgba(0, 0, 0, 0.32);
+}
+
+.dk-subdialog {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  max-width: 520px;
+  max-height: 100%;
+  min-height: 0;
+  overflow: hidden;
+  border: 1px solid var(--dk-border);
+  border-radius: 10px;
+  background: var(--dk-bg);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.32);
+}
+
+/* 构建前执行的表单字段多，给宽一点 */
+.dk-subdialog[data-wide="1"] {
+  max-width: 620px;
+}
+
+.dk-subdialog-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--dk-border);
+}
+
+.dk-subdialog-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px;
+  overflow-y: auto;
+}
+
+.dk-subdialog-foot {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 8px 10px;
+  border-top: 1px solid var(--dk-border);
+}
+
+.dk-icon-btn {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid var(--dk-border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dk-sub);
+  cursor: pointer;
+}
+
+.dk-icon-btn:hover {
+  background: var(--dk-hover);
+  color: var(--dk-fg);
+}
+
+.dk-modal-foot {
+  flex: none;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+  padding: 8px 10px;
+  border-top: 1px solid var(--dk-border);
+}
+
+.dk-checks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  font-size: 11.5px;
+}
+
+.dk-checks label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  cursor: pointer;
+}
+
+/* 远程上传：本地镜像与远程清单的紧凑行 */
+
+.dk-ssh-rows {
+  display: flex;
+  flex-direction: column;
+  max-height: 190px;
+  overflow-y: auto;
+}
+
+.dk-ssh-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 5px 6px;
+  border-top: 1px solid var(--dk-border);
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.dk-ssh-row:first-child {
+  border-top: 0;
+}
+
+.dk-ssh-row:hover {
+  background: var(--dk-hover);
+}
+
+.dk-ssh-row[data-active="1"] {
+  background: var(--dk-active);
+}
+
+.dk-ssh-row .dk-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-weight: 500;
+  font-size: 12px;
+}
+
+.dk-ssh-row .dk-meta {
+  flex: none;
+  max-width: 55%;
+}
+
+/* ---------------- 列表 ---------------- */
+
+.dk-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+/* 镜像视图外层：给「删除中」遮罩一个可定位、且有确定高度的容器。
+   .dk-body 自己是滚动容器，绝对定位遮罩会跟着内容滚走，所以多包一层。 */
+.dk-images {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* 等后台命令跑完的动作（删除镜像）期间盖住列表 */
+.dk-busy-mask {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  /* 旧内核不支持 color-mix 时退回不透明底色，遮罩依然挡住操作 */
+  background: var(--dk-bg);
+  background: color-mix(in srgb, var(--dk-bg) 80%, transparent);
+  cursor: progress;
+}
+
+.dk-busy-text {
+  max-width: 80%;
+  color: var(--dk-sub);
+  font-size: 11px;
+  text-align: center;
+  word-break: break-word;
+}
+
+.dk-spinner {
+  width: 18px;
+  height: 18px;
+  border: 2px solid var(--dk-border);
+  border-top-color: var(--dk-primary);
+  border-radius: 50%;
+  animation: dk-spin 0.8s linear infinite;
+}
+
+@keyframes dk-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.dk-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 0 10px 12px;
+}
+
+.dk-row {
+  border: 1px solid var(--dk-border);
+  border-radius: var(--dk-radius);
+  background: var(--dk-elevated);
+  overflow: hidden;
+}
+
+.dk-row[data-selected="1"] {
+  border-color: color-mix(in srgb, var(--dk-primary) 55%, var(--dk-border));
+}
+
+.dk-row-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 9px;
+  cursor: pointer;
+}
+
+.dk-row-head:hover {
+  background: var(--dk-hover);
+}
+
+.dk-row-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.dk-row-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.dk-name {
+  font-weight: 600;
+  font-size: 12.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dk-meta {
+  color: var(--dk-sub);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dk-ports {
+  color: var(--dk-sub);
+  font-size: 10.5px;
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dk-badge {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  height: 17px;
+  padding: 0 6px;
+  border-radius: 9px;
+  font-size: 10.5px;
+  font-weight: 500;
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+
+.dk-badge[data-tone="ok"] {
+  color: var(--dk-success);
+  background: color-mix(in srgb, var(--dk-success) 14%, transparent);
+  border-color: color-mix(in srgb, var(--dk-success) 30%, transparent);
+}
+
+.dk-badge[data-tone="warn"] {
+  color: var(--dk-warn);
+  background: color-mix(in srgb, var(--dk-warn) 14%, transparent);
+  border-color: color-mix(in srgb, var(--dk-warn) 30%, transparent);
+}
+
+.dk-badge[data-tone="bad"] {
+  color: var(--dk-danger);
+  background: color-mix(in srgb, var(--dk-danger) 14%, transparent);
+  border-color: color-mix(in srgb, var(--dk-danger) 30%, transparent);
+}
+
+.dk-badge[data-tone="muted"] {
+  color: var(--dk-sub);
+  background: var(--dk-hover);
+  border-color: var(--dk-border);
+}
+
+.dk-row-actions {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* ---------------- 详情 ---------------- */
+
+.dk-detail {
+  border-top: 1px solid var(--dk-border);
+  padding: 8px 9px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+
+.dk-actionbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.dk-section-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--dk-sub);
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-bottom: 3px;
+}
+
+.dk-kv {
+  display: grid;
+  grid-template-columns: minmax(64px, auto) minmax(0, 1fr);
+  gap: 2px 8px;
+  font-size: 11.5px;
+}
+
+.dk-kv-key {
+  color: var(--dk-sub);
+  white-space: nowrap;
+}
+
+.dk-kv-value {
+  min-width: 0;
+  word-break: break-all;
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+  font-size: 11px;
+}
+
+.dk-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.dk-chip {
+  display: inline-flex;
+  align-items: center;
+  height: 19px;
+  padding: 0 6px;
+  border-radius: 5px;
+  border: 1px solid var(--dk-border);
+  color: var(--dk-sub);
+  font-size: 10.5px;
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---------------- 日志 ---------------- */
+
+.dk-log {
+  max-height: 260px;
+  overflow: auto;
+  padding: 7px 8px;
+  border: 1px solid var(--dk-border);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--dk-fg) 4%, transparent);
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+  font-size: 10.5px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.dk-log-line {
+  display: block;
+}
+
+/* ANSI 调色板：日志框架自带 SGR 颜色，按终端习惯着色，深色与浅色主题下都能看清。 */
+.dk-ansi-fg-30 {
+  color: #7c8798;
+}
+
+.dk-ansi-fg-31 {
+  color: #e05656;
+}
+
+.dk-ansi-fg-32 {
+  color: #3f9f5f;
+}
+
+.dk-ansi-fg-33 {
+  color: #c08a1e;
+}
+
+.dk-ansi-fg-34 {
+  color: #4a86d8;
+}
+
+.dk-ansi-fg-35 {
+  color: #b167d8;
+}
+
+.dk-ansi-fg-36 {
+  color: #2f9b9b;
+}
+
+.dk-ansi-fg-37 {
+  color: #a8b2c1;
+}
+
+.dk-ansi-fg-90 {
+  color: #98a2b3;
+}
+
+.dk-ansi-fg-91 {
+  color: #ff7b72;
+}
+
+.dk-ansi-fg-92 {
+  color: #56d364;
+}
+
+.dk-ansi-fg-93 {
+  color: #e3b341;
+}
+
+.dk-ansi-fg-94 {
+  color: #79b8ff;
+}
+
+.dk-ansi-fg-95 {
+  color: #d2a8ff;
+}
+
+.dk-ansi-fg-96 {
+  color: #56d4dd;
+}
+
+.dk-ansi-fg-97 {
+  color: var(--dk-fg);
+}
+
+.dk-ansi-bold {
+  font-weight: 600;
+}
+
+.dk-ansi-dim {
+  opacity: 0.75;
+}
+
+.dk-ansi-italic {
+  font-style: italic;
+}
+
+.dk-ansi-underline {
+  text-decoration: underline;
+}
+
+.dk-log-empty {
+  color: var(--dk-sub);
+  font-style: normal;
+}
+
+/* 日志标签页：选择器与按钮固定在顶部，日志区吃掉面板剩余高度。 */
+.dk-logs {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 0 10px 10px;
+}
+
+.dk-logs .dk-toolbar {
+  padding: 0;
+}
+
+.dk-logs-picker {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.dk-logs-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.dk-logs-meta .dk-meta {
+  min-width: 0;
+}
+
+/* 清屏提示行：说明当前只显示新日志，右侧给恢复入口。 */
+.dk-logs-note {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  min-width: 0;
+}
+
+.dk-logs-note .dk-meta {
+  min-width: 0;
+}
+
+/* 覆盖 .dk-log 的 260px 上限：整页日志跟随面板高度。 */
+.dk-log-fill {
+  flex: 1 1 auto;
+  min-height: 120px;
+  max-height: none;
+}
+
+/* 关闭自动换行：长行横向滚动，行宽按内容展开（对应 IDEA 的 Soft-Wrap 关闭）。 */
+.dk-log-nowrap {
+  white-space: pre;
+  word-break: normal;
+  overflow-wrap: normal;
+}
+
+.dk-log-nowrap .dk-log-line {
+  width: max-content;
+  min-width: 100%;
+}
+
+/* ---------------- 概览 ---------------- */
+
+.dk-overview {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 0 10px 14px;
+}
+
+.dk-card {
+  border: 1px solid var(--dk-border);
+  border-radius: var(--dk-radius);
+  background: var(--dk-elevated);
+  padding: 9px 10px;
+}
+
+.dk-card-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+  font-weight: 600;
+  font-size: 12px;
+}
+
+.dk-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--dk-sub);
+  font-size: 10.5px;
+  font-weight: 400;
+}
+
+.dk-emptystate {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 28px 16px;
+  color: var(--dk-sub);
+  text-align: center;
+}
+
+.dk-emptystate-title {
+  color: var(--dk-fg);
+  font-weight: 600;
+}
+
+.dk-errorbox {
+  margin: 0 10px 10px;
+  padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, var(--dk-danger) 40%, transparent);
+  border-radius: var(--dk-radius);
+  background: color-mix(in srgb, var(--dk-danger) 10%, transparent);
+  color: var(--dk-fg);
+  font-size: 11.5px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.dk-errorbox-title {
+  font-weight: 600;
+  color: var(--dk-danger);
+}
+
+.dk-inline-error {
+  color: var(--dk-danger);
+  font-size: 11px;
+  word-break: break-word;
+}
+
+.dk-inline-warn {
+  margin: 0 10px 8px;
+  padding: 6px 9px;
+  border-radius: 6px;
+  border: 1px solid color-mix(in srgb, var(--dk-warn, #d08a1e) 45%, transparent);
+  background: color-mix(in srgb, var(--dk-warn, #d08a1e) 10%, transparent);
+  color: var(--dk-fg);
+  font-size: 11px;
+  word-break: break-word;
+}
+
+/* ---------------- 提示条 ---------------- */
+
+.dk-notices {
+  position: absolute;
+  left: 10px;
+  right: 10px;
+  bottom: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  pointer-events: none;
+}
+
+.dk-notice {
+  padding: 6px 9px;
+  border-radius: 6px;
+  border: 1px solid var(--dk-border);
+  background: var(--dk-elevated);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.12);
+  font-size: 11.5px;
+  word-break: break-word;
+}
+
+.dk-notice[data-tone="error"] {
+  border-color: color-mix(in srgb, var(--dk-danger) 45%, transparent);
+  color: var(--dk-danger);
+}
+
+.dk-notice[data-tone="success"] {
+  border-color: color-mix(in srgb, var(--dk-success) 45%, transparent);
+}
+
+.dk-notice[data-tone="warn"] {
+  border-color: color-mix(in srgb, var(--dk-warn) 45%, transparent);
+  color: var(--dk-warn);
+}
+
+/* ---------------- 骨架与加载 ---------------- */
+
+.dk-loading {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--dk-sub);
+  font-size: 11.5px;
+  padding: 10px;
+}
+
+.dk-spinner {
+  flex: none;
+  width: 12px;
+  height: 12px;
+  border: 2px solid color-mix(in srgb, var(--dk-fg) 25%, transparent);
+  border-top-color: var(--dk-primary);
+  border-radius: 50%;
+  animation: dk-spin 0.8s linear infinite;
+}
+
+@keyframes dk-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dk-spinner {
+    animation-duration: 2s;
+  }
+}
