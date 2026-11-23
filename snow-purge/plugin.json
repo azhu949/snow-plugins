@@ -1,0 +1,66 @@
+{
+  "id": "com.snow.purge",
+  "name": {
+    "default": "Purge",
+    "en": "Purge",
+    "zh-CN": "Purge",
+    "zh-TW": "Purge"
+  },
+  "description": {
+    "default": "Purge panel: layered self-check (channel, prompt, role, request proxy, approved tools), managed system prompt and role directives with presets, follow-up on the global and project approved-tool lists, a managed block inside the request proxy script with snapshot and restore, local backup and rollback, an action audit trail, and a red-team skill library (23 upstream dsh-purge skill documents with install, toggle and remove), plus a red-team roster that writes five role sub-agents into the host subAgents config (removable one by one) and dispatches tasks by creating a conversation with the task text, with a task list whose status is inferred from conversation runs. It never patches the host installation, never downloads security tools and never approves sensitive commands.",
+    "en": "Purge panel: layered self-check (channel, prompt, role, request proxy, approved tools), managed system prompt and role directives with presets, follow-up on the global and project approved-tool lists, a managed block inside the request proxy script with snapshot and restore, local backup and rollback, an action audit trail, and a red-team skill library (23 upstream dsh-purge skill documents with install, toggle and remove), plus a red-team roster that writes five role sub-agents into the host subAgents config (removable one by one) and dispatches tasks by creating a conversation with the task text, with a task list whose status is inferred from conversation runs. It never patches the host installation, never downloads security tools and never approves sensitive commands.",
+    "zh-CN": "Purge 面板：分层自检（通道、提示词、角色规则、请求代理、免审批清单）；托管系统提示词与全局角色规则，带内置预设；读写全局与项目免审批工具清单；在请求代理脚本中维护独立托管段，支持快照、还原与越界改动让位；本机备份与回滚；动作审计流水；红队技能库（上游 dsh-purge 的 23 份技能原文，可安装、启停与移除）；红队编队（把 5 个角色子代理写入宿主 subAgents 配置，可逐个移除，并可在弹窗里派发任务、按会话运行情况推断任务状态）。不修改宿主安装目录，不下载任何安全工具，不代为批准敏感命令。",
+    "zh-TW": "Purge 面板：分層自檢（通道、提示詞、角色規則、請求代理、免審批清單）；託管系統提示詞與全域角色規則，帶內建預設；讀寫全域與專案免審批工具清單；在請求代理腳本中維護獨立託管段，支援快照、還原與越界改動讓位；本機備份與回滾；動作審計流水；紅隊技能庫（上游 dsh-purge 的 23 份技能原文，可安裝、啟停與移除）；紅隊編隊（把 5 個角色子代理寫入宿主 subAgents 設定，可逐個移除，並可在彈窗裡派發任務、依會話執行情況推斷任務狀態）。不修改宿主安裝目錄，不下載任何安全工具，不代為批准敏感命令。"
+  },
+  "version": "0.1.0",
+  "author": "Snow App",
+  "license": "MIT",
+  "kind": "plugin",
+  "icon": "icon.svg",
+  "renderMode": "esm",
+  "entry": "index.js",
+  "background": {
+    "entry": "background.mjs"
+  },
+  "panels": [
+    {
+      "id": "purge",
+      "title": {
+        "default": "Purge",
+        "en": "Purge",
+        "zh-CN": "Purge",
+        "zh-TW": "Purge"
+      },
+      "icon": "icon.svg",
+      "widthHint": "460px",
+      "chatInput": true,
+      "chatInputTitle": {
+        "default": "Purge status",
+        "en": "Purge status",
+        "zh-CN": "Purge 状态",
+        "zh-TW": "Purge 狀態"
+      }
+    }
+  ],
+  "locales": {
+    "zh-CN": "locales/zh-CN.json",
+    "zh-TW": "locales/zh-TW.json",
+    "en": "locales/en.json"
+  },
+  "styles": [
+    "style.css"
+  ],
+  "privacy": {
+    "scopes": [
+      "network",
+      "systemPrompts",
+      "personalization",
+      "toolApproval",
+      "subAgents",
+      "conversations",
+      "logs"
+    ],
+    "note": "面板只与本插件的常驻后台服务通信（仅监听 127.0.0.1 的回环 HTTP 通道），不向任何外部服务上传数据。常驻后台模块读取 systemPrompts（系统提示词条目）与 personalization（全局 ROLE 文件）用于自检与展示当前托管内容；只有你在面板中点击「应用」或「保存」时，才通过宿主写动作写入你确认过的提示词条目、角色规则与免审批工具清单；全局角色文件里只剩本插件的托管段时，「还原角色文件」会直接删除该 ROLE 文件（宿主的写入动作不接受空内容），删除前的内容已按你的设置在应用时快照到插件数据目录。toolApproval 用于读取全局/项目免审批工具与敏感命令规则：免审批清单只有你在面板中显式保存时才会被覆盖——全局清单写入宿主全局权限配置的 alwaysApprovedTools，保存后对所有项目生效（已打开的对话需重新打开后按新清单判定；匹配敏感命令规则的操作仍会强制确认），项目清单只作用于你填写的那个项目；插件不代替你在授权弹窗里点击允许，也不改写、不删除、不重置敏感命令规则，敏感操作仍需你本人确认。logs 只在你打开「审计」页时读取本机应用日志，用于把插件动作与宿主日志对照，不导出、不上传；你在审计页点「清空日志」时会调用宿主 logs.clear 清空应用日志（不可恢复）。请求代理由你在面板中确认后写入宿主数据目录下的 request-proxy/proxy.mjs：只替换本插件标记的托管段，保留你手写的内容；写入前把原文件快照到 plugin-data/com.snow.purge 目录，撤回时还原。被托管的提示词与代理指令会随对话请求发送给你自己配置的模型服务商，这是该功能的预期行为。红队技能库只在你点击「安装」时把 SKILL.md 写到 ~/.snow/skills/snow-redteam-* 下，移除时目录挪到插件自己的 plugin-data 回收区；期间不下载、不安装任何安全工具，也不执行任何命令。红队页的环境自检还会只读本机 ~/.snow/.env（存在时）：仅取 FOFA_KEY、REDTEAM_VPS_HOST、REDTEAM_VPS_KEY 三个键，并与同名环境变量合并（环境变量优先）；面板只显示是否已配置与长度，FOFA_KEY 与私钥内容一律显示为 *** (长度)，私钥仅在确认为本机绝对路径时显示 ~ 开头的路径，主机地址只显示长度，文件内容不写入插件数据、不进入审计、不上传。通道边界：后台启动时生成随机令牌并明文写入插件私有存储（channelEndpoint），面板读取后随每个请求发送；同一用户下能读取该存储的本机进程拿到令牌后，即可调用本插件后台的全部读写接口（包括覆盖全局/项目免审批清单、写 ROLE 文件与请求代理脚本、清空应用日志）。插件不构成对本机恶意进程或其它插件的防护，真正隔离需要宿主提供面板与后台之间的加密通道或用户在场确认。红队编队只在你点击「编入」时把 5 个角色的名称、系统提示词与工具白名单写进宿主 subAgents 配置（全局子代理），可在弹窗里逐个移除；宿主读取接口只返回当前项目的子代理，插件读不到同名的全局记录，因此覆盖前无法自动备份：若需保留原有同名全局子代理，请先在宿主设置的子代理页备份（仅当宿主恰好返回该记录时，插件会先把原记录快照到插件数据目录）；派发任务时新建一个会话并投递任务文本（conversations.create，开启立即回复），停止接力与跳过本步时会调用 conversations.abort 中止当前环节的会话（只停宿主侧回合，不回收远端已启动的扫描或隧道），由主代理按编队规则交给对应角色，插件不直接调用子代理、不代为批准工具；任务列表的状态只是按会话运行情况推断，不代表子代理内部步骤；插件不启动任何子代理、不代为批准敏感命令。插件从不修改宿主安装目录，也不重启应用。"
+  },
+  "minAppVersion": "0.5.12"
+}

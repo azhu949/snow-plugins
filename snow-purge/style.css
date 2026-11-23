@@ -1,0 +1,2110 @@
+/* Purge 面板样式：选择器统一 pg- 前缀，颜色优先取宿主主题变量。 */
+
+.pg-root {
+  --pg-bg: var(--background, var(--bg-primary, #ffffff));
+  --pg-fg: var(--foreground, var(--text-primary, #111827));
+  --pg-sub: var(--muted-foreground, var(--text-tertiary, #6b7280));
+  --pg-border: var(--border, var(--border-color, #e5e7eb));
+  --pg-primary: var(--primary, var(--accent-blue, #3b82f6));
+  --pg-primary-fg: var(--primary-foreground, var(--on-solid, #ffffff));
+  --pg-hover: var(--bg-hover, rgba(127, 127, 127, 0.1));
+  --pg-active: var(--bg-active, rgba(127, 127, 127, 0.16));
+  --pg-elevated: var(--card, var(--bg-secondary, #f9fafb));
+  --pg-danger: var(--destructive, var(--accent-red, #ef4444));
+  --pg-success: var(--accent-green, #16a34a);
+  --pg-warn: var(--accent-yellow, #d97706);
+  --pg-radius: var(--radius-md, 8px);
+
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+  font-family: var(--font-sans, system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--pg-fg);
+  background: transparent;
+}
+
+.pg-root *,
+.pg-root *::before,
+.pg-root *::after {
+  box-sizing: border-box;
+}
+
+.pg-root button,
+.pg-root input,
+.pg-root textarea,
+.pg-root select {
+  font-family: inherit;
+  font-size: inherit;
+  color: inherit;
+}
+
+.pg-root button:focus-visible,
+.pg-root input:focus-visible,
+.pg-root textarea:focus-visible,
+.pg-root select:focus-visible {
+  outline: 2px solid var(--pg-primary);
+  outline-offset: 1px;
+}
+
+/* ---------------- 头部 ---------------- */
+
+.pg-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--pg-border);
+}
+
+.pg-head-main {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+
+.pg-title {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.pg-sub,
+.pg-meta {
+  color: var(--pg-sub);
+  font-size: 11px;
+}
+
+.pg-head-badges {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.pg-head-spacer {
+  flex: 1 1 auto;
+}
+
+/* ---------------- 标签页 ---------------- */
+
+.pg-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--pg-border);
+}
+
+.pg-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 7px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--pg-sub);
+  cursor: pointer;
+}
+
+.pg-tab:hover {
+  background: var(--pg-hover);
+  color: var(--pg-fg);
+}
+
+.pg-tab[data-active="1"] {
+  background: var(--pg-active);
+  color: var(--pg-fg);
+  border-color: var(--pg-border);
+}
+
+.pg-tab-icon {
+  flex: none;
+}
+
+/* ---------------- 内容区 ---------------- */
+
+.pg-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding: 10px;
+}
+
+.pg-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.pg-card {
+  border: 1px solid var(--pg-border);
+  border-radius: var(--pg-radius);
+  background: var(--pg-elevated);
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.pg-section-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+/* ---------------- 按钮 ---------------- */
+
+.pg-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 4px 10px;
+  border: 1px solid var(--pg-border);
+  border-radius: 6px;
+  background: var(--pg-bg);
+  color: var(--pg-fg);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.pg-btn:hover:not(:disabled) {
+  background: var(--pg-hover);
+}
+
+.pg-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.pg-btn[data-variant="primary"] {
+  border-color: transparent;
+  background: var(--pg-primary);
+  color: var(--pg-primary-fg);
+}
+
+.pg-btn[data-variant="primary"]:hover:not(:disabled) {
+  filter: brightness(1.05);
+}
+
+.pg-btn[data-variant="ghost"] {
+  background: transparent;
+  border-color: transparent;
+  color: var(--pg-sub);
+}
+
+.pg-btn[data-variant="ghost"]:hover:not(:disabled) {
+  background: var(--pg-hover);
+  color: var(--pg-fg);
+}
+
+.pg-btn[data-size="sm"] {
+  padding: 3px 8px;
+  font-size: 11px;
+}
+
+/* ---------------- 徽标 ---------------- */
+
+.pg-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 10px;
+  line-height: 1.6;
+  background: var(--pg-hover);
+  color: var(--pg-sub);
+  white-space: nowrap;
+}
+
+.pg-badge[data-tone="ok"] {
+  background: color-mix(in srgb, var(--pg-success) 16%, transparent);
+  color: var(--pg-success);
+}
+
+.pg-badge[data-tone="warn"] {
+  background: color-mix(in srgb, var(--pg-warn) 16%, transparent);
+  color: var(--pg-warn);
+}
+
+.pg-badge[data-tone="bad"] {
+  background: color-mix(in srgb, var(--pg-danger) 16%, transparent);
+  color: var(--pg-danger);
+}
+
+/* ---------------- 表单 ---------------- */
+
+.pg-label {
+  font-size: 11px;
+  color: var(--pg-sub);
+}
+
+.pg-input,
+.pg-textarea,
+.pg-select {
+  width: 100%;
+  padding: 5px 7px;
+  border: 1px solid var(--pg-border);
+  border-radius: 6px;
+  background: var(--pg-bg);
+  color: var(--pg-fg);
+}
+
+.pg-textarea {
+  resize: vertical;
+  min-height: 60px;
+  font-family: var(--font-mono, ui-monospace, Consolas, monospace);
+  line-height: 1.6;
+}
+
+.pg-select {
+  width: auto;
+  min-width: 90px;
+}
+
+.pg-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.pg-row-end {
+  justify-content: flex-end;
+}
+
+.pg-row-tight {
+  gap: 2px;
+  flex-wrap: nowrap;
+}
+
+.pg-toggle {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  padding: 4px 0;
+  cursor: pointer;
+}
+
+.pg-toggle[data-disabled="1"] {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.pg-toggle input {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.pg-toggle-box {
+  position: relative;
+  flex: none;
+  width: 26px;
+  height: 15px;
+  margin-top: 2px;
+  border-radius: 999px;
+  background: var(--pg-border);
+  transition: background 0.15s ease;
+}
+
+.pg-toggle-box::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  background: var(--pg-bg);
+  transition: transform 0.15s ease;
+}
+
+.pg-toggle input:checked + .pg-toggle-box {
+  background: var(--pg-primary);
+}
+
+.pg-toggle input:checked + .pg-toggle-box::after {
+  transform: translateX(11px);
+}
+
+.pg-toggle-text {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.pg-toggle-hint {
+  font-size: 10px;
+  color: var(--pg-sub);
+}
+
+.pg-inline-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+}
+
+.pg-providers {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+/* ---------------- 键值 / 文本 ---------------- */
+
+.pg-kv {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 2px 10px;
+  font-size: 11px;
+}
+
+.pg-kv-key {
+  color: var(--pg-sub);
+}
+
+.pg-kv-value {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.pg-note {
+  font-size: 11px;
+  color: var(--pg-sub);
+}
+
+.pg-mono {
+  font-family: var(--font-mono, ui-monospace, Consolas, monospace);
+  font-size: 10.5px;
+  overflow-wrap: anywhere;
+}
+
+.pg-list {
+  margin: 0;
+  padding-left: 16px;
+  color: var(--pg-sub);
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.pg-pre {
+  margin: 0;
+  max-height: 220px;
+  overflow: auto;
+  padding: 7px;
+  border-radius: 6px;
+  background: var(--pg-bg);
+  border: 1px solid var(--pg-border);
+  font-family: var(--font-mono, ui-monospace, Consolas, monospace);
+  font-size: 10.5px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.pg-lines {
+  max-height: 260px;
+  overflow: auto;
+  border: 1px solid var(--pg-border);
+  border-radius: 6px;
+  background: var(--pg-bg);
+  padding: 4px 6px;
+  display: flex;
+  flex-direction: column;
+}
+
+.pg-line {
+  font-family: var(--font-mono, ui-monospace, Consolas, monospace);
+  font-size: 10.5px;
+  padding: 1px 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--pg-border) 45%, transparent);
+  overflow-wrap: anywhere;
+}
+
+.pg-line:last-child {
+  border-bottom: 0;
+}
+
+/* ---------------- 自检清单 ---------------- */
+
+.pg-checklist {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.pg-check {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  padding: 5px 7px;
+  border-radius: 6px;
+  background: var(--pg-bg);
+  border: 1px solid var(--pg-border);
+}
+
+.pg-check-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  margin-top: 5px;
+  border-radius: 50%;
+  background: var(--pg-sub);
+}
+
+.pg-check[data-tone="ok"] .pg-check-dot {
+  background: var(--pg-success);
+}
+
+.pg-check[data-tone="warn"] .pg-check-dot {
+  background: var(--pg-warn);
+}
+
+.pg-check[data-tone="bad"] .pg-check-dot {
+  background: var(--pg-danger);
+}
+
+.pg-check-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.pg-check-line {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.pg-check-title {
+  font-weight: 600;
+}
+
+.pg-check-state {
+  font-size: 10px;
+  color: var(--pg-sub);
+}
+
+.pg-check-detail {
+  font-size: 11px;
+}
+
+.pg-check-evidence {
+  font-size: 10px;
+  color: var(--pg-sub);
+  font-family: var(--font-mono, ui-monospace, Consolas, monospace);
+  overflow-wrap: anywhere;
+}
+
+/* ---------------- 表格 ---------------- */
+
+.pg-table {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--pg-border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.pg-table-head,
+.pg-table-row {
+  display: grid;
+  grid-template-columns: minmax(90px, 1fr) minmax(80px, 0.9fr) minmax(60px, 0.6fr) minmax(60px, 1.4fr);
+  gap: 6px;
+  padding: 4px 7px;
+  align-items: center;
+}
+
+.pg-table-3 .pg-table-head,
+.pg-table-3 .pg-table-row {
+  grid-template-columns: minmax(70px, 0.7fr) minmax(120px, 1.8fr) minmax(50px, 0.4fr);
+}
+
+.pg-table-head {
+  background: var(--pg-hover);
+  color: var(--pg-sub);
+  font-size: 10px;
+}
+
+.pg-table-row {
+  border-top: 1px solid var(--pg-border);
+  font-size: 11px;
+}
+
+.pg-table-row > span,
+.pg-table-head > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.pg-ellipsis {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ---------------- 标签片 ---------------- */
+
+.pg-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.pg-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--pg-border);
+  background: var(--pg-bg);
+  font-size: 10.5px;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
+.pg-chip[data-tone="ok"] {
+  border-color: color-mix(in srgb, var(--pg-success) 45%, var(--pg-border));
+}
+
+.pg-chip-x {
+  border: 0;
+  background: transparent;
+  color: var(--pg-sub);
+  cursor: pointer;
+  padding: 0 1px;
+  font-size: 10px;
+}
+
+.pg-chip-x:hover {
+  color: var(--pg-danger);
+}
+
+/* ---------------- 预设 ---------------- */
+
+.pg-preset-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.pg-preset {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 7px;
+  border: 1px solid var(--pg-border);
+  border-radius: 6px;
+  background: var(--pg-bg);
+}
+
+.pg-preset-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.pg-preset-name {
+  font-weight: 600;
+}
+
+.pg-role-tag {
+  margin-left: 5px;
+  padding: 0 5px;
+  border: 1px solid var(--pg-border);
+  border-radius: 999px;
+  font-size: 9.5px;
+  font-weight: 400;
+  color: var(--pg-sub);
+}
+
+button.pg-chip {
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
+}
+
+.pg-preset-summary {
+  font-size: 10.5px;
+  color: var(--pg-sub);
+  overflow-wrap: anywhere;
+}
+
+/* ---------------- 状态与提示 ---------------- */
+
+.pg-empty {
+  padding: 16px 10px;
+  text-align: center;
+  color: var(--pg-sub);
+  border: 1px dashed var(--pg-border);
+  border-radius: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  align-items: center;
+}
+
+.pg-empty-title {
+  color: var(--pg-fg);
+  font-weight: 600;
+}
+
+.pg-empty-hint {
+  font-size: 11px;
+}
+
+.pg-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 24px 10px;
+  color: var(--pg-sub);
+}
+
+.pg-spinner {
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  border: 2px solid var(--pg-border);
+  border-top-color: var(--pg-primary);
+  animation: pg-spin 0.8s linear infinite;
+}
+
+@keyframes pg-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.pg-error {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 9px 10px;
+  border: 1px solid color-mix(in srgb, var(--pg-danger) 45%, var(--pg-border));
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--pg-danger) 8%, transparent);
+}
+
+.pg-error-title {
+  font-weight: 600;
+  color: var(--pg-danger);
+}
+
+.pg-error-body {
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.pg-inline-warn {
+  padding: 5px 8px;
+  border-radius: 6px;
+  font-size: 11px;
+  background: color-mix(in srgb, var(--pg-warn) 12%, transparent);
+  color: var(--pg-warn);
+  border: 1px solid color-mix(in srgb, var(--pg-warn) 35%, var(--pg-border));
+}
+
+.pg-notices {
+  position: absolute;
+  left: 10px;
+  right: 10px;
+  bottom: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  pointer-events: none;
+}
+
+.pg-notice {
+  padding: 5px 9px;
+  border-radius: 6px;
+  font-size: 11px;
+  background: var(--pg-elevated);
+  border: 1px solid var(--pg-border);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.12);
+  overflow-wrap: anywhere;
+}
+
+.pg-notice[data-tone="ok"] {
+  border-color: color-mix(in srgb, var(--pg-success) 45%, var(--pg-border));
+}
+
+.pg-notice[data-tone="warn"] {
+  border-color: color-mix(in srgb, var(--pg-warn) 45%, var(--pg-border));
+}
+
+.pg-notice[data-tone="bad"] {
+  border-color: color-mix(in srgb, var(--pg-danger) 45%, var(--pg-border));
+  color: var(--pg-danger);
+}
+
+/* ---------------- 编队弹窗 ---------------- */
+
+/* 右面板的 backdrop-filter 会给 fixed 后代创建包含块：宽度用视口单位，
+   位置由组件按实际偏移修正，遮罩因此铺满整个窗口而不是只覆盖右面板。 */
+.pg-modal-backdrop {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100vw;
+  height: 100vh;
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(17, 24, 39, 0.55);
+  backdrop-filter: blur(2px);
+}
+
+.pg-modal {
+  display: flex;
+  flex-direction: column;
+  width: min(980px, 100%);
+  max-height: min(820px, 100%);
+  min-height: 0;
+  border: 1px solid var(--pg-border);
+  border-radius: 10px;
+  background: var(--pg-bg);
+  color: var(--pg-fg);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.35);
+  overflow: hidden;
+  font-size: 12px;
+  font-family: var(--font-sans, system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif);
+}
+
+.pg-modal *,
+.pg-modal *::before,
+.pg-modal *::after {
+  box-sizing: border-box;
+}
+
+/* 编队弹窗要同时容下网络图、成员卡、派发表单与任务列表，单独放宽尺寸。 */
+.pg-modal.pg-modal-wide {
+  width: min(1120px, 100%);
+  max-height: min(880px, 100%);
+}
+
+.pg-modal-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--pg-border);
+  background: var(--pg-elevated);
+}
+
+.pg-modal-title {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  font-size: 13.5px;
+  font-weight: 600;
+}
+
+/* 概览只留一句话：编入进度、正在跑的角色、待跑任务，比三枚徽标更快读懂。 */
+.pg-modal-sum {
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--pg-sub);
+  font-variant-numeric: tabular-nums;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pg-modal-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+}
+
+/* 相对时间：让用户知道眼前数据有多新，轮询失败时也能察觉。 */
+.pg-updated {
+  font-size: 10.5px;
+  color: var(--pg-sub);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.pg-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--pg-sub);
+  cursor: pointer;
+}
+
+.pg-icon-btn:hover:not(:disabled) {
+  background: var(--pg-hover);
+  color: var(--pg-fg);
+}
+
+.pg-icon-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.pg-icon-btn[data-spinning="1"] svg {
+  animation: pg-spin 0.9s linear infinite;
+}
+
+.pg-modal-x {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--pg-sub);
+  cursor: pointer;
+}
+
+.pg-modal-x:hover {
+  background: var(--pg-hover);
+  color: var(--pg-fg);
+}
+
+/* 弹窗内的三段式工作区：编队 / 派发 / 任务，低频内容按需展开。 */
+.pg-modal-tabs {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--pg-border);
+  background: var(--pg-elevated);
+}
+
+/* 标签单独一层滚动容器：右侧的链路提示不能被挤掉。 */
+.pg-modal-tablist {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-x: auto;
+}
+
+.pg-modal-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 7px 10px 6px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--pg-sub);
+  font: inherit;
+  font-size: 12px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.pg-modal-tab:hover {
+  color: var(--pg-fg);
+}
+
+.pg-modal-tab[data-active="1"] {
+  color: var(--pg-fg);
+  border-bottom-color: var(--pg-primary);
+  font-weight: 600;
+}
+
+.pg-modal-tab-num {
+  min-width: 16px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: var(--pg-hover);
+  color: var(--pg-sub);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 16px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.pg-modal-tab[data-active="1"] .pg-modal-tab-num {
+  background: color-mix(in srgb, var(--pg-primary) 16%, transparent);
+  color: var(--pg-primary);
+}
+
+.pg-modal-tab-note {
+  margin-left: auto;
+  padding-left: 8px;
+  font-size: 10.5px;
+  color: var(--pg-warn);
+  white-space: nowrap;
+}
+
+/* 就地反馈条：危险动作的二次确认提示、重复项提示，避免依赖可能被遮住的全局 toast。 */
+.pg-flash {
+  margin: 8px 12px 0;
+  padding: 6px 9px;
+  border: 1px solid var(--pg-border);
+  border-left: 3px solid var(--pg-sub);
+  border-radius: 6px;
+  background: var(--pg-elevated);
+  font-size: 11px;
+  line-height: 1.45;
+  animation: pg-flash-in 0.18s ease-out;
+}
+
+.pg-flash[data-tone="ok"] {
+  border-left-color: var(--pg-success);
+}
+
+.pg-flash[data-tone="warn"] {
+  border-left-color: var(--pg-warn);
+  color: var(--pg-warn);
+}
+
+.pg-flash[data-tone="bad"] {
+  border-left-color: var(--pg-danger);
+  color: var(--pg-danger);
+}
+
+@keyframes pg-flash-in {
+  from {
+    opacity: 0;
+    transform: translateY(-3px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.pg-modal-note {
+  margin: 8px 12px 0;
+}
+
+.pg-modal-loading {
+  padding: 28px 16px;
+}
+
+.pg-modal-body {
+  padding: 12px;
+  overflow: auto;
+  min-height: 0;
+}
+
+.pg-modal-body[data-layout="split"] {
+  display: grid;
+  grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr);
+  gap: 12px;
+}
+
+.pg-modal-body[data-layout="single"] {
+  display: block;
+}
+
+/* 骨架屏：先把版面画出来，再填数据，避免整块空白后突然跳动。 */
+.pg-skel-col {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.pg-skel {
+  position: relative;
+  overflow: hidden;
+  border-radius: 8px;
+  background: var(--pg-hover);
+}
+
+.pg-skel::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--pg-fg) 8%, transparent), transparent);
+  animation: pg-skel 1.4s ease-in-out infinite;
+}
+
+@keyframes pg-skel {
+  100% {
+    transform: translateX(100%);
+  }
+}
+
+.pg-skel-net {
+  height: 300px;
+}
+
+.pg-skel-card {
+  height: 86px;
+}
+
+.pg-skel-line {
+  height: 12px;
+}
+
+.pg-skel-line-short {
+  width: 45%;
+}
+
+.pg-roster-left,
+.pg-roster-right {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.pg-roster-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.pg-roster-head .pg-meta {
+  font-weight: 400;
+}
+
+.pg-net {
+  width: 100%;
+  height: auto;
+  border: 1px solid var(--pg-border);
+  border-radius: 8px;
+  background:
+    radial-gradient(circle at 50% 45%, color-mix(in srgb, var(--pg-primary) 10%, transparent), transparent 62%),
+    var(--pg-elevated);
+}
+
+.pg-net-link {
+  stroke: color-mix(in srgb, var(--pg-border) 80%, transparent);
+  stroke-width: 1.2;
+  stroke-dasharray: 4 4;
+}
+
+.pg-net-node {
+  cursor: pointer;
+}
+
+.pg-net-node .pg-net-dot {
+  fill: var(--pg-bg);
+  stroke: var(--pg-border);
+  stroke-width: 1.4;
+  transition: stroke 0.15s ease, fill 0.15s ease;
+}
+
+.pg-net-node:hover .pg-net-dot {
+  stroke: var(--pg-primary);
+}
+
+.pg-net-node:focus-visible {
+  outline: none;
+}
+
+.pg-net-node:focus-visible .pg-net-dot {
+  stroke: var(--pg-primary);
+  stroke-width: 2.6;
+}
+
+.pg-net-node.is-installed .pg-net-dot {
+  fill: color-mix(in srgb, var(--pg-success) 14%, var(--pg-bg));
+  stroke: var(--pg-success);
+}
+
+.pg-net-node.is-active .pg-net-dot {
+  stroke: var(--pg-primary);
+  stroke-width: 2.4;
+}
+
+.pg-net-node.is-installed .pg-net-link {
+  stroke: color-mix(in srgb, var(--pg-success) 55%, transparent);
+  stroke-dasharray: none;
+}
+
+.pg-net-label {
+  fill: var(--pg-fg);
+  font-size: 11px;
+  font-weight: 600;
+  pointer-events: none;
+}
+
+.pg-net-sub {
+  fill: var(--pg-sub);
+  font-size: 9px;
+  pointer-events: none;
+}
+
+.pg-net-meta {
+  fill: var(--pg-sub);
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+}
+
+.pg-net-core .pg-net-dot {
+  fill: color-mix(in srgb, var(--pg-primary) 12%, var(--pg-bg));
+  stroke: var(--pg-primary);
+  stroke-width: 1.6;
+}
+
+/* 窄屏下环形图不可读，改用它承载同一份数据。 */
+.pg-net-list {
+  display: none;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.pg-net-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 8px;
+  border: 1px solid var(--pg-border);
+  border-radius: 7px;
+  background: var(--pg-bg);
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.pg-net-row:hover {
+  background: var(--pg-hover);
+}
+
+.pg-net-row[data-active="1"] {
+  border-color: var(--pg-primary);
+}
+
+.pg-net-row-main {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+
+.pg-net-caption {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  flex-wrap: wrap;
+  font-size: 10.5px;
+  line-height: 1.5;
+  color: var(--pg-sub);
+}
+
+.pg-link {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--pg-primary);
+  font: inherit;
+  font-size: 10.5px;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.pg-link:hover {
+  filter: brightness(1.08);
+}
+
+.pg-help {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 7px 9px;
+  border: 1px solid var(--pg-border);
+  border-radius: 7px;
+  background: var(--pg-elevated);
+  font-size: 10.5px;
+  line-height: 1.55;
+  color: var(--pg-sub);
+}
+
+.pg-help p {
+  margin: 0;
+}
+
+.pg-role-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 9px 10px;
+  border: 1px solid var(--pg-border);
+  border-radius: 8px;
+  background: var(--pg-elevated);
+}
+
+.pg-role-detail-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.pg-role-detail-name {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.pg-role-detail-desc {
+  margin: 0;
+  font-size: 10.5px;
+  line-height: 1.5;
+  color: var(--pg-sub);
+}
+
+.pg-role-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px 12px;
+  font-size: 10.5px;
+  color: var(--pg-sub);
+  font-variant-numeric: tabular-nums;
+}
+
+.pg-role-block {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.pg-role-block-head {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 10.5px;
+  font-weight: 600;
+}
+
+.pg-roster-tasks {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.pg-roster-task {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  font-size: 10.5px;
+  line-height: 1.5;
+  color: var(--pg-sub);
+}
+
+.pg-roster-task-no {
+  flex: none;
+  width: 16px;
+  padding-top: 1px;
+  color: var(--pg-sub);
+  font-family: var(--font-mono, ui-monospace, Consolas, monospace);
+  font-size: 9.5px;
+}
+
+.pg-roster-toolbar {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.pg-search {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.pg-search .pg-input {
+  padding-right: 30px;
+}
+
+.pg-search-clear {
+  position: absolute;
+  right: 2px;
+}
+
+.pg-roster-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-height: 0;
+  max-height: 430px;
+  overflow: auto;
+  padding-right: 2px;
+}
+
+.pg-roster-card {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 8px 9px;
+  border: 1px solid var(--pg-border);
+  border-radius: 8px;
+  background: var(--pg-bg);
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.pg-roster-card:hover {
+  border-color: color-mix(in srgb, var(--pg-primary) 35%, var(--pg-border));
+}
+
+.pg-roster-card.is-active {
+  border-color: var(--pg-primary);
+  background: color-mix(in srgb, var(--pg-primary) 7%, var(--pg-bg));
+}
+
+/* 卡片标题是整行按钮：命中区够大，键盘也能选中角色。 */
+.pg-roster-card-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.pg-roster-no {
+  flex: none;
+  color: var(--pg-sub);
+  font-family: var(--font-mono, ui-monospace, Consolas, monospace);
+  font-size: 9.5px;
+}
+
+.pg-roster-name {
+  font-weight: 600;
+}
+
+.pg-roster-desc {
+  font-size: 10.5px;
+  line-height: 1.45;
+  color: var(--pg-sub);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.pg-roster-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  font-size: 10.5px;
+  color: var(--pg-sub);
+  font-variant-numeric: tabular-nums;
+}
+
+.pg-roster-preview {
+  font-size: 10.5px;
+  line-height: 1.45;
+  color: var(--pg-sub);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  word-break: break-word;
+}
+
+.pg-roster-preview[data-tone="bad"] {
+  color: var(--pg-danger);
+}
+
+.pg-roster-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+/* 运行中节点的呼吸环：只表达「还在跑」，不表示进度（宿主不给百分比）。 */
+.pg-net-ring {
+  fill: none;
+  stroke: color-mix(in srgb, var(--pg-primary) 65%, transparent);
+  stroke-width: 1.2;
+  stroke-dasharray: 3 4;
+  animation: pg-net-pulse 1.8s ease-in-out infinite;
+}
+
+@keyframes pg-net-pulse {
+  0%,
+  100% {
+    opacity: 0.35;
+  }
+  50% {
+    opacity: 0.9;
+  }
+}
+
+/* ---------------- 链路 ---------------- */
+
+/* 链路页：环节编辑器 + 链路记录，单列自上而下。 */
+.pg-chain-page {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* 环节清单：一行一个环节，勾选参与，展开编辑本步任务。 */
+.pg-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.pg-step {
+  border: 1px solid var(--pg-border);
+  border-radius: 7px;
+  background: var(--pg-bg);
+  overflow: hidden;
+}
+
+.pg-step[data-enabled="0"] {
+  opacity: 0.62;
+}
+
+.pg-step[data-open="1"] {
+  border-color: color-mix(in srgb, var(--pg-primary) 40%, var(--pg-border));
+}
+
+.pg-step-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 8px;
+}
+
+.pg-step-check {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  accent-color: var(--pg-primary);
+  cursor: pointer;
+}
+
+.pg-step-no {
+  flex: none;
+  width: 16px;
+  color: var(--pg-sub);
+  font-family: var(--font-mono, ui-monospace, Consolas, monospace);
+  font-size: 9.5px;
+}
+
+.pg-step-name {
+  font-size: 11.5px;
+  font-weight: 600;
+}
+
+.pg-step-sub {
+  min-width: 0;
+  color: var(--pg-sub);
+  font-size: 10.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pg-step-head .pg-link {
+  flex: none;
+  margin-left: auto;
+  white-space: nowrap;
+}
+
+.pg-step-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 9px 9px;
+  border-top: 1px dashed var(--pg-border);
+  background: var(--pg-elevated);
+}
+
+/* 默认任务书：说明这一环默认要交出的东西，避免用户以为是空任务。 */
+.pg-step-brief {
+  padding: 6px 8px;
+  border: 1px solid var(--pg-border);
+  border-radius: 6px;
+  background: var(--pg-bg);
+  color: var(--pg-sub);
+  font-size: 10.5px;
+  line-height: 1.55;
+}
+
+/* 启动区：用主色描边圈出唯一的提交动作。 */
+.pg-chain-submit {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, var(--pg-primary) 30%, var(--pg-border));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--pg-primary) 6%, var(--pg-bg));
+}
+
+.pg-submit-note {
+  margin-right: auto;
+  font-size: 10.5px;
+  line-height: 1.45;
+  color: var(--pg-sub);
+}
+
+.pg-chain-records {
+  border: 1px solid var(--pg-border);
+  border-radius: 8px;
+  background: var(--pg-elevated);
+  overflow: hidden;
+}
+
+.pg-task-form {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.pg-form-block {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.pg-form-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  min-width: 0;
+}
+
+.pg-form-row > .pg-input,
+.pg-form-row > .pg-textarea,
+.pg-form-row > .pg-select {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.pg-form-label {
+  flex: none;
+  width: 76px;
+  padding-top: 3px;
+  font-size: 11px;
+  color: var(--pg-sub);
+}
+
+.pg-field-help {
+  margin-left: 84px;
+  font-size: 10px;
+  line-height: 1.45;
+  color: var(--pg-sub);
+}
+
+.pg-inline-field {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.pg-inline-field .pg-input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.pg-select-inline {
+  flex: 0 0 240px;
+}
+
+/* 模板多选：一条模板一行，点整行切换勾选。 */
+.pg-template-list {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.pg-template-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  width: 100%;
+  padding: 5px 7px;
+  border: 1px solid var(--pg-border);
+  border-radius: 7px;
+  background: var(--pg-bg);
+  color: var(--pg-fg);
+  font-size: 11px;
+  line-height: 1.45;
+  text-align: left;
+  cursor: pointer;
+}
+
+.pg-template-item:hover {
+  background: var(--pg-hover);
+}
+
+.pg-template-item[aria-pressed="true"] {
+  border-color: var(--pg-primary);
+  background: color-mix(in srgb, var(--pg-primary) 9%, var(--pg-bg));
+}
+
+/* 显式勾选框：只靠边框变色在弱对比主题里看不清是否已选。 */
+.pg-template-check {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 13px;
+  height: 13px;
+  margin-top: 1px;
+  border: 1px solid var(--pg-border);
+  border-radius: 3px;
+  background: var(--pg-bg);
+  color: var(--pg-primary-fg);
+}
+
+.pg-template-item[aria-pressed="true"] .pg-template-check {
+  border-color: var(--pg-primary);
+  background: var(--pg-primary);
+}
+
+.pg-template-no {
+  flex: none;
+  width: 16px;
+  padding-top: 1px;
+  color: var(--pg-sub);
+  font-family: var(--font-mono, ui-monospace, Consolas, monospace);
+  font-size: 10px;
+}
+
+.pg-template-item[aria-pressed="true"] .pg-template-no {
+  color: var(--pg-primary);
+}
+
+.pg-template-text {
+  min-width: 0;
+  word-break: break-word;
+}
+
+.pg-queue-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 190px;
+  overflow: auto;
+}
+
+.pg-queue-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  padding: 5px 7px;
+  border: 1px dashed var(--pg-border);
+  border-radius: 6px;
+  font-size: 10.5px;
+  line-height: 1.45;
+}
+
+.pg-queue-no {
+  flex: none;
+  width: 14px;
+  padding-top: 1px;
+  color: var(--pg-sub);
+  font-family: var(--font-mono, ui-monospace, Consolas, monospace);
+  font-size: 9.5px;
+}
+
+.pg-queue-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  word-break: break-word;
+}
+
+/* ---------------- 链路 ---------------- */
+
+.pg-chain-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.pg-chain-toggle:hover {
+  background: var(--pg-hover);
+}
+
+.pg-chain-title {
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.pg-chain-toggle .pg-meta {
+  margin-left: auto;
+  text-align: right;
+}
+
+.pg-chevron {
+  flex: none;
+  color: var(--pg-sub);
+  transition: transform 0.15s ease;
+}
+
+.pg-chevron[data-open="1"] {
+  transform: rotate(90deg);
+}
+
+.pg-chain-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 9px 10px 10px;
+  border-top: 1px solid var(--pg-border);
+}
+
+.pg-chain-page .pg-form-label {
+  width: 76px;
+}
+
+/* 链路：当前步高亮，各步状态用颜色区分（失败与跳过单独标色）。 */
+.pg-chain-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 320px;
+  overflow: auto;
+  padding-right: 2px;
+}
+
+.pg-chain-item {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 7px 8px;
+  border: 1px solid var(--pg-border);
+  border-radius: 8px;
+  background: var(--pg-bg);
+}
+
+.pg-chain-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.pg-chain-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.pg-chain-steps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.pg-chain-step {
+  padding: 2px 7px;
+  border: 1px solid var(--pg-border);
+  border-radius: 999px;
+  font-size: 10.5px;
+  color: var(--pg-sub);
+}
+
+.pg-chain-step[data-state="running"] {
+  border-color: var(--pg-primary);
+  color: var(--pg-primary);
+  background: color-mix(in srgb, var(--pg-primary) 8%, transparent);
+}
+
+.pg-chain-step[data-state="completed"] {
+  border-color: color-mix(in srgb, var(--pg-success) 55%, var(--pg-border));
+  color: var(--pg-success);
+}
+
+.pg-chain-step[data-state="failed"],
+.pg-chain-step[data-state="missing"] {
+  border-color: color-mix(in srgb, var(--pg-danger) 55%, var(--pg-border));
+  color: var(--pg-danger);
+}
+
+.pg-chain-step[data-state="skipped"],
+.pg-chain-step[data-state="stopped"],
+.pg-chain-step[data-state="timeout"] {
+  border-color: color-mix(in srgb, var(--pg-warn) 55%, var(--pg-border));
+  color: var(--pg-warn);
+}
+
+.pg-chain-step[data-current="1"] {
+  font-weight: 600;
+}
+
+/* ---------------- 任务 ---------------- */
+
+.pg-tasks {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.pg-task-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-height: 0;
+  max-height: 460px;
+  overflow: auto;
+  padding-right: 2px;
+}
+
+.pg-task-item {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: start;
+  padding: 7px 8px;
+  border: 1px solid var(--pg-border);
+  border-radius: 8px;
+  background: var(--pg-bg);
+}
+
+.pg-task-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.pg-task-title {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  flex-wrap: wrap;
+  font-size: 11.5px;
+  font-weight: 600;
+}
+
+.pg-task-target {
+  font-family: var(--font-mono, ui-monospace, Consolas, monospace);
+  font-size: 10.5px;
+  font-weight: 400;
+  color: var(--pg-sub);
+  word-break: break-all;
+}
+
+.pg-task-sub {
+  font-size: 10.5px;
+  line-height: 1.45;
+  color: var(--pg-fg);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  word-break: break-word;
+}
+
+.pg-task-meta {
+  font-size: 10px;
+  color: var(--pg-sub);
+  font-variant-numeric: tabular-nums;
+}
+
+.pg-task-preview {
+  font-size: 10px;
+  line-height: 1.45;
+  color: var(--pg-sub);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  word-break: break-word;
+}
+
+/* 任务页的状态原因（超时 / 空回复 / 会话缺失）：与回复预览共用排版，只换颜色。 */
+.pg-task-preview[data-tone="bad"] {
+  color: var(--pg-danger);
+}
+
+.pg-task-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.pg-pre-sm {
+  max-height: 160px;
+}
+
+/* 危险动作的第二次点击：颜色表明这一下会真的删掉东西。 */
+.pg-btn[data-variant="danger"] {
+  border-color: color-mix(in srgb, var(--pg-danger) 45%, var(--pg-border));
+  background: transparent;
+  color: var(--pg-danger);
+}
+
+.pg-btn[data-variant="danger"]:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--pg-danger) 10%, transparent);
+}
+
+.pg-btn .pg-spinner {
+  width: 11px;
+  height: 11px;
+  border-width: 1.5px;
+}
+
+/* 全局通知栈位于遮罩之后会被盖住：抬高一层，保证弹窗内的操作反馈可见。 */
+.pg-notices {
+  z-index: 10000;
+}
+
+.pg-notice {
+  animation: pg-notice-in 0.16s ease-out;
+}
+
+@keyframes pg-notice-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@media (max-width: 900px) {
+  .pg-modal-backdrop {
+    padding: 10px;
+  }
+
+  .pg-modal.pg-modal-wide {
+    max-height: 100%;
+  }
+
+  .pg-modal-body[data-layout="split"] {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .pg-roster-list {
+    max-height: none;
+  }
+
+  /* 窄屏下环节标题行会挤成一条：任务数换到下一行。 */
+  .pg-step-head {
+    flex-wrap: wrap;
+  }
+
+  .pg-step-sub {
+    flex: 1 1 100%;
+    padding-left: 21px;
+  }
+
+  /* 窄屏下标签与控件并排会挤成一条：改为标签占一行。 */
+  .pg-form-row {
+    flex-wrap: wrap;
+  }
+
+  .pg-form-label,
+  .pg-chain-page .pg-form-label {
+    width: 100%;
+    padding-top: 0;
+  }
+
+  .pg-field-help {
+    margin-left: 0;
+  }
+
+  /* 触控目标抬高到 30px，避免手指点不中。 */
+  .pg-icon-btn,
+  .pg-modal-x {
+    width: 30px;
+    height: 30px;
+  }
+
+  .pg-modal-tab {
+    padding: 9px 10px 8px;
+  }
+}
+
+@media (max-width: 760px) {
+  .pg-net {
+    display: none;
+  }
+
+  .pg-net-list {
+    display: flex;
+  }
+
+  .pg-task-item {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .pg-task-actions {
+    grid-column: 1 / -1;
+    justify-content: flex-end;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pg-net-ring,
+  .pg-skel::after,
+  .pg-flash,
+  .pg-notice {
+    animation: none;
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "name": "snow-purge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "description": "Purge 面板插件：状态自检、提示词与预设、免确认工具、请求代理托管与本机备份回滚",
+  "scripts": {
+    "build": "node build.mjs",
+    "check": "node --check index.js && node --check background.mjs"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0"
+  }
+}
