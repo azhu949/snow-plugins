@@ -3,7 +3,15 @@
 // 另外在插件目录留一份不含密码的 JSON 备份：宿主的插件存储在重装/重载时可能被重置，有备份就能自动恢复。
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
-import { DOCKER_PATH_PATTERN } from "../shared/contract.js";
+import {
+  DOCKER_PATH_PATTERN,
+  ENV_TOTAL_MAX,
+  ENV_VALUE_MAX,
+  PRE_BUILD_ENV_TOTAL_MAX,
+  PRE_BUILD_ENV_VALUE_MAX,
+  normalizeEnvValue,
+  utf8Bytes,
+} from "../shared/contract.js";
 
 const STORAGE_KEY = "connection";
 const SSH_PASSWORD_PREFIX = "sshPassword_";
@@ -102,8 +110,9 @@ const normalizePreBuild = (raw) => {
   for (const item of Array.isArray(raw?.env) ? raw.env : []) {
     const key = cleanText(item?.key, 128);
     if (!ENV_KEY_PATTERN.test(key)) continue;
-    const value = typeof item?.value === "string" ? item.value.replace(/[\r\n]/g, "") : "";
-    env.push({ key, value: value.slice(0, 512) });
+    // 超长值原样保留：截断会让 PEM 变成半截而不报错，长度问题统一交给 validatePreBuildEnv。
+    const value = normalizeEnvValue(item?.value);
+    env.push({ key, value });
     if (env.length >= MAX_PRE_BUILD_ENV) break;
   }
 
@@ -233,8 +242,9 @@ export const normalizeRunConfig = (raw) => {
   for (const item of Array.isArray(raw?.env) ? raw.env : []) {
     const key = cleanText(item?.key, 128);
     if (!ENV_KEY_PATTERN.test(key)) continue;
-    const value = typeof item?.value === "string" ? item.value.replace(/[\r\n]/g, "") : "";
-    env.push({ key, value: value.slice(0, 512) });
+    // 同前置构建：不在这里截断，长度与总量由 validateRunConfig 明确报错。
+    const value = normalizeEnvValue(item?.value);
+    env.push({ key, value });
     if (env.length >= MAX_ENV) break;
   }
 
@@ -268,6 +278,28 @@ export const normalizeRunConfig = (raw) => {
 };
 
 /**
+ * 前置构建的环境变量单独校验：它不进 SSH 命令，而是整份塞进本机子进程的环境块。
+ * 单值上限比运行环境更严（见 PRE_BUILD_ENV_VALUE_MAX），且必须小于合计上限：
+ * 否则单值填满时先撞上合计检查，错误会归因到「合计超限」上。
+ */
+export const validatePreBuildEnv = (env) => {
+  let total = 0;
+  for (const item of env || []) {
+    if (!ENV_KEY_PATTERN.test(item.key)) return `环境变量名不合法：${item.key}`;
+    if (item.value.includes("\0")) return `环境变量 ${item.key} 的值不能包含 NUL 字符`;
+    if (item.value.length > PRE_BUILD_ENV_VALUE_MAX) {
+      return `前置构建环境变量 ${item.key} 的值有 ${item.value.length} 个字符，超过单值上限 ${PRE_BUILD_ENV_VALUE_MAX}；请精简内容，或改用文件挂载传入`;
+    }
+    // +1 是环境块里 NAME=VALUE 之后的 NUL 分隔符。
+    total += item.key.length + item.value.length + 1;
+  }
+  if (total > PRE_BUILD_ENV_TOTAL_MAX) {
+    return `前置构建环境变量的合计长度 ${total} 个字符（含变量名与分隔符），超过合计上限 ${PRE_BUILD_ENV_TOTAL_MAX}；请精简变量，或改用文件挂载传入`;
+  }
+  return "";
+};
+
+/**
  * 校验单条运行配置，返回错误文案（空字符串表示通过）。
  * requireServer 仅在「手动登记 Dockerfile」时为 false：登记项先只占一个路径，
  * 真正构建 / 运行时路由仍会强制 serverId。
@@ -296,13 +328,27 @@ export const validateRunConfig = (config, { requireServer = true } = {}) => {
     }
     if (!mount.container || !mount.container.startsWith("/")) return "绑定挂载的容器路径必须以 / 开头";
   }
+  let envBytes = 0;
   for (const item of config.env || []) {
     if (!ENV_KEY_PATTERN.test(item.key)) return `环境变量名不合法：${item.key}`;
-    if (/[\r\n]/.test(item.value)) return `环境变量 ${item.key} 的值不能包含换行`;
+    // 值允许换行（PEM 私钥、证书都是多行文本），只拦 NUL：它无法出现在进程环境里。
+    if (item.value.includes("\0")) return `环境变量 ${item.key} 的值不能包含 NUL 字符`;
+    if (item.value.length > ENV_VALUE_MAX) {
+      return `环境变量 ${item.key} 的值有 ${item.value.length} 个字符，超过单值上限 ${ENV_VALUE_MAX}；请精简内容或改用文件挂载`;
+    }
+    envBytes += utf8Bytes(item.key) + utf8Bytes(item.value);
+  }
+  // 这些值会拼进一条 SSH exec 命令：总量过大时服务端会按单包上限直接断开连接。
+  if (envBytes > ENV_TOTAL_MAX) {
+    return `环境变量的总值约 ${Math.ceil(envBytes / 1024)} KB，超过单份配置上限 ${
+      ENV_TOTAL_MAX / 1024
+    } KB；请精简变量，或把大段内容放到服务器上的文件里`;
   }
   if (/[\r\n]/.test(config.runOptions || "")) return "运行选项不能包含换行";
   const preBuild = config.preBuild || {};
   if (preBuild.tool) {
+    const invalidEnv = validatePreBuildEnv(preBuild.env);
+    if (invalidEnv) return invalidEnv;
     if (preBuild.cwd && !ABSOLUTE_PATH_PATTERN.test(preBuild.cwd)) {
       return "构建前步骤的工作目录必须是绝对路径";
     }
@@ -356,6 +402,38 @@ const normalizeRunConfigs = (raw) => {
     out[path] = config;
     count += 1;
   }
+  return out;
+};
+
+/**
+ * 列表与扫描只回摘要：env 值、绑定挂载与运行选项留在配置里，编辑或构建时按路径单独读取。
+ * 面板的卡片与配置列表只需要名称、标记、服务器与已填项标识。
+ */
+export const summarizeRunConfig = (config) => {
+  if (!config) return null;
+  return {
+    name: config.name || "",
+    tag: config.tag || "",
+    platform: config.platform || "",
+    serverId: config.serverId || "",
+    containerName: config.containerName || "",
+    options: Array.isArray(config.options) ? [...config.options] : [],
+    preBuildTool: config.preBuild?.tool || "",
+    envKeys: (config.env || []).map((item) => item.key),
+    counts: {
+      buildArgs: (config.buildArgs || []).length,
+      ports: (config.ports || []).length,
+      mounts: (config.mounts || []).length,
+      env: (config.env || []).length,
+      preBuildEnv: (config.preBuild?.env || []).length,
+    },
+  };
+};
+
+/** 整表摘要：键仍是 Dockerfile 绝对路径。 */
+export const summarizeRunConfigs = (configs) => {
+  const out = {};
+  for (const [path, config] of Object.entries(configs || {})) out[path] = summarizeRunConfig(config);
   return out;
 };
 
@@ -751,10 +829,18 @@ export function createSettings({ storage, secrets, backupPath = "", log = () => 
       return true;
     },
 
-    /** 全部运行配置（键是 Dockerfile 绝对路径）。 */
+    /** 全部运行配置（键是 Dockerfile 绝对路径）。仅供后台内部使用，不进接口响应。 */
     getRunConfigs: async () => {
       await ensure();
       return { ...current.runConfigs };
+    },
+
+    /** 单条运行配置的完整内容：列表只回摘要，编辑与构建时按路径单独取。 */
+    async getRunConfig(dockerfile) {
+      await ensure();
+      const path = cleanText(dockerfile, 512);
+      if (!path) return null;
+      return current.runConfigs[path] ? { ...current.runConfigs[path] } : null;
     },
 
     /** 保存某个 Dockerfile 的运行配置；键就是 Dockerfile 的绝对路径。 */
@@ -769,19 +855,24 @@ export function createSettings({ storage, secrets, backupPath = "", log = () => 
       const next = normalizeSettings({ ...current, runConfigs: { ...current.runConfigs, [path]: normalized } });
       await persist(next);
       log(`运行配置已保存：${normalized.name || path}`);
-      return { dockerfile: path, config: next.runConfigs[path], runConfigs: next.runConfigs };
+      // 只回单条配置与摘要：整表（可能含多份 env 明文）不再随保存响应下发。
+      return {
+        dockerfile: path,
+        config: next.runConfigs[path],
+        summary: summarizeRunConfig(next.runConfigs[path]),
+      };
     },
 
     async removeRunConfig(dockerfile) {
       await ensure();
       const path = cleanText(dockerfile, 512);
-      if (!current.runConfigs[path]) return { removed: false, runConfigs: { ...current.runConfigs } };
+      if (!current.runConfigs[path]) return { removed: false };
       const runConfigs = { ...current.runConfigs };
       delete runConfigs[path];
       const next = normalizeSettings({ ...current, runConfigs });
       await persist(next);
       log(`运行配置已删除：${path}`);
-      return { removed: true, runConfigs: next.runConfigs };
+      return { removed: true };
     },
   };
 }

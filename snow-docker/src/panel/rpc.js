@@ -224,6 +224,10 @@ export function createRpc(api, { log = () => {} } = {}) {
         body: { dockerfile, config, register: register === true, root },
         timeoutMs: 15000,
       }),
+    // 列表只回摘要：编辑配置或构建前按路径取一次完整配置。
+    // 读取走独立 GET：旧后台没有这条路径时会返回「未知接口」，面板据此提示重启。
+    readProjectConfig: (dockerfile) =>
+      request(ROUTES.projectConfigRead, { query: { dockerfile }, timeoutMs: 15000 }),
     removeProjectConfig: (dockerfile) =>
       request(ROUTES.projectConfig, { method: "POST", body: { dockerfile, remove: true }, timeoutMs: 15000 }),
     composeServices: (file) => request(ROUTES.composeServices, { query: { file }, timeoutMs: 30000 }),

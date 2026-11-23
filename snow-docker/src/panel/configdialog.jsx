@@ -5,11 +5,18 @@ import { h, getReact } from "./react.js";
 import { Btn } from "./ui.jsx";
 import { DkSelect } from "./select.jsx";
 import {
+  ENV_VALUE_MAX,
+  PRE_BUILD_ENV_TOTAL_MAX,
+  PRE_BUILD_ENV_VALUE_MAX,
+  normalizeEnvValue,
+} from "../shared/contract.js";
+import {
   BUILD_OPTION_IDS,
   NPM_COMMANDS,
   PRE_BUILD_DEFAULTS,
   PRE_BUILD_TOOLS,
   RUN_OPTION_IDS,
+  baseName,
   draftFromConfig,
   draftToConfig,
   emptyDraft,
@@ -79,14 +86,15 @@ const LIST_FIELDS = {
   env: {
     columns: [
       { key: "key", placeholderKey: "project.keyName" },
-      { key: "value", placeholderKey: "project.keyValue" },
+      // 值可能是 PEM 私钥这类多行文本，用文本域保留换行；limit 只用于显示字数，不做截断。
+      { key: "value", placeholderKey: "project.keyValue", multiline: true, limit: ENV_VALUE_MAX },
     ],
     empty: () => ({ key: "", value: "" }),
   },
 };
 
 /** 「修改」下拉：勾选后对应的行才显示，和 IDEA 的 Modify options 一致。 */
-function OptionMenu({ t, ids, selected, onToggle }) {
+function OptionMenu({ t, ids, selected, onToggle, disabled }) {
   const React = getReact();
   const [open, setOpen] = React.useState(false);
   const [coords, setCoords] = React.useState(null);
@@ -142,7 +150,7 @@ function OptionMenu({ t, ids, selected, onToggle }) {
 
   return (
     <div className="dk-option-anchor" ref={rootRef}>
-      <Btn size="sm" variant="ghost" onClick={() => setOpen((value) => !value)}>
+      <Btn size="sm" variant="ghost" disabled={disabled === true} onClick={() => setOpen((value) => !value)}>
         {t("project.modify")}
       </Btn>
       {open && coords ? (
@@ -166,14 +174,15 @@ const summarize = (rows, mapper) => {
 
 /**
  * files: [{ path, relative, name, depth, manual, missing }]
- * runConfigs: { [path]: config }
+ * runConfigSummaries: { [path]: { name, tag, platform, serverId, ... } }
  * servers: [{ id, name, host, username }]
+ * onLoadConfig(path) 读取一条运行配置的完整内容：扫描只回摘要，env 等值不随列表下发
  * onSave(path, config, previousPath) / onRemove(path) / onAdd(path) 失败时抛错，由本组件展示
  */
 export function ConfigDialog({
   t,
   files,
-  runConfigs,
+  runConfigSummaries,
   servers,
   projectName,
   projectRoot,
@@ -182,6 +191,7 @@ export function ConfigDialog({
   onRemove,
   onAdd,
   onLoadScripts,
+  onLoadConfig,
   onClose,
 }) {
   const React = getReact();
@@ -194,6 +204,9 @@ export function ConfigDialog({
   const [editor, setEditor] = React.useState(null);
   const [scripts, setScripts] = React.useState({ loading: false, list: [], missing: false, error: "", path: "" });
   const [scriptCustom, setScriptCustom] = React.useState(false);
+  /** 正在按路径读取完整配置的文件；读取完成前不允许保存，避免把空草稿写回。 */
+  const [loadingPath, setLoadingPath] = React.useState("");
+  const loadSeq = React.useRef(0);
   const maskRef = React.useRef(null);
 
   /**
@@ -256,19 +269,52 @@ export function ConfigDialog({
     };
   }, []);
 
-  // 列表变化（重扫 / 新增 / 删除）时为每个文件补齐草稿，并清掉已消失的项。
+  // 列表变化（重扫 / 新增 / 删除）时清掉已消失的草稿；草稿在选中该文件时按需加载。
   React.useEffect(() => {
     setDrafts((prev) => {
+      let changed = false;
       const next = { ...prev };
-      for (const file of files) {
-        if (!next[file.path]) next[file.path] = draftFromConfig(file, runConfigs[file.path], projectName);
-      }
       for (const key of Object.keys(next)) {
-        if (!files.some((file) => file.path === key)) delete next[key];
+        if (!files.some((file) => file.path === key)) {
+          delete next[key];
+          changed = true;
+        }
       }
-      return next;
+      // 没有变化就返回原引用：files 为空数组时也照常渲染，避免状态被反复替换。
+      return changed ? next : prev;
     });
-  }, [files, runConfigs, projectName]);
+  }, [files]);
+
+  // 选中项还没有草稿时按路径取完整配置：列表只回摘要，env 等值不常驻面板 state。
+  React.useEffect(() => {
+    if (!selected || drafts[selected] || !onLoadConfig) return undefined;
+    const seq = ++loadSeq.current;
+    const path = selected;
+    setLoadingPath(path);
+    let cancelled = false;
+    (async () => {
+      try {
+        const data = await onLoadConfig(path);
+        if (cancelled || seq !== loadSeq.current) return;
+        const file = files.find((item) => item.path === path) || {
+          path,
+          relative: baseName(path),
+          name: baseName(path),
+          depth: 0,
+        };
+        setDrafts((prev) =>
+          prev[path] ? prev : { ...prev, [path]: draftFromConfig(file, data?.config || null, projectName) }
+        );
+      } catch (cause) {
+        if (!cancelled && seq === loadSeq.current) setError(String(cause?.message || cause));
+      } finally {
+        if (!cancelled && seq === loadSeq.current) setLoadingPath("");
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [selected, drafts, files, projectName, onLoadConfig]);
 
   // 选中项：优先用调用方指定的文件，它被删掉后回退到第一个。
   React.useEffect(() => {
@@ -291,6 +337,13 @@ export function ConfigDialog({
 
   const current = files.find((file) => file.path === selected) || null;
   const draft = (selected && drafts[selected]) || emptyDraft();
+  /** 完整配置已取回才允许保存：摘要对象不含 env 等值，直接写回会清空已存配置。 */
+  const configReady = Boolean(selected && drafts[selected]);
+  /**
+   * 完整配置未就绪时锁住表单：此时表单里的值只是空草稿，任何输入都会顶掉
+   * 随后返回的服务端配置。没有按需读取能力时保持可编辑，与旧行为一致。
+   */
+  const locked = Boolean(selected && onLoadConfig) && !configReady;
   const serverOptions = [
     ...(draft.serverId ? [] : [{ value: "", label: t("target.choose") }]),
     ...servers.map((item) => ({
@@ -336,6 +389,10 @@ export function ConfigDialog({
   })();
 
   const patch = (next) => {
+    // 完整配置还没取回时不写草稿：先写进去会占住 drafts[path]，
+    // 随后返回的服务端配置被判为已有草稿而丢弃，界面上就成了「配置被清空」。
+    // 没有按需读取能力时不做拦截，避免退化成「能输入但输入无效」。
+    if (selected && onLoadConfig && !drafts[selected]) return;
     setDrafts((prev) => ({ ...prev, [selected]: { ...(prev[selected] || emptyDraft()), ...next } }));
   };
 
@@ -468,10 +525,10 @@ export function ConfigDialog({
   };
 
   const commit = async (mode) => {
-    if (!selected) return;
+    if (!selected || !drafts[selected]) return;
     const converted = draftToConfig(draft);
     if (converted.error) {
-      setError(t(converted.error));
+      setError(t(converted.error, converted.params));
       return;
     }
     setBusy(mode);
@@ -548,14 +605,20 @@ export function ConfigDialog({
   };
 
   /** 一行「标签 + 值 + 文件夹图标」，值在二级弹窗里改。 */
-  const valueRow = (label, summary, onEdit) => (
+  const valueRow = (label, summary, onEdit, disabled) => (
     <div className="dk-field">
       <span className="dk-meta">{label}</span>
       <span className="dk-value">
         <span className="dk-value-text" title={summary}>
           {summary || t("project.notSet")}
         </span>
-        <button type="button" className="dk-icon-btn" title={t("project.editValue")} onClick={onEdit}>
+        <button
+          type="button"
+          className="dk-icon-btn"
+          title={t("project.editValue")}
+          disabled={disabled === true}
+          onClick={onEdit}
+        >
           <FolderIcon />
         </button>
       </span>
@@ -563,6 +626,11 @@ export function ConfigDialog({
   );
 
   const listConfig = editor && editor.kind === "list" ? LIST_FIELDS[editor.field] : null;
+  /** 前置构建 env 的合计长度：键 + 值 + 分隔符，与后台 validatePreBuildEnv 同一口径。 */
+  const preBuildEnvChars = (editor?.value?.env || []).reduce(
+    (sum, item) => sum + String(item.key || "").length + normalizeEnvValue(item.value).length + 1,
+    0
+  );
 
   return (
     <div
@@ -585,7 +653,7 @@ export function ConfigDialog({
           <div className="dk-modal-side">
             <div className="dk-config-list">
               {files.map((file) => {
-                const saved = runConfigs[file.path] || null;
+                const saved = runConfigSummaries[file.path] || null;
                 // 正在编辑的项优先显示草稿里的名字，改名时左侧列表立刻跟着变。
                 const label = drafts[file.path]?.name || saved?.name || file.relative;
                 return (
@@ -639,6 +707,7 @@ export function ConfigDialog({
           </div>
 
           <div className="dk-modal-main">
+            {loadingPath === selected ? <div className="dk-note">{t("project.configLoading")}</div> : null}
             {current ? (
               <div className="dk-form">
                 <label className="dk-field">
@@ -647,6 +716,7 @@ export function ConfigDialog({
                     className="dk-input"
                     value={draft.name}
                     placeholder={current.relative}
+                    disabled={locked}
                     onChange={(event) => patch({ name: event.target.value })}
                   />
                 </label>
@@ -659,6 +729,7 @@ export function ConfigDialog({
                       options={serverOptions}
                       onChange={(value) => patch({ serverId: value })}
                       ariaLabel={t("project.configServer")}
+                      disabled={locked}
                       size="sm"
                     />
                     <span className="dk-note">{t("project.serverHint")}</span>
@@ -669,15 +740,23 @@ export function ConfigDialog({
                   <div className="dk-section-head">
                     <span>{t("project.sectionBuild")}</span>
                     <span className="dk-head-spacer" />
-                    <OptionMenu t={t} ids={BUILD_OPTION_IDS} selected={draft.options} onToggle={toggleOption} />
+                    <OptionMenu
+                      t={t}
+                      ids={BUILD_OPTION_IDS}
+                      selected={draft.options}
+                      onToggle={toggleOption}
+                      disabled={locked}
+                    />
                   </div>
 
                   {valueRow(t("project.configDockerfile"), draft.dockerfile, () =>
-                    openTextEditor("dockerfile", t("project.configDockerfile"), current.path)
+                    openTextEditor("dockerfile", t("project.configDockerfile"), current.path),
+                    locked
                   )}
 
                   {valueRow(t("project.configContextFolder"), draft.context, () =>
-                    openTextEditor("context", t("project.configContextFolder"), t("project.configContextHint"))
+                    openTextEditor("context", t("project.configContextFolder"), t("project.configContextHint")),
+                    locked
                   )}
 
                   <label className="dk-field">
@@ -686,13 +765,15 @@ export function ConfigDialog({
                       className="dk-input"
                       value={draft.tag}
                       placeholder="app:latest"
+                      disabled={locked}
                       onChange={(event) => patch({ tag: event.target.value })}
                     />
                   </label>
 
                   {has("platform")
                     ? valueRow(t("project.option.platform"), draft.platform, () =>
-                        openTextEditor("platform", t("project.option.platform"), "linux/amd64")
+                        openTextEditor("platform", t("project.option.platform"), "linux/amd64"),
+                        locked
                       )
                     : null}
 
@@ -700,7 +781,8 @@ export function ConfigDialog({
                     ? valueRow(
                         t("project.option.buildArgs"),
                         summarize(draft.buildArgs, (arg) => (arg.key ? `${arg.key}=${arg.value}` : "")),
-                        () => openListEditor("buildArgs", t("project.option.buildArgs"))
+                        () => openListEditor("buildArgs", t("project.option.buildArgs")),
+                        locked
                       )
                     : null}
 
@@ -713,6 +795,7 @@ export function ConfigDialog({
                             <input
                               type="checkbox"
                               checked={draft.noCache}
+                              disabled={locked}
                               onChange={(event) => patch({ noCache: event.target.checked })}
                             />
                             <span>{t("project.configNoCache")}</span>
@@ -720,7 +803,12 @@ export function ConfigDialog({
                         ) : null}
                         {has("pull") ? (
                           <label>
-                            <input type="checkbox" checked={draft.pull} onChange={(event) => patch({ pull: event.target.checked })} />
+                            <input
+                              type="checkbox"
+                              checked={draft.pull}
+                              disabled={locked}
+                              onChange={(event) => patch({ pull: event.target.checked })}
+                            />
                             <span>{t("project.configPull")}</span>
                           </label>
                         ) : null}
@@ -733,7 +821,7 @@ export function ConfigDialog({
                   <div className="dk-section-head">
                     <span>{t("project.sectionRun")}</span>
                     <span className="dk-head-spacer" />
-                    <OptionMenu t={t} ids={RUN_OPTION_IDS} selected={draft.options} onToggle={toggleOption} />
+                    <OptionMenu t={t} ids={RUN_OPTION_IDS} selected={draft.options} onToggle={toggleOption} disabled={locked} />
                   </div>
 
                   <label className="dk-field">
@@ -742,6 +830,7 @@ export function ConfigDialog({
                       className="dk-input"
                       value={draft.containerName}
                       placeholder={t("project.configContainerNameHint")}
+                      disabled={locked}
                       onChange={(event) => patch({ containerName: event.target.value })}
                     />
                   </label>
@@ -752,7 +841,8 @@ export function ConfigDialog({
                         summarize(draft.ports, (port) =>
                           port.host || port.container ? `${port.host || "?"}:${port.container || "?"}` : ""
                         ),
-                        () => openListEditor("ports", t("project.option.ports"))
+                        () => openListEditor("ports", t("project.option.ports")),
+                        locked
                       )
                     : null}
 
@@ -764,21 +854,25 @@ export function ConfigDialog({
                             ? `${mount.host || "?"} -> ${mount.container || "?"}${mount.readOnly ? " (ro)" : ""}`
                             : ""
                         ),
-                        () => openListEditor("mounts", t("project.option.mounts"))
+                        () => openListEditor("mounts", t("project.option.mounts")),
+                        locked
                       )
                     : null}
 
                   {has("env")
                     ? valueRow(
                         t("project.option.env"),
-                        summarize(draft.env, (item) => (item.key ? `${item.key}=${item.value}` : "")),
-                        () => openListEditor("env", t("project.option.env"))
+                        // 摘要只显示键名：值可能是私钥，不在折叠行与 tooltip 里铺明文。
+                        summarize(draft.env, (item) => (item.key ? `${item.key}=***` : "")),
+                        () => openListEditor("env", t("project.option.env")),
+                        locked
                       )
                     : null}
 
                   {has("runOptions")
                     ? valueRow(t("project.option.runOptions"), draft.runOptions, () =>
-                        openTextEditor("runOptions", t("project.option.runOptions"), t("project.runOptionsHint"))
+                        openTextEditor("runOptions", t("project.option.runOptions"), t("project.runOptionsHint")),
+                        locked
                       )
                     : null}
                 </div>
@@ -793,7 +887,8 @@ export function ConfigDialog({
                     t("project.preBuildTool"),
                     // 未选工具时明确写「不执行」，避免看成没配置。
                     preBuildSummary(draft.preBuild) || t("project.toolNone"),
-                    openPreBuildEditor
+                    openPreBuildEditor,
+                    locked
                   )}
                 </div>
 
@@ -813,10 +908,10 @@ export function ConfigDialog({
           <Btn size="sm" variant="ghost" onClick={onClose}>
             {t("project.configCancel")}
           </Btn>
-          <Btn size="sm" disabled={!current || Boolean(busy)} onClick={() => void commit("apply")}>
+          <Btn size="sm" disabled={!current || Boolean(busy) || !configReady} onClick={() => void commit("apply")}>
             {t("project.configApply")}
           </Btn>
-          <Btn size="sm" disabled={!current || Boolean(busy)} onClick={() => void commit("save")}>
+          <Btn size="sm" disabled={!current || Boolean(busy) || !configReady} onClick={() => void commit("save")}>
             {t("project.configSave")}
           </Btn>
         </div>
@@ -879,6 +974,34 @@ export function ConfigDialog({
                             />
                             <span>{t(column.labelKey)}</span>
                           </label>
+                        ) : column.multiline ? (
+                          <div className="dk-multiline" key={column.key}>
+                            <textarea
+                              className="dk-input dk-textarea"
+                              rows={4}
+                              spellCheck={false}
+                              value={row[column.key] || ""}
+                              placeholder={t(column.placeholderKey)}
+                              onChange={(event) =>
+                                setEditor((prev) => ({
+                                  ...prev,
+                                  rows: prev.rows.map((item, at) =>
+                                    at === index ? { ...item, [column.key]: event.target.value } : item
+                                  ),
+                                }))
+                              }
+                            />
+                            {column.limit ? (
+                              <span
+                                className="dk-env-count"
+                                data-over={
+                                  normalizeEnvValue(row[column.key]).length > column.limit ? "1" : "0"
+                                }
+                              >
+                                {`${normalizeEnvValue(row[column.key]).length} / ${column.limit}`}
+                              </span>
+                            ) : null}
+                          </div>
                         ) : (
                           <input
                             key={column.key}
@@ -918,6 +1041,7 @@ export function ConfigDialog({
                       {`+ ${t("project.addRow")}`}
                     </Btn>
                   </div>
+                  {editor.field === "env" ? <div className="dk-note">{t("project.envSecretHint")}</div> : null}
                 </div>
               ) : null}
 
@@ -1147,12 +1271,22 @@ export function ConfigDialog({
                               placeholder={t("project.keyName")}
                               onChange={(event) => patchPreBuildEnv(index, { key: event.target.value })}
                             />
-                            <input
-                              className="dk-input"
-                              value={row.value}
-                              placeholder={t("project.keyValue")}
-                              onChange={(event) => patchPreBuildEnv(index, { value: event.target.value })}
-                            />
+                            <div className="dk-multiline">
+                              <textarea
+                                className="dk-input dk-textarea"
+                                rows={2}
+                                spellCheck={false}
+                                value={row.value}
+                                placeholder={t("project.keyValue")}
+                                onChange={(event) => patchPreBuildEnv(index, { value: event.target.value })}
+                              />
+                              <span
+                                className="dk-env-count"
+                                data-over={normalizeEnvValue(row.value).length > PRE_BUILD_ENV_VALUE_MAX ? "1" : "0"}
+                              >
+                                {`${normalizeEnvValue(row.value).length} / ${PRE_BUILD_ENV_VALUE_MAX}`}
+                              </span>
+                            </div>
                             <button
                               type="button"
                               className="dk-icon-btn"
@@ -1167,6 +1301,12 @@ export function ConfigDialog({
                           <Btn size="sm" variant="ghost" onClick={addPreBuildEnv}>
                             {`+ ${t("project.addRow")}`}
                           </Btn>
+                          <span className="dk-env-count" data-over={preBuildEnvChars > PRE_BUILD_ENV_TOTAL_MAX ? "1" : "0"}>
+                            {t("project.preBuildEnvTotalCount", {
+                              count: preBuildEnvChars,
+                              max: PRE_BUILD_ENV_TOTAL_MAX,
+                            })}
+                          </span>
                         </div>
                       </div>
                     </div>

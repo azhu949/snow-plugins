@@ -27,6 +27,8 @@ import {
   normalizeRunConfig,
   normalizeSettings,
   normalizeSshServer,
+  summarizeRunConfigs,
+  validatePreBuildEnv,
   validateRunConfig,
   validateSettings,
   validateSshServer,
@@ -45,6 +47,16 @@ const sendJson = (res, status, payload) => {
 };
 
 const sendError = (res, status, code, message) => sendJson(res, status, { error: { code, message } });
+
+/**
+ * 连接设置响应不含运行配置：运行配置按 Dockerfile 路径维护，只通过 /project/scan 的摘要
+ * 与 /project/config 的单条读取下发。这里剔除整表，避免连接页顺带拿到所有 env 明文。
+ */
+const connectionPayload = (settings) => {
+  const payload = { ...settings };
+  delete payload.runConfigs;
+  return payload;
+};
 
 const readBody = (req) =>
   new Promise((resolve, reject) => {
@@ -322,17 +334,25 @@ const spawnStream = ({ bin, args, cwd, env, onLine }) => {
   };
 
   const done = new Promise((resolve) => {
+    // spawn 本身失败（例如环境块超过平台上限）时只有 error 事件带原因；close 里通常是 -1，
+    // 这里把文案留住，close 结算时一并带回，调用点就能在任务日志里显示真实原因。
+    let spawnError = "";
     child.stdout?.on("data", (chunk) => pushText(decoders.stdout.write(chunk)));
     child.stderr?.on("data", (chunk) => pushText(decoders.stderr.write(chunk)));
-    child.on("error", (error) =>
-      resolve({ code: -1, error: String(error?.message || error), cancelled: false })
-    );
+    child.on("error", (error) => {
+      spawnError = String(error?.message || error);
+      resolve({ code: -1, error: spawnError, cancelled: false });
+    });
     child.on("close", (code) => {
       pushText(decoders.stdout.end());
       pushText(decoders.stderr.end());
       if (buffer) onLine(buffer);
       buffer = "";
-      resolve({ code: cancelled ? -1 : Number.isFinite(code) ? code : 1, cancelled });
+      resolve({
+        code: cancelled ? -1 : Number.isFinite(code) ? code : 1,
+        error: spawnError,
+        cancelled,
+      });
     });
   });
 
@@ -358,6 +378,9 @@ const spawnStream = ({ bin, args, cwd, env, onLine }) => {
 const requirePreBuild = (raw, fallbackCwd) => {
   const preBuild = normalizeRunConfig({ preBuild: raw }).preBuild;
   if (!preBuild.tool) return null;
+  // 这份 env 会整块进子进程环境：超限时 spawn 只会给一个 ERR_* ，先在校验层明确拒绝。
+  const invalidEnv = validatePreBuildEnv(preBuild.env);
+  if (invalidEnv) throw new DockerError("INVALID_PARAM", invalidEnv);
 
   const cwd = preBuild.cwd ? requireAbsolutePath(preBuild.cwd, "构建前步骤的工作目录") : fallbackCwd;
   const env = { ...process.env };
@@ -792,7 +815,7 @@ const handleRequest = async ({ docker, settings, tasks, ssh, logStreams, version
   }
 
   if (pathname === ROUTES.settings) {
-    if (method === "GET") return { status: 200, payload: await settings.get() };
+    if (method === "GET") return { status: 200, payload: connectionPayload(await settings.get()) };
     if (method === "POST") {
       const body = await readJsonBody(req);
       const currentSettings = await settings.get();
@@ -813,7 +836,7 @@ const handleRequest = async ({ docker, settings, tasks, ssh, logStreams, version
       });
       // 本机 CLI 目标变了：compose 的探活缓存立即失效，面板不用等 15 秒。
       localDockerProbe = { at: 0, value: null };
-      return { status: 200, payload: saved };
+      return { status: 200, payload: connectionPayload(saved) };
     }
   }
 
@@ -966,8 +989,17 @@ const handleRequest = async ({ docker, settings, tasks, ssh, logStreams, version
     // 运行配置里的 Dockerfile 路径一并参与扫描：扫描规则覆盖不到的目录靠它兜底。
     const runConfigs = await settings.getRunConfigs();
     const scanned = await scanProject(root, { extraPaths: Object.keys(runConfigs) });
-    // 项目外的历史配置不会被扫描列出，也不再在界面上提供入口：只回传扫描结果与运行配置。
-    return { status: 200, payload: { ...scanned, runConfigs } };
+    // 列表只回摘要：env 值与完整配置按路径单独读取，避免每次扫描把整表连私钥一起下发。
+    return { status: 200, payload: { ...scanned, runConfigSummaries: summarizeRunConfigs(runConfigs) } };
+  }
+
+  // 单条读取走独立 GET：读取是幂等操作，不能挂在保存路由上。
+  // 后台还是旧版本时这条路径不存在，会返回「未知接口」，面板据此提示重启 App；
+  // 若复用 POST，旧后台会把读请求当成保存空配置，报出与读取无关的错误。
+  if (pathname === ROUTES.projectConfigRead && method === "GET") {
+    const dockerfile = requireDockerfilePath(query.get("dockerfile"));
+    const config = await settings.getRunConfig(dockerfile);
+    return { status: 200, payload: { dockerfile, config } };
   }
 
   if (pathname === ROUTES.projectConfig && method === "POST") {
@@ -1064,8 +1096,12 @@ const handleRequest = async ({ docker, settings, tasks, ssh, logStreams, version
           const stepResult = await step.done;
           if (stepResult.cancelled || control.cancelled) return { cancelled: true };
           if (stepResult.code !== 0) {
-            push(`前置构建失败（exit=${stepResult.code}），已中止 docker build`);
-            return { code: stepResult.code };
+            push(
+              `前置构建失败（exit=${stepResult.code}）${
+                stepResult.error ? `：${stepResult.error}` : ""
+              }，已中止 docker build`
+            );
+            return { code: stepResult.code, error: stepResult.error || "" };
           }
           push("前置构建完成，开始构建镜像");
         }
@@ -1143,8 +1179,10 @@ const handleRequest = async ({ docker, settings, tasks, ssh, logStreams, version
           const stepResult = await step.done;
           if (stepResult.cancelled || control.cancelled) return { cancelled: true };
           if (stepResult.code !== 0) {
-            push(`前置构建失败（exit=${stepResult.code}），已中止`);
-            return { code: stepResult.code };
+            push(
+              `前置构建失败（exit=${stepResult.code}）${stepResult.error ? `：${stepResult.error}` : ""}，已中止`
+            );
+            return { code: stepResult.code, error: stepResult.error || "" };
           }
           push("前置构建完成，开始构建镜像");
         }
@@ -1201,7 +1239,8 @@ const handleRequest = async ({ docker, settings, tasks, ssh, logStreams, version
         return { code: result?.code ?? 0 };
       },
     });
-    return { status: 200, payload: { taskId: id, image, args, serverId: config.serverId } };
+    // args 里可能带 -e KEY=VALUE：响应同样过掩码，面板不需要明文值。
+    return { status: 200, payload: { taskId: id, image, args: maskCommandArgs(args), serverId: config.serverId } };
   }
 
   if (pathname === ROUTES.composeServices && method === "GET") {

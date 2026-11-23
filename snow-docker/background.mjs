@@ -20186,6 +20186,22 @@ var CHANNEL_HEADER_VALUE = "panel-rpc-v1";
 var CHANNEL_TOKEN_HEADER = "x-snow-docker-token";
 var CHANNEL_ENDPOINT_STORAGE_KEY = "channelEndpoint";
 var DOCKER_PATH_PATTERN = /^[A-Za-z0-9/_.-]{1,255}$/;
+var ENV_VALUE_MAX = 16 * 1024;
+var ENV_TOTAL_MAX = 64 * 1024;
+var PRE_BUILD_ENV_VALUE_MAX = 8 * 1024;
+var PRE_BUILD_ENV_TOTAL_MAX = 16 * 1024;
+var utf8Bytes = (text) => {
+  let bytes = 0;
+  for (const ch of String(text ?? "")) {
+    const code = ch.codePointAt(0);
+    if (code <= 127) bytes += 1;
+    else if (code <= 2047) bytes += 2;
+    else if (code <= 65535) bytes += 3;
+    else bytes += 4;
+  }
+  return bytes;
+};
+var normalizeEnvValue = (value) => typeof value === "string" ? value.replace(/\r\n?/g, "\n").replace(/\0/g, "") : "";
 var ROUTES = {
   health: "/health",
   system: "/system",
@@ -20205,6 +20221,8 @@ var ROUTES = {
   projectBuildRun: "/project/build-run",
   projectRun: "/project/run",
   projectConfig: "/project/config",
+  // 单条读取单独一条路由：读取不能复用保存路由，否则旧后台会把读请求当成写请求。
+  projectConfigRead: "/project/config/get",
   projectPackageScripts: "/project/package-scripts",
   composeServices: "/compose/services",
   composeAction: "/compose/action",
@@ -20221,11 +20239,10 @@ var ROUTES = {
 var LIMITS = {
   /**
    * 请求体硬上限，超出直接 413。
-   * 单份运行配置的合法上限之和已接近 128 KB：buildArgs 32 条 × 512、
-   * env 64 条 × 512、preBuild.env 32 条 × 512（再加上键名与 JSON 结构）。
-   * 早期取 64 KB 时，填满这些字段的合法配置会被误判为过大，所以留一倍余量。
+   * 环境变量另有更严的约束（ENV_VALUE_MAX / ENV_TOTAL_MAX / PRE_BUILD_ENV_TOTAL_MAX）：
+   * 这里只为 buildArgs、挂载与 JSON 结构留余量，4 MB 足以容纳一份接近上限的配置。
    */
-  requestMaxBytes: 256 * 1024,
+  requestMaxBytes: 4 * 1024 * 1024,
   /** 容器日志一次最多拉取的行数（--tail 参数）与返回给面板的最大行数。 */
   logsTailDefault: 300,
   logsTailMax: 2e3,
@@ -20922,8 +20939,8 @@ var normalizePreBuild = (raw) => {
   for (const item of Array.isArray(raw?.env) ? raw.env : []) {
     const key = cleanText(item?.key, 128);
     if (!ENV_KEY_PATTERN.test(key)) continue;
-    const value = typeof item?.value === "string" ? item.value.replace(/[\r\n]/g, "") : "";
-    env.push({ key, value: value.slice(0, 512) });
+    const value = normalizeEnvValue(item?.value);
+    env.push({ key, value });
     if (env.length >= MAX_PRE_BUILD_ENV) break;
   }
   return {
@@ -21035,8 +21052,8 @@ var normalizeRunConfig = (raw) => {
   for (const item of Array.isArray(raw?.env) ? raw.env : []) {
     const key = cleanText(item?.key, 128);
     if (!ENV_KEY_PATTERN.test(key)) continue;
-    const value = typeof item?.value === "string" ? item.value.replace(/[\r\n]/g, "") : "";
-    env.push({ key, value: value.slice(0, 512) });
+    const value = normalizeEnvValue(item?.value);
+    env.push({ key, value });
     if (env.length >= MAX_ENV) break;
   }
   const options = [];
@@ -21066,6 +21083,21 @@ var normalizeRunConfig = (raw) => {
     options
   };
 };
+var validatePreBuildEnv = (env) => {
+  let total = 0;
+  for (const item of env || []) {
+    if (!ENV_KEY_PATTERN.test(item.key)) return `环境变量名不合法：${item.key}`;
+    if (item.value.includes("\0")) return `环境变量 ${item.key} 的值不能包含 NUL 字符`;
+    if (item.value.length > PRE_BUILD_ENV_VALUE_MAX) {
+      return `前置构建环境变量 ${item.key} 的值有 ${item.value.length} 个字符，超过单值上限 ${PRE_BUILD_ENV_VALUE_MAX}；请精简内容，或改用文件挂载传入`;
+    }
+    total += item.key.length + item.value.length + 1;
+  }
+  if (total > PRE_BUILD_ENV_TOTAL_MAX) {
+    return `前置构建环境变量的合计长度 ${total} 个字符（含变量名与分隔符），超过合计上限 ${PRE_BUILD_ENV_TOTAL_MAX}；请精简变量，或改用文件挂载传入`;
+  }
+  return "";
+};
 var validateRunConfig = (config, { requireServer = true } = {}) => {
   if (config.tag && !RUN_TAG_PATTERN.test(config.tag)) return "镜像标记不合法，例如 my-app:latest";
   if (requireServer && !config.serverId) return "运行配置需要选择一台远程服务器：本插件只通过 SSH 操作远程 Docker";
@@ -21090,13 +21122,23 @@ var validateRunConfig = (config, { requireServer = true } = {}) => {
     }
     if (!mount.container || !mount.container.startsWith("/")) return "绑定挂载的容器路径必须以 / 开头";
   }
+  let envBytes = 0;
   for (const item of config.env || []) {
     if (!ENV_KEY_PATTERN.test(item.key)) return `环境变量名不合法：${item.key}`;
-    if (/[\r\n]/.test(item.value)) return `环境变量 ${item.key} 的值不能包含换行`;
+    if (item.value.includes("\0")) return `环境变量 ${item.key} 的值不能包含 NUL 字符`;
+    if (item.value.length > ENV_VALUE_MAX) {
+      return `环境变量 ${item.key} 的值有 ${item.value.length} 个字符，超过单值上限 ${ENV_VALUE_MAX}；请精简内容或改用文件挂载`;
+    }
+    envBytes += utf8Bytes(item.key) + utf8Bytes(item.value);
+  }
+  if (envBytes > ENV_TOTAL_MAX) {
+    return `环境变量的总值约 ${Math.ceil(envBytes / 1024)} KB，超过单份配置上限 ${ENV_TOTAL_MAX / 1024} KB；请精简变量，或把大段内容放到服务器上的文件里`;
   }
   if (/[\r\n]/.test(config.runOptions || "")) return "运行选项不能包含换行";
   const preBuild = config.preBuild || {};
   if (preBuild.tool) {
+    const invalidEnv = validatePreBuildEnv(preBuild.env);
+    if (invalidEnv) return invalidEnv;
     if (preBuild.cwd && !ABSOLUTE_PATH_PATTERN.test(preBuild.cwd)) {
       return "构建前步骤的工作目录必须是绝对路径";
     }
@@ -21132,6 +21174,31 @@ var normalizeRunConfigs = (raw) => {
     out[path] = config;
     count += 1;
   }
+  return out;
+};
+var summarizeRunConfig = (config) => {
+  if (!config) return null;
+  return {
+    name: config.name || "",
+    tag: config.tag || "",
+    platform: config.platform || "",
+    serverId: config.serverId || "",
+    containerName: config.containerName || "",
+    options: Array.isArray(config.options) ? [...config.options] : [],
+    preBuildTool: config.preBuild?.tool || "",
+    envKeys: (config.env || []).map((item) => item.key),
+    counts: {
+      buildArgs: (config.buildArgs || []).length,
+      ports: (config.ports || []).length,
+      mounts: (config.mounts || []).length,
+      env: (config.env || []).length,
+      preBuildEnv: (config.preBuild?.env || []).length
+    }
+  };
+};
+var summarizeRunConfigs = (configs) => {
+  const out = {};
+  for (const [path, config] of Object.entries(configs || {})) out[path] = summarizeRunConfig(config);
   return out;
 };
 var normalizeSettings = (raw) => ({
@@ -21442,10 +21509,17 @@ function createSettings({ storage, secrets, backupPath = "", log = () => {
       log(`已记录 SSH 主机指纹：${targetId}`);
       return true;
     },
-    /** 全部运行配置（键是 Dockerfile 绝对路径）。 */
+    /** 全部运行配置（键是 Dockerfile 绝对路径）。仅供后台内部使用，不进接口响应。 */
     getRunConfigs: async () => {
       await ensure();
       return { ...current.runConfigs };
+    },
+    /** 单条运行配置的完整内容：列表只回摘要，编辑与构建时按路径单独取。 */
+    async getRunConfig(dockerfile) {
+      await ensure();
+      const path = cleanText(dockerfile, 512);
+      if (!path) return null;
+      return current.runConfigs[path] ? { ...current.runConfigs[path] } : null;
     },
     /** 保存某个 Dockerfile 的运行配置；键就是 Dockerfile 的绝对路径。 */
     async saveRunConfig({ dockerfile, config, requireServer = true } = {}) {
@@ -21458,18 +21532,22 @@ function createSettings({ storage, secrets, backupPath = "", log = () => {
       const next = normalizeSettings({ ...current, runConfigs: { ...current.runConfigs, [path]: normalized } });
       await persist(next);
       log(`运行配置已保存：${normalized.name || path}`);
-      return { dockerfile: path, config: next.runConfigs[path], runConfigs: next.runConfigs };
+      return {
+        dockerfile: path,
+        config: next.runConfigs[path],
+        summary: summarizeRunConfig(next.runConfigs[path])
+      };
     },
     async removeRunConfig(dockerfile) {
       await ensure();
       const path = cleanText(dockerfile, 512);
-      if (!current.runConfigs[path]) return { removed: false, runConfigs: { ...current.runConfigs } };
+      if (!current.runConfigs[path]) return { removed: false };
       const runConfigs = { ...current.runConfigs };
       delete runConfigs[path];
       const next = normalizeSettings({ ...current, runConfigs });
       await persist(next);
       log(`运行配置已删除：${path}`);
-      return { removed: true, runConfigs: next.runConfigs };
+      return { removed: true };
     }
   };
 }
@@ -22866,7 +22944,8 @@ function createTaskRunner({ log = () => {
         return;
       }
       const code = Number.isFinite(result?.code) ? result.code : 0;
-      settle({ status: code === 0 ? "succeeded" : "failed", exitCode: code });
+      const error = code === 0 ? "" : String(result?.error || "").trim();
+      settle({ status: code === 0 ? "succeeded" : "failed", exitCode: code, error: error || null });
     }).catch((error) => {
       settle({ status: "failed", error: String(error?.message || error) });
     });
@@ -23465,6 +23544,11 @@ var sendJson = (res, status, payload2) => {
   res.end(body);
 };
 var sendError = (res, status, code, message) => sendJson(res, status, { error: { code, message } });
+var connectionPayload = (settings) => {
+  const payload2 = { ...settings };
+  delete payload2.runConfigs;
+  return payload2;
+};
 var readBody = (req) => new Promise((resolve, reject) => {
   let size = 0;
   const parts = [];
@@ -23685,18 +23769,23 @@ var spawnStream = ({ bin, args, cwd, env, onLine }) => {
     }
   };
   const done = new Promise((resolve) => {
+    let spawnError = "";
     child.stdout?.on("data", (chunk) => pushText(decoders.stdout.write(chunk)));
     child.stderr?.on("data", (chunk) => pushText(decoders.stderr.write(chunk)));
-    child.on(
-      "error",
-      (error) => resolve({ code: -1, error: String(error?.message || error), cancelled: false })
-    );
+    child.on("error", (error) => {
+      spawnError = String(error?.message || error);
+      resolve({ code: -1, error: spawnError, cancelled: false });
+    });
     child.on("close", (code) => {
       pushText(decoders.stdout.end());
       pushText(decoders.stderr.end());
       if (buffer) onLine(buffer);
       buffer = "";
-      resolve({ code: cancelled ? -1 : Number.isFinite(code) ? code : 1, cancelled });
+      resolve({
+        code: cancelled ? -1 : Number.isFinite(code) ? code : 1,
+        error: spawnError,
+        cancelled
+      });
     });
   });
   return {
@@ -23713,6 +23802,8 @@ var spawnStream = ({ bin, args, cwd, env, onLine }) => {
 var requirePreBuild = (raw, fallbackCwd) => {
   const preBuild = normalizeRunConfig({ preBuild: raw }).preBuild;
   if (!preBuild.tool) return null;
+  const invalidEnv = validatePreBuildEnv(preBuild.env);
+  if (invalidEnv) throw new DockerError("INVALID_PARAM", invalidEnv);
   const cwd = preBuild.cwd ? requireAbsolutePath(preBuild.cwd, "构建前步骤的工作目录") : fallbackCwd;
   const env = { ...process.env };
   for (const item of preBuild.env || []) env[item.key] = item.value;
@@ -24045,7 +24136,7 @@ var handleRequest = async ({ docker, settings, tasks, ssh, logStreams, version, 
     return { status: 200, payload: { ...payload2, target: api.target } };
   }
   if (pathname === ROUTES.settings) {
-    if (method === "GET") return { status: 200, payload: await settings.get() };
+    if (method === "GET") return { status: 200, payload: connectionPayload(await settings.get()) };
     if (method === "POST") {
       const body = await readJsonBody(req);
       const currentSettings = await settings.get();
@@ -24063,7 +24154,7 @@ var handleRequest = async ({ docker, settings, tasks, ssh, logStreams, version, 
         context: merged.context
       });
       localDockerProbe = { at: 0, value: null };
-      return { status: 200, payload: saved };
+      return { status: 200, payload: connectionPayload(saved) };
     }
   }
   if (pathname === ROUTES.sshStatus && method === "GET") {
@@ -24191,7 +24282,12 @@ var handleRequest = async ({ docker, settings, tasks, ssh, logStreams, version, 
     const root = requireAbsolutePath(body.root, "项目路径");
     const runConfigs = await settings.getRunConfigs();
     const scanned = await scanProject(root, { extraPaths: Object.keys(runConfigs) });
-    return { status: 200, payload: { ...scanned, runConfigs } };
+    return { status: 200, payload: { ...scanned, runConfigSummaries: summarizeRunConfigs(runConfigs) } };
+  }
+  if (pathname === ROUTES.projectConfigRead && method === "GET") {
+    const dockerfile = requireDockerfilePath(query.get("dockerfile"));
+    const config = await settings.getRunConfig(dockerfile);
+    return { status: 200, payload: { dockerfile, config } };
   }
   if (pathname === ROUTES.projectConfig && method === "POST") {
     const body = await readJsonBody(req);
@@ -24270,8 +24366,10 @@ var handleRequest = async ({ docker, settings, tasks, ssh, logStreams, version, 
           const stepResult = await step.done;
           if (stepResult.cancelled || control.cancelled) return { cancelled: true };
           if (stepResult.code !== 0) {
-            push(`前置构建失败（exit=${stepResult.code}），已中止 docker build`);
-            return { code: stepResult.code };
+            push(
+              `前置构建失败（exit=${stepResult.code}）${stepResult.error ? `：${stepResult.error}` : ""}，已中止 docker build`
+            );
+            return { code: stepResult.code, error: stepResult.error || "" };
           }
           push("前置构建完成，开始构建镜像");
         }
@@ -24338,8 +24436,10 @@ var handleRequest = async ({ docker, settings, tasks, ssh, logStreams, version, 
           const stepResult = await step.done;
           if (stepResult.cancelled || control.cancelled) return { cancelled: true };
           if (stepResult.code !== 0) {
-            push(`前置构建失败（exit=${stepResult.code}），已中止`);
-            return { code: stepResult.code };
+            push(
+              `前置构建失败（exit=${stepResult.code}）${stepResult.error ? `：${stepResult.error}` : ""}，已中止`
+            );
+            return { code: stepResult.code, error: stepResult.error || "" };
           }
           push("前置构建完成，开始构建镜像");
         }
@@ -24390,7 +24490,7 @@ var handleRequest = async ({ docker, settings, tasks, ssh, logStreams, version, 
         return { code: result?.code ?? 0 };
       }
     });
-    return { status: 200, payload: { taskId: id, image, args, serverId: config.serverId } };
+    return { status: 200, payload: { taskId: id, image, args: maskCommandArgs(args), serverId: config.serverId } };
   }
   if (pathname === ROUTES.composeServices && method === "GET") {
     const file = requireComposeFile(query.get("file"));

@@ -1,6 +1,14 @@
 // 运行配置的共享工具：默认值、表单草稿与后台配置对象之间的转换。
 // 一个 Dockerfile 对应一份配置，键是 Dockerfile 的绝对路径（正斜杠）。
 // 「构建」「运行」两组里除必要字段外，其余附加项由 options 控制是否显示。
+import {
+  ENV_TOTAL_MAX,
+  ENV_VALUE_MAX,
+  PRE_BUILD_ENV_TOTAL_MAX,
+  PRE_BUILD_ENV_VALUE_MAX,
+  normalizeEnvValue,
+  utf8Bytes,
+} from "../shared/contract.js";
 
 export const BUILD_ARG_KEY = /^[A-Za-z_][A-Za-z0-9_]*$/;
 export const CONTAINER_NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/;
@@ -195,12 +203,30 @@ export const draftToConfig = (draft) => {
   }
 
   const env = [];
+  let envBytes = 0;
   for (const item of draft.env || []) {
     const key = String(item.key || "").trim();
-    const value = String(item.value || "").trim();
-    if (!key && !value) continue;
+    // 值只统一行尾并去掉 NUL，首尾空白与换行原样保留：与后台 normalizeEnvValue 同源。
+    const value = normalizeEnvValue(item.value);
+    if (!key && !value.trim()) continue;
     if (!BUILD_ARG_KEY.test(key)) return { config: null, error: "project.envInvalid" };
+    if (value.length > ENV_VALUE_MAX) {
+      return {
+        config: null,
+        error: "project.envValueTooLong",
+        params: { key, count: value.length, max: ENV_VALUE_MAX },
+      };
+    }
+    envBytes += utf8Bytes(key) + utf8Bytes(value);
     env.push({ key, value });
+  }
+  // 与后台同一口径：这些值要拼进一条 SSH 命令，总量超限时远端会直接断开连接。
+  if (envBytes > ENV_TOTAL_MAX) {
+    return {
+      config: null,
+      error: "project.envTotalTooLarge",
+      params: { count: Math.ceil(envBytes / 1024), max: ENV_TOTAL_MAX / 1024 },
+    };
   }
 
   const tag = String(draft.tag || "").trim();
@@ -222,12 +248,30 @@ export const draftToConfig = (draft) => {
   // 构建前置步骤：npm 需要脚本名，Maven 需要 goals；工作目录与 package.json 都要绝对路径。
   const before = draft.preBuild || {};
   const beforeEnv = [];
+  let beforeEnvChars = 0;
   for (const item of before.env || []) {
     const key = String(item.key || "").trim();
-    const value = String(item.value || "").trim();
-    if (!key && !value) continue;
+    // 前置构建与运行环境同一套值处理，避免两条链路给出不同结果。
+    const value = normalizeEnvValue(item.value);
+    if (!key && !value.trim()) continue;
     if (!BUILD_ARG_KEY.test(key)) return { config: null, error: "project.envInvalid" };
+    if (value.length > PRE_BUILD_ENV_VALUE_MAX) {
+      return {
+        config: null,
+        error: "project.preBuildEnvValueTooLong",
+        params: { key, count: value.length, max: PRE_BUILD_ENV_VALUE_MAX },
+      };
+    }
+    // 前置构建的 env 整块进子进程环境，按字符累计（与后台 validatePreBuildEnv 一致）。
+    beforeEnvChars += key.length + value.length + 1;
     beforeEnv.push({ key, value });
+  }
+  if (beforeEnvChars > PRE_BUILD_ENV_TOTAL_MAX) {
+    return {
+      config: null,
+      error: "project.preBuildEnvTotalTooLarge",
+      params: { count: beforeEnvChars, max: PRE_BUILD_ENV_TOTAL_MAX },
+    };
   }
 
   const preBuild = {

@@ -25,7 +25,7 @@ const stateTone = (state) => {
 export function ProjectView({ t, rpc, notify, project, onOpenFile, active }) {
   const React = getReact();
   const [scan, setScan] = React.useState({ status: "idle", data: null, error: "" });
-  const [runConfigs, setRunConfigs] = React.useState({});
+  const [runConfigSummaries, setRunConfigSummaries] = React.useState({});
   const [servers, setServers] = React.useState([]);
   const [dialog, setDialog] = React.useState({ open: false, path: "" });
   const [compose, setCompose] = React.useState({});
@@ -46,11 +46,17 @@ export function ProjectView({ t, rpc, notify, project, onOpenFile, active }) {
     try {
       const data = await rpc.scanProject(root);
       setScan({ status: "ready", data, error: "" });
-      setRunConfigs(data?.runConfigs && typeof data.runConfigs === "object" ? data.runConfigs : {});
+      // 扫描只回摘要：env 值与完整配置在这里不落 state，等编辑或构建时按路径取。
+      setRunConfigSummaries(
+        data?.runConfigSummaries && typeof data.runConfigSummaries === "object" ? data.runConfigSummaries : {}
+      );
     } catch (error) {
       setScan({ status: "error", data: null, error: String(error?.message || error) });
     }
   }, [canScan, root, rpc]);
+
+  /** 读取一条运行配置的完整内容：配置弹窗与「构建并运行」都按需取。 */
+  const loadProjectConfig = React.useCallback((path) => rpc.readProjectConfig(path), [rpc]);
 
   const refreshServers = React.useCallback(async () => {
     try {
@@ -184,7 +190,8 @@ export function ProjectView({ t, rpc, notify, project, onOpenFile, active }) {
 
   /** 一条龙：前置构建 → docker build → docker run，对应 IDEA Dockerfile 的运行按钮。 */
   const startBuildRun = async (file, config) => {
-    const saved = config || runConfigs[file.path] || {};
+    // 列表只有摘要：构建前按路径取完整配置，env 等值不常驻面板 state。
+    const saved = config || (await loadProjectConfig(file.path))?.config || {};
     const tag = String(saved.tag || "").trim() || suggestTag(projectName, file);
     const payload = await rpc.buildAndRun({
       dockerfile: file.path,
@@ -220,14 +227,19 @@ export function ProjectView({ t, rpc, notify, project, onOpenFile, active }) {
 
   const saveConfig = async (path, config, previousPath) => {
     const result = await rpc.saveProjectConfig(path, config, false, root);
-    if (result?.runConfigs) setRunConfigs(result.runConfigs);
-    else setRunConfigs((prev) => ({ ...prev, [path]: result?.config || config }));
+    if (result?.summary) {
+      setRunConfigSummaries((prev) => ({ ...prev, [path]: result.summary }));
+    }
 
     // 改过 Dockerfile 路径：旧键上的配置要一并删掉，避免留下孤儿条目。
     if (previousPath && previousPath !== path) {
       try {
-        const removed = await rpc.removeProjectConfig(previousPath);
-        if (removed?.runConfigs) setRunConfigs(removed.runConfigs);
+        await rpc.removeProjectConfig(previousPath);
+        setRunConfigSummaries((prev) => {
+          const next = { ...prev };
+          delete next[previousPath];
+          return next;
+        });
       } catch {
         // 旧条目删不掉不影响新配置。
       }
@@ -239,14 +251,12 @@ export function ProjectView({ t, rpc, notify, project, onOpenFile, active }) {
   };
 
   const removeConfig = async (path) => {
-    const result = await rpc.removeProjectConfig(path);
-    if (result?.runConfigs) setRunConfigs(result.runConfigs);
-    else
-      setRunConfigs((prev) => {
-        const next = { ...prev };
-        delete next[path];
-        return next;
-      });
+    await rpc.removeProjectConfig(path);
+    setRunConfigSummaries((prev) => {
+      const next = { ...prev };
+      delete next[path];
+      return next;
+    });
     notify("success", t("project.configDeleted"));
     // 手动登记的文件删掉配置后就不该继续出现在列表里。
     const target = (scan.data?.dockerfiles || []).find((file) => file.path === path);
@@ -338,7 +348,7 @@ export function ProjectView({ t, rpc, notify, project, onOpenFile, active }) {
             </div>
 
             {dockerfiles.map((file) => {
-              const config = runConfigs[file.path] || null;
+              const config = runConfigSummaries[file.path] || null;
               const server = config?.serverId ? servers.find((item) => item.id === config.serverId) : null;
               const meta = [
                 config?.tag || suggestTag(projectName, file),
@@ -507,7 +517,8 @@ export function ProjectView({ t, rpc, notify, project, onOpenFile, active }) {
         <ConfigDialog
           t={t}
           files={dockerfiles}
-          runConfigs={runConfigs}
+          runConfigSummaries={runConfigSummaries}
+          onLoadConfig={loadProjectConfig}
           servers={servers}
           projectName={projectName}
           projectRoot={scan.data?.root || ""}

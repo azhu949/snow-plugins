@@ -231,7 +231,10 @@ export function createTaskRunner({ log = () => {}, getBin, getEnv } = {}) {
           return;
         }
         const code = Number.isFinite(result?.code) ? result.code : 0;
-        settle({ status: code === 0 ? "succeeded" : "failed", exitCode: code });
+        // 自定义任务也可能自带失败文案（例如 spawn 的 ENOENT / 环境块超限）：落到任务详情，
+        // 面板不必只看一个 exit 码去猜原因。
+        const error = code === 0 ? "" : String(result?.error || "").trim();
+        settle({ status: code === 0 ? "succeeded" : "failed", exitCode: code, error: error || null });
       })
       .catch((error) => {
         settle({ status: "failed", error: String(error?.message || error) });

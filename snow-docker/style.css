@@ -758,6 +758,50 @@
   font-size: 11px;
 }
 
+/* 环境变量值可以是 PEM 私钥这类多行文本：文本域按内容增高，换行原样保留。 */
+.dk-textarea {
+  height: auto;
+  min-height: 64px;
+  padding: 6px 8px;
+  line-height: 1.5;
+  resize: vertical;
+  white-space: pre;
+  overflow: auto;
+}
+
+.dk-row-inputs .dk-textarea {
+  height: auto;
+  min-height: 64px;
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+  font-size: 11px;
+}
+
+/* 多行值 + 字数提示：提示只做展示，超限时由保存校验明确报错，不在输入时截断内容。 */
+.dk-multiline {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.dk-multiline .dk-textarea {
+  flex: none;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.dk-env-count {
+  color: var(--dk-sub);
+  font-size: 10px;
+  line-height: 1.4;
+  text-align: right;
+}
+
+.dk-env-count[data-over="1"] {
+  color: var(--dk-danger);
+}
+
 .dk-inline-check {
   flex: none;
   display: inline-flex;
@@ -884,9 +928,14 @@
   cursor: pointer;
 }
 
-.dk-icon-btn:hover {
+.dk-icon-btn:hover:not(:disabled) {
   background: var(--dk-hover);
   color: var(--dk-fg);
+}
+
+.dk-icon-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
 }
 
 .dk-modal-foot {

@@ -352,6 +352,7 @@ var zh_CN_default = {
   "project.mountReadOnly": "只读挂载",
   "project.mountReadOnlyShort": "只读",
   "project.runOptionsHint": "追加的 docker run 参数，例如 --restart=always",
+  "project.envSecretHint": "值会以 -e 参数进入远端命令行与进程表，容器内也能通过 inspect 与 /proc/1/environ 读到；私钥、证书等敏感内容建议改用只读绑定挂载，或在运行选项里使用 --env-file（文件需已存在于服务器）",
   "project.run": "运行",
   "project.runStarted": "已开始运行 {{name}}",
   "project.containerNameInvalid": "容器名称只能包含字母、数字、点、横线与下划线，且以字母或数字开头",
@@ -359,9 +360,15 @@ var zh_CN_default = {
   "project.mountHostInvalid": "绑定挂载的主机路径必须是服务器上的绝对路径（以 / 开头），例如 /data/app",
   "project.mountTargetInvalid": "绑定挂载的容器路径必须以 / 开头",
   "project.envInvalid": "环境变量名只能包含字母、数字与下划线，且不能以数字开头",
+  "project.envValueTooLong": "环境变量 {{key}} 的值有 {{count}} 个字符，超过单值上限 {{max}}；请精简内容或改用文件挂载",
+  "project.envTotalTooLarge": "环境变量的总值约 {{count}} KB，超过单份配置上限 {{max}} KB；请精简变量，或把大段内容放到服务器上的文件里",
+  "project.preBuildEnvValueTooLong": "前置构建环境变量 {{key}} 的值有 {{count}} 个字符，超过单值上限 {{max}}；请精简内容，或改用文件挂载传入",
+  "project.preBuildEnvTotalTooLarge": "前置构建环境变量的合计长度 {{count}} 个字符（含变量名与分隔符），超过合计上限 {{max}}；请精简变量，或改用文件挂载传入",
+  "project.preBuildEnvTotalCount": "合计 {{count}} / {{max}} 字符（含变量名）",
   "project.dockerfileInvalid": "Dockerfile 路径必须是绝对路径，且文件名形如 Dockerfile、Dockerfile.dev",
   "project.configNoCache": "不使用缓存",
   "project.configPull": "构建前拉取最新基础镜像",
+  "project.configLoading": "正在读取已保存的配置…",
   "project.configApply": "应用",
   "project.configSave": "保存配置",
   "project.configSaveBuild": "保存并构建",
@@ -720,6 +727,7 @@ var zh_TW_default = {
   "project.mountReadOnly": "唯讀掛載",
   "project.mountReadOnlyShort": "唯讀",
   "project.runOptionsHint": "附加的 docker run 參數，例如 --restart=always",
+  "project.envSecretHint": "值會以 -e 參數進入遠端命令列與行程表，容器內也能透過 inspect 與 /proc/1/environ 讀到；私鑰、憑證等敏感內容建議改用唯讀綁定掛載，或在執行選項裡使用 --env-file（檔案需已存在於伺服器）",
   "project.run": "執行",
   "project.runStarted": "已開始執行 {{name}}",
   "project.containerNameInvalid": "容器名稱只能包含字母、數字、點、橫線與底線，且以字母或數字開頭",
@@ -727,9 +735,15 @@ var zh_TW_default = {
   "project.mountHostInvalid": "綁定掛載的主機路徑必須是伺服器上的絕對路徑（以 / 開頭），例如 /data/app",
   "project.mountTargetInvalid": "綁定掛載的容器路徑必須以 / 開頭",
   "project.envInvalid": "環境變數名稱只能包含字母、數字與底線，且不能以數字開頭",
+  "project.envValueTooLong": "環境變數 {{key}} 的值有 {{count}} 個字元，超過單值上限 {{max}}；請精簡內容或改用檔案掛載",
+  "project.envTotalTooLarge": "環境變數的總值約 {{count}} KB，超過單份設定上限 {{max}} KB；請精簡變數，或把大段內容放到伺服器上的檔案裡",
+  "project.preBuildEnvValueTooLong": "前置建置環境變數 {{key}} 的值有 {{count}} 個字元，超過單值上限 {{max}}；請精簡內容，或改用檔案掛載傳入",
+  "project.preBuildEnvTotalTooLarge": "前置建置環境變數的合計長度 {{count}} 個字元（含變數名稱與分隔符），超過合計上限 {{max}}；請精簡變數，或改用檔案掛載傳入",
+  "project.preBuildEnvTotalCount": "合計 {{count}} / {{max}} 字元（含變數名稱）",
   "project.dockerfileInvalid": "Dockerfile 路徑必須是絕對路徑，且檔名形如 Dockerfile、Dockerfile.dev",
   "project.configNoCache": "不使用快取",
   "project.configPull": "建置前拉取最新基礎映像",
+  "project.configLoading": "正在讀取已儲存的設定…",
   "project.configApply": "套用",
   "project.configSave": "儲存設定",
   "project.configSaveBuild": "儲存並建置",
@@ -1089,6 +1103,7 @@ var en_default = {
   "project.mountReadOnly": "Mount read-only",
   "project.mountReadOnlyShort": "RO",
   "project.runOptionsHint": "Extra docker run arguments, e.g. --restart=always",
+  "project.envSecretHint": "The value is passed as an -e argument, so it is visible in the remote command line and process table, and readable inside the container via inspect and /proc/1/environ. For private keys and certificates, prefer a read-only bind mount or --env-file in the extra run arguments (the file must already exist on the server)",
   "project.run": "Run",
   "project.runStarted": "Running {{name}}",
   "project.containerNameInvalid": "Container name may contain letters, digits, dots, dashes and underscores, and must start with a letter or digit",
@@ -1096,9 +1111,15 @@ var en_default = {
   "project.mountHostInvalid": "The host path of a bind mount must be an absolute path on the server (starting with /), e.g. /data/app",
   "project.mountTargetInvalid": "The container path of a bind mount must start with /",
   "project.envInvalid": "Variable names may contain letters, digits and underscores, and must not start with a digit",
+  "project.envValueTooLong": "The value of {{key}} is {{count}} characters, over the {{max}} character limit; trim it or pass it as a mounted file",
+  "project.envTotalTooLarge": "Environment variables total about {{count}} KB, over the {{max}} KB limit per configuration; trim them or put large content in a file on the server",
+  "project.preBuildEnvValueTooLong": "Pre-build environment variable {{key}} has {{count}} characters, over the single-value limit of {{max}}; trim it or pass it as a mounted file",
+  "project.preBuildEnvTotalTooLarge": "Pre-build environment variables total {{count}} characters including names and separators, over the combined limit of {{max}}; trim them or pass them as a mounted file",
+  "project.preBuildEnvTotalCount": "Total {{count}} / {{max}} characters including names",
   "project.dockerfileInvalid": "The Dockerfile path must be absolute and named like Dockerfile or Dockerfile.dev",
   "project.configNoCache": "Do not use cache",
   "project.configPull": "Always pull newer base image",
+  "project.configLoading": "Loading the saved configuration...",
   "project.configApply": "Apply",
   "project.configSave": "Save configuration",
   "project.configSaveBuild": "Save and build",
@@ -1182,6 +1203,22 @@ var CHANNEL_HEADER = "x-snow-docker-channel";
 var CHANNEL_HEADER_VALUE = "panel-rpc-v1";
 var CHANNEL_TOKEN_HEADER = "x-snow-docker-token";
 var CHANNEL_ENDPOINT_STORAGE_KEY = "channelEndpoint";
+var ENV_VALUE_MAX = 16 * 1024;
+var ENV_TOTAL_MAX = 64 * 1024;
+var PRE_BUILD_ENV_VALUE_MAX = 8 * 1024;
+var PRE_BUILD_ENV_TOTAL_MAX = 16 * 1024;
+var utf8Bytes = (text) => {
+  let bytes = 0;
+  for (const ch of String(text ?? "")) {
+    const code = ch.codePointAt(0);
+    if (code <= 127) bytes += 1;
+    else if (code <= 2047) bytes += 2;
+    else if (code <= 65535) bytes += 3;
+    else bytes += 4;
+  }
+  return bytes;
+};
+var normalizeEnvValue = (value) => typeof value === "string" ? value.replace(/\r\n?/g, "\n").replace(/\0/g, "") : "";
 var ROUTES = {
   health: "/health",
   system: "/system",
@@ -1201,6 +1238,8 @@ var ROUTES = {
   projectBuildRun: "/project/build-run",
   projectRun: "/project/run",
   projectConfig: "/project/config",
+  // 单条读取单独一条路由：读取不能复用保存路由，否则旧后台会把读请求当成写请求。
+  projectConfigRead: "/project/config/get",
   projectPackageScripts: "/project/package-scripts",
   composeServices: "/compose/services",
   composeAction: "/compose/action",
@@ -1217,11 +1256,10 @@ var ROUTES = {
 var LIMITS = {
   /**
    * 请求体硬上限，超出直接 413。
-   * 单份运行配置的合法上限之和已接近 128 KB：buildArgs 32 条 × 512、
-   * env 64 条 × 512、preBuild.env 32 条 × 512（再加上键名与 JSON 结构）。
-   * 早期取 64 KB 时，填满这些字段的合法配置会被误判为过大，所以留一倍余量。
+   * 环境变量另有更严的约束（ENV_VALUE_MAX / ENV_TOTAL_MAX / PRE_BUILD_ENV_TOTAL_MAX）：
+   * 这里只为 buildArgs、挂载与 JSON 结构留余量，4 MB 足以容纳一份接近上限的配置。
    */
-  requestMaxBytes: 256 * 1024,
+  requestMaxBytes: 4 * 1024 * 1024,
   /** 容器日志一次最多拉取的行数（--tail 参数）与返回给面板的最大行数。 */
   logsTailDefault: 300,
   logsTailMax: 2e3,
@@ -1407,6 +1445,9 @@ function createRpc(api, { log = () => {
       body: { dockerfile, config, register: register === true, root },
       timeoutMs: 15e3
     }),
+    // 列表只回摘要：编辑配置或构建前按路径取一次完整配置。
+    // 读取走独立 GET：旧后台没有这条路径时会返回「未知接口」，面板据此提示重启。
+    readProjectConfig: (dockerfile) => request(ROUTES.projectConfigRead, { query: { dockerfile }, timeoutMs: 15e3 }),
     removeProjectConfig: (dockerfile) => request(ROUTES.projectConfig, { method: "POST", body: { dockerfile, remove: true }, timeoutMs: 15e3 }),
     composeServices: (file) => request(ROUTES.composeServices, { query: { file }, timeoutMs: 3e4 }),
     composeAction: (file, action) => request(ROUTES.composeAction, { method: "POST", body: { file, action }, timeoutMs: 2e4 }),
@@ -2713,12 +2754,28 @@ var draftToConfig = (draft) => {
     mounts.push({ host, container, readOnly: mount.readOnly === true });
   }
   const env = [];
+  let envBytes = 0;
   for (const item of draft.env || []) {
     const key = String(item.key || "").trim();
-    const value = String(item.value || "").trim();
-    if (!key && !value) continue;
+    const value = normalizeEnvValue(item.value);
+    if (!key && !value.trim()) continue;
     if (!BUILD_ARG_KEY.test(key)) return { config: null, error: "project.envInvalid" };
+    if (value.length > ENV_VALUE_MAX) {
+      return {
+        config: null,
+        error: "project.envValueTooLong",
+        params: { key, count: value.length, max: ENV_VALUE_MAX }
+      };
+    }
+    envBytes += utf8Bytes(key) + utf8Bytes(value);
     env.push({ key, value });
+  }
+  if (envBytes > ENV_TOTAL_MAX) {
+    return {
+      config: null,
+      error: "project.envTotalTooLarge",
+      params: { count: Math.ceil(envBytes / 1024), max: ENV_TOTAL_MAX / 1024 }
+    };
   }
   const tag = String(draft.tag || "").trim();
   if (!tag) return { config: null, error: "project.needTag" };
@@ -2734,12 +2791,28 @@ var draftToConfig = (draft) => {
   }
   const before = draft.preBuild || {};
   const beforeEnv = [];
+  let beforeEnvChars = 0;
   for (const item of before.env || []) {
     const key = String(item.key || "").trim();
-    const value = String(item.value || "").trim();
-    if (!key && !value) continue;
+    const value = normalizeEnvValue(item.value);
+    if (!key && !value.trim()) continue;
     if (!BUILD_ARG_KEY.test(key)) return { config: null, error: "project.envInvalid" };
+    if (value.length > PRE_BUILD_ENV_VALUE_MAX) {
+      return {
+        config: null,
+        error: "project.preBuildEnvValueTooLong",
+        params: { key, count: value.length, max: PRE_BUILD_ENV_VALUE_MAX }
+      };
+    }
+    beforeEnvChars += key.length + value.length + 1;
     beforeEnv.push({ key, value });
+  }
+  if (beforeEnvChars > PRE_BUILD_ENV_TOTAL_MAX) {
+    return {
+      config: null,
+      error: "project.preBuildEnvTotalTooLarge",
+      params: { count: beforeEnvChars, max: PRE_BUILD_ENV_TOTAL_MAX }
+    };
   }
   const preBuild = {
     tool: PRE_BUILD_TOOLS.includes(before.tool) ? before.tool : "",
@@ -2847,12 +2920,13 @@ var LIST_FIELDS = {
   env: {
     columns: [
       { key: "key", placeholderKey: "project.keyName" },
-      { key: "value", placeholderKey: "project.keyValue" }
+      // 值可能是 PEM 私钥这类多行文本，用文本域保留换行；limit 只用于显示字数，不做截断。
+      { key: "value", placeholderKey: "project.keyValue", multiline: true, limit: ENV_VALUE_MAX }
     ],
     empty: () => ({ key: "", value: "" })
   }
 };
-function OptionMenu({ t, ids, selected, onToggle }) {
+function OptionMenu({ t, ids, selected, onToggle, disabled }) {
   const React = getReact();
   const [open, setOpen] = React.useState(false);
   const [coords, setCoords] = React.useState(null);
@@ -2898,7 +2972,7 @@ function OptionMenu({ t, ids, selected, onToggle }) {
       window.removeEventListener("resize", place);
     };
   }, [open, place]);
-  return /* @__PURE__ */ h("div", { className: "dk-option-anchor", ref: rootRef }, /* @__PURE__ */ h(Btn, { size: "sm", variant: "ghost", onClick: () => setOpen((value) => !value) }, t("project.modify")), open && coords ? /* @__PURE__ */ h("div", { className: "dk-option-menu", ref: menuRef, style: coords, role: "menu" }, ids.map((id) => /* @__PURE__ */ h("label", { className: "dk-option-item", key: id }, /* @__PURE__ */ h("input", { type: "checkbox", checked: selected.includes(id), onChange: () => onToggle(id) }), /* @__PURE__ */ h("span", null, t(`project.option.${id}`))))) : null);
+  return /* @__PURE__ */ h("div", { className: "dk-option-anchor", ref: rootRef }, /* @__PURE__ */ h(Btn, { size: "sm", variant: "ghost", disabled: disabled === true, onClick: () => setOpen((value) => !value) }, t("project.modify")), open && coords ? /* @__PURE__ */ h("div", { className: "dk-option-menu", ref: menuRef, style: coords, role: "menu" }, ids.map((id) => /* @__PURE__ */ h("label", { className: "dk-option-item", key: id }, /* @__PURE__ */ h("input", { type: "checkbox", checked: selected.includes(id), onChange: () => onToggle(id) }), /* @__PURE__ */ h("span", null, t(`project.option.${id}`))))) : null);
 }
 var summarize = (rows, mapper) => {
   const parts = (rows || []).map(mapper).filter(Boolean);
@@ -2907,7 +2981,7 @@ var summarize = (rows, mapper) => {
 function ConfigDialog({
   t,
   files,
-  runConfigs,
+  runConfigSummaries,
   servers,
   projectName,
   projectRoot,
@@ -2916,6 +2990,7 @@ function ConfigDialog({
   onRemove,
   onAdd,
   onLoadScripts,
+  onLoadConfig,
   onClose
 }) {
   const React = getReact();
@@ -2928,6 +3003,8 @@ function ConfigDialog({
   const [editor, setEditor] = React.useState(null);
   const [scripts, setScripts] = React.useState({ loading: false, list: [], missing: false, error: "", path: "" });
   const [scriptCustom, setScriptCustom] = React.useState(false);
+  const [loadingPath, setLoadingPath] = React.useState("");
+  const loadSeq = React.useRef(0);
   const maskRef = React.useRef(null);
   React.useEffect(() => {
     const node = maskRef.current;
@@ -2985,16 +3062,46 @@ function ConfigDialog({
   }, []);
   React.useEffect(() => {
     setDrafts((prev) => {
+      let changed = false;
       const next = { ...prev };
-      for (const file of files) {
-        if (!next[file.path]) next[file.path] = draftFromConfig(file, runConfigs[file.path], projectName);
-      }
       for (const key of Object.keys(next)) {
-        if (!files.some((file) => file.path === key)) delete next[key];
+        if (!files.some((file) => file.path === key)) {
+          delete next[key];
+          changed = true;
+        }
       }
-      return next;
+      return changed ? next : prev;
     });
-  }, [files, runConfigs, projectName]);
+  }, [files]);
+  React.useEffect(() => {
+    if (!selected || drafts[selected] || !onLoadConfig) return void 0;
+    const seq = ++loadSeq.current;
+    const path = selected;
+    setLoadingPath(path);
+    let cancelled = false;
+    (async () => {
+      try {
+        const data = await onLoadConfig(path);
+        if (cancelled || seq !== loadSeq.current) return;
+        const file = files.find((item) => item.path === path) || {
+          path,
+          relative: baseName(path),
+          name: baseName(path),
+          depth: 0
+        };
+        setDrafts(
+          (prev) => prev[path] ? prev : { ...prev, [path]: draftFromConfig(file, data?.config || null, projectName) }
+        );
+      } catch (cause) {
+        if (!cancelled && seq === loadSeq.current) setError(String(cause?.message || cause));
+      } finally {
+        if (!cancelled && seq === loadSeq.current) setLoadingPath("");
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [selected, drafts, files, projectName, onLoadConfig]);
   React.useEffect(() => {
     if (!files.length) {
       setSelected("");
@@ -3013,6 +3120,8 @@ function ConfigDialog({
   }, [confirmRemove]);
   const current = files.find((file) => file.path === selected) || null;
   const draft = selected && drafts[selected] || emptyDraft();
+  const configReady = Boolean(selected && drafts[selected]);
+  const locked = Boolean(selected && onLoadConfig) && !configReady;
   const serverOptions = [
     ...draft.serverId ? [] : [{ value: "", label: t("target.choose") }],
     ...servers.map((item) => ({
@@ -3050,6 +3159,7 @@ function ConfigDialog({
     ];
   })();
   const patch = (next) => {
+    if (selected && onLoadConfig && !drafts[selected]) return;
     setDrafts((prev) => ({ ...prev, [selected]: { ...prev[selected] || emptyDraft(), ...next } }));
   };
   const toggleOption = (id) => {
@@ -3158,10 +3268,10 @@ function ConfigDialog({
     setEditor(null);
   };
   const commit = async (mode) => {
-    if (!selected) return;
+    if (!selected || !drafts[selected]) return;
     const converted = draftToConfig(draft);
     if (converted.error) {
-      setError(t(converted.error));
+      setError(t(converted.error, converted.params));
       return;
     }
     setBusy(mode);
@@ -3231,8 +3341,22 @@ function ConfigDialog({
       setBusy("");
     }
   };
-  const valueRow = (label, summary, onEdit) => /* @__PURE__ */ h("div", { className: "dk-field" }, /* @__PURE__ */ h("span", { className: "dk-meta" }, label), /* @__PURE__ */ h("span", { className: "dk-value" }, /* @__PURE__ */ h("span", { className: "dk-value-text", title: summary }, summary || t("project.notSet")), /* @__PURE__ */ h("button", { type: "button", className: "dk-icon-btn", title: t("project.editValue"), onClick: onEdit }, /* @__PURE__ */ h(FolderIcon, null))));
+  const valueRow = (label, summary, onEdit, disabled) => /* @__PURE__ */ h("div", { className: "dk-field" }, /* @__PURE__ */ h("span", { className: "dk-meta" }, label), /* @__PURE__ */ h("span", { className: "dk-value" }, /* @__PURE__ */ h("span", { className: "dk-value-text", title: summary }, summary || t("project.notSet")), /* @__PURE__ */ h(
+    "button",
+    {
+      type: "button",
+      className: "dk-icon-btn",
+      title: t("project.editValue"),
+      disabled: disabled === true,
+      onClick: onEdit
+    },
+    /* @__PURE__ */ h(FolderIcon, null)
+  )));
   const listConfig = editor && editor.kind === "list" ? LIST_FIELDS[editor.field] : null;
+  const preBuildEnvChars = (editor?.value?.env || []).reduce(
+    (sum, item) => sum + String(item.key || "").length + normalizeEnvValue(item.value).length + 1,
+    0
+  );
   return /* @__PURE__ */ h(
     "div",
     {
@@ -3244,7 +3368,7 @@ function ConfigDialog({
       }
     },
     /* @__PURE__ */ h("div", { className: "dk-modal", role: "dialog", "aria-modal": "true", "aria-label": t("project.runConfigs") }, /* @__PURE__ */ h("div", { className: "dk-modal-head" }, /* @__PURE__ */ h("span", { className: "dk-modal-title" }, t("project.runConfigs")), /* @__PURE__ */ h("button", { type: "button", className: "dk-icon-btn", title: t("project.configCancel"), onClick: onClose }, /* @__PURE__ */ h(CloseIcon, null))), /* @__PURE__ */ h("div", { className: "dk-modal-body" }, /* @__PURE__ */ h("div", { className: "dk-modal-side" }, /* @__PURE__ */ h("div", { className: "dk-config-list" }, files.map((file) => {
-      const saved = runConfigs[file.path] || null;
+      const saved = runConfigSummaries[file.path] || null;
       const label = drafts[file.path]?.name || saved?.name || file.relative;
       return /* @__PURE__ */ h(
         "button",
@@ -3270,12 +3394,13 @@ function ConfigDialog({
           if (event.key === "Enter") void submitAdd();
         }
       }
-    ), /* @__PURE__ */ h("div", { className: "dk-actionbar" }, /* @__PURE__ */ h(Btn, { size: "sm", variant: "primary", disabled: busy === "add" || !add.path.trim(), onClick: () => void submitAdd() }, t("project.add")), /* @__PURE__ */ h(Btn, { size: "sm", variant: "ghost", onClick: () => setAdd({ open: false, path: "", error: "" }) }, t("project.configCancel"))), add.error ? /* @__PURE__ */ h("div", { className: "dk-inline-error" }, add.error) : null) : /* @__PURE__ */ h(Btn, { size: "sm", variant: "ghost", onClick: () => setAdd({ open: true, path: "", error: "" }) }, `+ ${t("project.addDockerfile")}`))), /* @__PURE__ */ h("div", { className: "dk-modal-main" }, current ? /* @__PURE__ */ h("div", { className: "dk-form" }, /* @__PURE__ */ h("label", { className: "dk-field" }, /* @__PURE__ */ h("span", { className: "dk-meta" }, t("project.configName")), /* @__PURE__ */ h(
+    ), /* @__PURE__ */ h("div", { className: "dk-actionbar" }, /* @__PURE__ */ h(Btn, { size: "sm", variant: "primary", disabled: busy === "add" || !add.path.trim(), onClick: () => void submitAdd() }, t("project.add")), /* @__PURE__ */ h(Btn, { size: "sm", variant: "ghost", onClick: () => setAdd({ open: false, path: "", error: "" }) }, t("project.configCancel"))), add.error ? /* @__PURE__ */ h("div", { className: "dk-inline-error" }, add.error) : null) : /* @__PURE__ */ h(Btn, { size: "sm", variant: "ghost", onClick: () => setAdd({ open: true, path: "", error: "" }) }, `+ ${t("project.addDockerfile")}`))), /* @__PURE__ */ h("div", { className: "dk-modal-main" }, loadingPath === selected ? /* @__PURE__ */ h("div", { className: "dk-note" }, t("project.configLoading")) : null, current ? /* @__PURE__ */ h("div", { className: "dk-form" }, /* @__PURE__ */ h("label", { className: "dk-field" }, /* @__PURE__ */ h("span", { className: "dk-meta" }, t("project.configName")), /* @__PURE__ */ h(
       "input",
       {
         className: "dk-input",
         value: draft.name,
         placeholder: current.relative,
+        disabled: locked,
         onChange: (event) => patch({ name: event.target.value })
       }
     )), /* @__PURE__ */ h("div", { className: "dk-field dk-field-block" }, /* @__PURE__ */ h("span", { className: "dk-meta" }, t("project.configServer")), /* @__PURE__ */ h("span", { className: "dk-value dk-value-stack" }, /* @__PURE__ */ h(
@@ -3285,45 +3410,70 @@ function ConfigDialog({
         options: serverOptions,
         onChange: (value) => patch({ serverId: value }),
         ariaLabel: t("project.configServer"),
+        disabled: locked,
         size: "sm"
       }
-    ), /* @__PURE__ */ h("span", { className: "dk-note" }, t("project.serverHint")))), /* @__PURE__ */ h("div", { className: "dk-section" }, /* @__PURE__ */ h("div", { className: "dk-section-head" }, /* @__PURE__ */ h("span", null, t("project.sectionBuild")), /* @__PURE__ */ h("span", { className: "dk-head-spacer" }), /* @__PURE__ */ h(OptionMenu, { t, ids: BUILD_OPTION_IDS, selected: draft.options, onToggle: toggleOption })), valueRow(
+    ), /* @__PURE__ */ h("span", { className: "dk-note" }, t("project.serverHint")))), /* @__PURE__ */ h("div", { className: "dk-section" }, /* @__PURE__ */ h("div", { className: "dk-section-head" }, /* @__PURE__ */ h("span", null, t("project.sectionBuild")), /* @__PURE__ */ h("span", { className: "dk-head-spacer" }), /* @__PURE__ */ h(
+      OptionMenu,
+      {
+        t,
+        ids: BUILD_OPTION_IDS,
+        selected: draft.options,
+        onToggle: toggleOption,
+        disabled: locked
+      }
+    )), valueRow(
       t("project.configDockerfile"),
       draft.dockerfile,
-      () => openTextEditor("dockerfile", t("project.configDockerfile"), current.path)
+      () => openTextEditor("dockerfile", t("project.configDockerfile"), current.path),
+      locked
     ), valueRow(
       t("project.configContextFolder"),
       draft.context,
-      () => openTextEditor("context", t("project.configContextFolder"), t("project.configContextHint"))
+      () => openTextEditor("context", t("project.configContextFolder"), t("project.configContextHint")),
+      locked
     ), /* @__PURE__ */ h("label", { className: "dk-field" }, /* @__PURE__ */ h("span", { className: "dk-meta" }, t("project.configTag")), /* @__PURE__ */ h(
       "input",
       {
         className: "dk-input",
         value: draft.tag,
         placeholder: "app:latest",
+        disabled: locked,
         onChange: (event) => patch({ tag: event.target.value })
       }
     )), has("platform") ? valueRow(
       t("project.option.platform"),
       draft.platform,
-      () => openTextEditor("platform", t("project.option.platform"), "linux/amd64")
+      () => openTextEditor("platform", t("project.option.platform"), "linux/amd64"),
+      locked
     ) : null, has("buildArgs") ? valueRow(
       t("project.option.buildArgs"),
       summarize(draft.buildArgs, (arg) => arg.key ? `${arg.key}=${arg.value}` : ""),
-      () => openListEditor("buildArgs", t("project.option.buildArgs"))
+      () => openListEditor("buildArgs", t("project.option.buildArgs")),
+      locked
     ) : null, has("noCache") || has("pull") ? /* @__PURE__ */ h("div", { className: "dk-field" }, /* @__PURE__ */ h("span", { className: "dk-meta" }, t("project.sectionSwitch")), /* @__PURE__ */ h("span", { className: "dk-checks" }, has("noCache") ? /* @__PURE__ */ h("label", null, /* @__PURE__ */ h(
       "input",
       {
         type: "checkbox",
         checked: draft.noCache,
+        disabled: locked,
         onChange: (event) => patch({ noCache: event.target.checked })
       }
-    ), /* @__PURE__ */ h("span", null, t("project.configNoCache"))) : null, has("pull") ? /* @__PURE__ */ h("label", null, /* @__PURE__ */ h("input", { type: "checkbox", checked: draft.pull, onChange: (event) => patch({ pull: event.target.checked }) }), /* @__PURE__ */ h("span", null, t("project.configPull"))) : null)) : null), /* @__PURE__ */ h("div", { className: "dk-section" }, /* @__PURE__ */ h("div", { className: "dk-section-head" }, /* @__PURE__ */ h("span", null, t("project.sectionRun")), /* @__PURE__ */ h("span", { className: "dk-head-spacer" }), /* @__PURE__ */ h(OptionMenu, { t, ids: RUN_OPTION_IDS, selected: draft.options, onToggle: toggleOption })), /* @__PURE__ */ h("label", { className: "dk-field" }, /* @__PURE__ */ h("span", { className: "dk-meta" }, t("project.configContainerName")), /* @__PURE__ */ h(
+    ), /* @__PURE__ */ h("span", null, t("project.configNoCache"))) : null, has("pull") ? /* @__PURE__ */ h("label", null, /* @__PURE__ */ h(
+      "input",
+      {
+        type: "checkbox",
+        checked: draft.pull,
+        disabled: locked,
+        onChange: (event) => patch({ pull: event.target.checked })
+      }
+    ), /* @__PURE__ */ h("span", null, t("project.configPull"))) : null)) : null), /* @__PURE__ */ h("div", { className: "dk-section" }, /* @__PURE__ */ h("div", { className: "dk-section-head" }, /* @__PURE__ */ h("span", null, t("project.sectionRun")), /* @__PURE__ */ h("span", { className: "dk-head-spacer" }), /* @__PURE__ */ h(OptionMenu, { t, ids: RUN_OPTION_IDS, selected: draft.options, onToggle: toggleOption, disabled: locked })), /* @__PURE__ */ h("label", { className: "dk-field" }, /* @__PURE__ */ h("span", { className: "dk-meta" }, t("project.configContainerName")), /* @__PURE__ */ h(
       "input",
       {
         className: "dk-input",
         value: draft.containerName,
         placeholder: t("project.configContainerNameHint"),
+        disabled: locked,
         onChange: (event) => patch({ containerName: event.target.value })
       }
     )), has("ports") ? valueRow(
@@ -3332,28 +3482,34 @@ function ConfigDialog({
         draft.ports,
         (port) => port.host || port.container ? `${port.host || "?"}:${port.container || "?"}` : ""
       ),
-      () => openListEditor("ports", t("project.option.ports"))
+      () => openListEditor("ports", t("project.option.ports")),
+      locked
     ) : null, has("mounts") ? valueRow(
       t("project.option.mounts"),
       summarize(
         draft.mounts,
         (mount) => mount.host || mount.container ? `${mount.host || "?"} -> ${mount.container || "?"}${mount.readOnly ? " (ro)" : ""}` : ""
       ),
-      () => openListEditor("mounts", t("project.option.mounts"))
+      () => openListEditor("mounts", t("project.option.mounts")),
+      locked
     ) : null, has("env") ? valueRow(
       t("project.option.env"),
-      summarize(draft.env, (item) => item.key ? `${item.key}=${item.value}` : ""),
-      () => openListEditor("env", t("project.option.env"))
+      // 摘要只显示键名：值可能是私钥，不在折叠行与 tooltip 里铺明文。
+      summarize(draft.env, (item) => item.key ? `${item.key}=***` : ""),
+      () => openListEditor("env", t("project.option.env")),
+      locked
     ) : null, has("runOptions") ? valueRow(
       t("project.option.runOptions"),
       draft.runOptions,
-      () => openTextEditor("runOptions", t("project.option.runOptions"), t("project.runOptionsHint"))
+      () => openTextEditor("runOptions", t("project.option.runOptions"), t("project.runOptionsHint")),
+      locked
     ) : null), /* @__PURE__ */ h("div", { className: "dk-section" }, /* @__PURE__ */ h("div", { className: "dk-section-head" }, /* @__PURE__ */ h("span", null, t("project.preBuild")), /* @__PURE__ */ h("span", { className: "dk-head-spacer" })), valueRow(
       t("project.preBuildTool"),
       // 未选工具时明确写「不执行」，避免看成没配置。
       preBuildSummary(draft.preBuild) || t("project.toolNone"),
-      openPreBuildEditor
-    )), error ? /* @__PURE__ */ h("div", { className: "dk-inline-error" }, error) : null) : /* @__PURE__ */ h("div", { className: "dk-meta" }, t("project.emptyHint")))), /* @__PURE__ */ h("div", { className: "dk-modal-foot" }, /* @__PURE__ */ h(Btn, { size: "sm", variant: "danger", disabled: !current || Boolean(busy), onClick: () => void remove() }, confirmRemove ? t("project.configDeleteConfirm") : t("project.configDelete")), /* @__PURE__ */ h("span", { className: "dk-head-spacer" }), /* @__PURE__ */ h(Btn, { size: "sm", variant: "ghost", onClick: onClose }, t("project.configCancel")), /* @__PURE__ */ h(Btn, { size: "sm", disabled: !current || Boolean(busy), onClick: () => void commit("apply") }, t("project.configApply")), /* @__PURE__ */ h(Btn, { size: "sm", disabled: !current || Boolean(busy), onClick: () => void commit("save") }, t("project.configSave")))),
+      openPreBuildEditor,
+      locked
+    )), error ? /* @__PURE__ */ h("div", { className: "dk-inline-error" }, error) : null) : /* @__PURE__ */ h("div", { className: "dk-meta" }, t("project.emptyHint")))), /* @__PURE__ */ h("div", { className: "dk-modal-foot" }, /* @__PURE__ */ h(Btn, { size: "sm", variant: "danger", disabled: !current || Boolean(busy), onClick: () => void remove() }, confirmRemove ? t("project.configDeleteConfirm") : t("project.configDelete")), /* @__PURE__ */ h("span", { className: "dk-head-spacer" }), /* @__PURE__ */ h(Btn, { size: "sm", variant: "ghost", onClick: onClose }, t("project.configCancel")), /* @__PURE__ */ h(Btn, { size: "sm", disabled: !current || Boolean(busy) || !configReady, onClick: () => void commit("apply") }, t("project.configApply")), /* @__PURE__ */ h(Btn, { size: "sm", disabled: !current || Boolean(busy) || !configReady, onClick: () => void commit("save") }, t("project.configSave")))),
     editor ? /* @__PURE__ */ h(
       "div",
       {
@@ -3398,7 +3554,29 @@ function ConfigDialog({
                 )
               }))
             }
-          ), /* @__PURE__ */ h("span", null, t(column.labelKey))) : /* @__PURE__ */ h(
+          ), /* @__PURE__ */ h("span", null, t(column.labelKey))) : column.multiline ? /* @__PURE__ */ h("div", { className: "dk-multiline", key: column.key }, /* @__PURE__ */ h(
+            "textarea",
+            {
+              className: "dk-input dk-textarea",
+              rows: 4,
+              spellCheck: false,
+              value: row[column.key] || "",
+              placeholder: t(column.placeholderKey),
+              onChange: (event) => setEditor((prev) => ({
+                ...prev,
+                rows: prev.rows.map(
+                  (item, at) => at === index ? { ...item, [column.key]: event.target.value } : item
+                )
+              }))
+            }
+          ), column.limit ? /* @__PURE__ */ h(
+            "span",
+            {
+              className: "dk-env-count",
+              "data-over": normalizeEnvValue(row[column.key]).length > column.limit ? "1" : "0"
+            },
+            `${normalizeEnvValue(row[column.key]).length} / ${column.limit}`
+          ) : null) : /* @__PURE__ */ h(
             "input",
             {
               key: column.key,
@@ -3431,7 +3609,7 @@ function ConfigDialog({
             onClick: () => setEditor((prev) => ({ ...prev, rows: [...prev.rows, listConfig.empty()] }))
           },
           `+ ${t("project.addRow")}`
-        ))) : null, editor.kind === "form" ? /* @__PURE__ */ h("div", { className: "dk-form" }, /* @__PURE__ */ h("div", { className: "dk-field" }, /* @__PURE__ */ h("span", { className: "dk-meta" }, t("project.preBuildTool")), /* @__PURE__ */ h("span", { className: "dk-value" }, /* @__PURE__ */ h(
+        )), editor.field === "env" ? /* @__PURE__ */ h("div", { className: "dk-note" }, t("project.envSecretHint")) : null) : null, editor.kind === "form" ? /* @__PURE__ */ h("div", { className: "dk-form" }, /* @__PURE__ */ h("div", { className: "dk-field" }, /* @__PURE__ */ h("span", { className: "dk-meta" }, t("project.preBuildTool")), /* @__PURE__ */ h("span", { className: "dk-value" }, /* @__PURE__ */ h(
           DkSelect,
           {
             value: editor.value.tool,
@@ -3572,15 +3750,24 @@ function ConfigDialog({
             placeholder: t("project.keyName"),
             onChange: (event) => patchPreBuildEnv(index, { key: event.target.value })
           }
-        ), /* @__PURE__ */ h(
-          "input",
+        ), /* @__PURE__ */ h("div", { className: "dk-multiline" }, /* @__PURE__ */ h(
+          "textarea",
           {
-            className: "dk-input",
+            className: "dk-input dk-textarea",
+            rows: 2,
+            spellCheck: false,
             value: row.value,
             placeholder: t("project.keyValue"),
             onChange: (event) => patchPreBuildEnv(index, { value: event.target.value })
           }
         ), /* @__PURE__ */ h(
+          "span",
+          {
+            className: "dk-env-count",
+            "data-over": normalizeEnvValue(row.value).length > PRE_BUILD_ENV_VALUE_MAX ? "1" : "0"
+          },
+          `${normalizeEnvValue(row.value).length} / ${PRE_BUILD_ENV_VALUE_MAX}`
+        )), /* @__PURE__ */ h(
           "button",
           {
             type: "button",
@@ -3589,7 +3776,10 @@ function ConfigDialog({
             onClick: () => removePreBuildEnv(index)
           },
           /* @__PURE__ */ h(CloseIcon, null)
-        ))), /* @__PURE__ */ h("div", null, /* @__PURE__ */ h(Btn, { size: "sm", variant: "ghost", onClick: addPreBuildEnv }, `+ ${t("project.addRow")}`)))) : null, editor.value.tool ? /* @__PURE__ */ h("div", { className: "dk-field" }, /* @__PURE__ */ h("span", { className: "dk-meta" }, t("project.preBuildCwd")), /* @__PURE__ */ h(
+        ))), /* @__PURE__ */ h("div", null, /* @__PURE__ */ h(Btn, { size: "sm", variant: "ghost", onClick: addPreBuildEnv }, `+ ${t("project.addRow")}`), /* @__PURE__ */ h("span", { className: "dk-env-count", "data-over": preBuildEnvChars > PRE_BUILD_ENV_TOTAL_MAX ? "1" : "0" }, t("project.preBuildEnvTotalCount", {
+          count: preBuildEnvChars,
+          max: PRE_BUILD_ENV_TOTAL_MAX
+        }))))) : null, editor.value.tool ? /* @__PURE__ */ h("div", { className: "dk-field" }, /* @__PURE__ */ h("span", { className: "dk-meta" }, t("project.preBuildCwd")), /* @__PURE__ */ h(
           "input",
           {
             className: "dk-input",
@@ -3748,7 +3938,7 @@ var stateTone = (state) => {
 function ProjectView({ t, rpc, notify, project, onOpenFile, active }) {
   const React = getReact();
   const [scan, setScan] = React.useState({ status: "idle", data: null, error: "" });
-  const [runConfigs, setRunConfigs] = React.useState({});
+  const [runConfigSummaries, setRunConfigSummaries] = React.useState({});
   const [servers, setServers] = React.useState([]);
   const [dialog, setDialog] = React.useState({ open: false, path: "" });
   const [compose, setCompose] = React.useState({});
@@ -3766,11 +3956,14 @@ function ProjectView({ t, rpc, notify, project, onOpenFile, active }) {
     try {
       const data = await rpc.scanProject(root);
       setScan({ status: "ready", data, error: "" });
-      setRunConfigs(data?.runConfigs && typeof data.runConfigs === "object" ? data.runConfigs : {});
+      setRunConfigSummaries(
+        data?.runConfigSummaries && typeof data.runConfigSummaries === "object" ? data.runConfigSummaries : {}
+      );
     } catch (error) {
       setScan({ status: "error", data: null, error: String(error?.message || error) });
     }
   }, [canScan, root, rpc]);
+  const loadProjectConfig = React.useCallback((path) => rpc.readProjectConfig(path), [rpc]);
   const refreshServers = React.useCallback(async () => {
     try {
       const data = await rpc.sshStatus();
@@ -3886,7 +4079,7 @@ function ProjectView({ t, rpc, notify, project, onOpenFile, active }) {
     }
   }, [task, scan.data, loadCompose]);
   const startBuildRun = async (file, config) => {
-    const saved = config || runConfigs[file.path] || {};
+    const saved = config || (await loadProjectConfig(file.path))?.config || {};
     const tag = String(saved.tag || "").trim() || suggestTag(projectName, file);
     const payload = await rpc.buildAndRun({
       dockerfile: file.path,
@@ -3919,12 +4112,17 @@ function ProjectView({ t, rpc, notify, project, onOpenFile, active }) {
   };
   const saveConfig = async (path, config, previousPath) => {
     const result = await rpc.saveProjectConfig(path, config, false, root);
-    if (result?.runConfigs) setRunConfigs(result.runConfigs);
-    else setRunConfigs((prev) => ({ ...prev, [path]: result?.config || config }));
+    if (result?.summary) {
+      setRunConfigSummaries((prev) => ({ ...prev, [path]: result.summary }));
+    }
     if (previousPath && previousPath !== path) {
       try {
-        const removed = await rpc.removeProjectConfig(previousPath);
-        if (removed?.runConfigs) setRunConfigs(removed.runConfigs);
+        await rpc.removeProjectConfig(previousPath);
+        setRunConfigSummaries((prev) => {
+          const next = { ...prev };
+          delete next[previousPath];
+          return next;
+        });
       } catch {
       }
       await rescan();
@@ -3932,14 +4130,12 @@ function ProjectView({ t, rpc, notify, project, onOpenFile, active }) {
     notify("success", t("project.configSaved"));
   };
   const removeConfig = async (path) => {
-    const result = await rpc.removeProjectConfig(path);
-    if (result?.runConfigs) setRunConfigs(result.runConfigs);
-    else
-      setRunConfigs((prev) => {
-        const next = { ...prev };
-        delete next[path];
-        return next;
-      });
+    await rpc.removeProjectConfig(path);
+    setRunConfigSummaries((prev) => {
+      const next = { ...prev };
+      delete next[path];
+      return next;
+    });
     notify("success", t("project.configDeleted"));
     const target = (scan.data?.dockerfiles || []).find((file) => file.path === path);
     if (target?.manual) await rescan();
@@ -3990,7 +4186,7 @@ function ProjectView({ t, rpc, notify, project, onOpenFile, active }) {
       onClear: () => setTask(null)
     }
   )), /* @__PURE__ */ h("div", { className: "dk-list", style: { paddingBottom: "8px" } }, dockerfiles.length ? /* @__PURE__ */ h("div", { className: "dk-card" }, /* @__PURE__ */ h("div", { className: "dk-card-title" }, /* @__PURE__ */ h("span", null, t("project.dockerfiles")), /* @__PURE__ */ h("span", { className: "dk-pill" }, dockerfiles.length)), dockerfiles.map((file) => {
-    const config = runConfigs[file.path] || null;
+    const config = runConfigSummaries[file.path] || null;
     const server = config?.serverId ? servers.find((item) => item.id === config.serverId) : null;
     const meta = [
       config?.tag || suggestTag(projectName, file),
@@ -4059,7 +4255,8 @@ function ProjectView({ t, rpc, notify, project, onOpenFile, active }) {
     {
       t,
       files: dockerfiles,
-      runConfigs,
+      runConfigSummaries,
+      onLoadConfig: loadProjectConfig,
       servers,
       projectName,
       projectRoot: scan.data?.root || "",
