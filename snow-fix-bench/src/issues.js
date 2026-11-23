@@ -763,6 +763,9 @@ function normalizeSession(raw) {
     uncertainCount: Math.max(0, Number(raw.uncertainCount) || 0),
     activityDismissed: Boolean(raw.activityDismissed),
     lastError: String(raw.lastError || ""),
+    // 解析失败的具体原因（缺围栏 / JSON 非法 / 字段形状不对）：与 lastError 一起持久化，
+    // 重开工作台或切换项目读盘后仍能给出可定位的提示，而不是退回通用「解析失败」。
+    lastErrorDetail: String(raw.lastErrorDetail || ""),
   };
 }
 
@@ -942,6 +945,8 @@ const TERMINAL_SESSION_ERRORS = new Set([
   // 复审批次创建失败：上一批结果已回写，队列保留，宿主没有新的在途会话。
   "verify-batch-create-failed",
   "batch-create-failed",
+  // 追问后宿主已确认空闲且没有产出新回复：判定前提就是会话不再推进，属于终态。
+  "no-new-reply",
 ]);
 
 // 超时或未知异常的会话可能仍在宿主中运行：清理时不能当作空闲会话处理。
@@ -949,6 +954,18 @@ function isSessionPossiblyRunning(session, activity) {
   if (isSessionBusy(session, activity)) return true;
   if (!session || session.status !== "error") return false;
   return !TERMINAL_SESSION_ERRORS.has(String(session.lastError || ""));
+}
+
+// 只有「正文已返回但结构化块解析不出来」这一类失败，让模型重发同一块才有意义。
+// 超时、会话异常、续批创建失败等状态下重发没有可恢复的结论，还会重复应用上一批结果。
+const STRUCTURED_RETRY_ERRORS = new Set([
+  "parse-failed",
+  "review-parse-failed",
+  "verify-parse-failed",
+]);
+
+function isStructuredRetryError(lastError) {
+  return STRUCTURED_RETRY_ERRORS.has(String(lastError || ""));
 }
 
 // 重开来源：新数据直接读取；旧数据只有 regression 时按最后一次修复结果推断。
@@ -1155,6 +1172,7 @@ export {
   normalizeIssueState,
   isSessionBusy,
   isSessionPossiblyRunning,
+  isStructuredRetryError,
   currentStep,
   listVisibleIssues,
   normalizeStatusFilter,

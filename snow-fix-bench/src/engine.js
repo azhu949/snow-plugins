@@ -15,6 +15,12 @@ import {
   WATCH_EMPTY_POLLS,
   WATCH_EMPTY_GRACE_MS,
   WATCH_UNKNOWN_STABLE_POLLS,
+  WATCH_NO_NEW_REPLY_POLLS,
+  WATCH_NO_NEW_REPLY_GRACE_MS,
+  WATCH_RETRY_NOT_STARTED_POLLS,
+  WATCH_RETRY_NOT_STARTED_MS,
+  WATCH_RETRY_STREAMING_POLLS,
+  WATCH_RETRY_UNCONFIRMED_MS,
   COMMIT_LIMIT,
   COMMIT_COMMAND_LIMIT,
   COMMIT_FIELD_SEP,
@@ -60,6 +66,7 @@ import {
   planVerifyBatches,
   takeNextFixBatch,
   isSessionPossiblyRunning,
+  isStructuredRetryError,
   issueLocationFiles,
   archiveIssueRecord,
   restoreIssueRecord,
@@ -74,8 +81,20 @@ import {
   resolveStageRunState,
   isStageRecoverable,
 } from "./issues.js";
-import { buildReviewPrompt, buildFixPrompt, buildVerifyPrompt, estimateVerifyIssueChars, langText } from "./prompts.js";
-import { parseReviewResult, parseFixResults, parseVerifyResults, normalizeSeverityScope } from "./parse.js";
+import {
+  buildReviewPrompt,
+  buildFixPrompt,
+  buildVerifyPrompt,
+  estimateVerifyIssueChars,
+  buildStructuredRetryPrompt,
+  langText,
+} from "./prompts.js";
+import {
+  parseReviewResultDetailed,
+  parseFixResultsDetailed,
+  parseVerifyResultsDetailed,
+  normalizeSeverityScope,
+} from "./parse.js";
 import { createStore } from "./store.js";
 import { createT } from "./i18n.js";
 import {
@@ -595,6 +614,10 @@ function createEngine(api, options = {}) {
   const stagedRuns = new Set();
   // 清理在途槽位：同一轮复用同一个任务，不同轮次串行，避免重复写宿主与项目状态。
   let cleanupInFlight = null;
+  // 「请 AI 重发结果」的在途会话：从入口到 sendMessage 之间有多处 await，
+  // 期间 activity.phase 与按钮状态都不变，双击会各发一条追问、白烧两次模型调用。
+  // 以会话 id 为键：切项目或重建会话后旧键不影响新会话。
+  const structuredRetryInFlight = new Set();
   // 自动收尾补做的单飞标记：mount / 切换项目连续触发时只跑一次。
   let pendingFinishRunning = false;
   // 补做任务的代次：切换项目 / 卸载后旧任务的 finally 不能清掉新任务的单飞标记。
@@ -1581,8 +1604,52 @@ function createEngine(api, options = {}) {
     };
   }
 
-  function describeSessionError(lastError) {
+  // 解析失败原因：把结构化 reason 翻成一句可执行的话，并附上解析器给出的位置信息。
+  // 同一份回复再解析一次仍是同样的坏 JSON，用户真正需要的是「哪里不对」与下一步。
+  const PARSE_REASON_KEYS = {
+    "fence-missing": "fx.parse.reason.fenceMissing",
+    "json-invalid": "fx.parse.reason.jsonInvalid",
+    "shape-mismatch": "fx.parse.reason.shapeMismatch",
+    "rows-unusable": "fx.parse.reason.rowsUnusable",
+    "no-usable-rows": "fx.parse.reason.rowsUnusable",
+    "empty-array": "fx.parse.reason.emptyArray",
+    "output-truncated": "fx.parse.reason.truncated",
+  };
+
+  // 解析失败的原因细节：JSON.parse 的英文报错不直接展示，只用于换算出可定位的本地化说明。
+  // 没有可用细节时返回空串，调用方改用不含原因段的完整句，避免出现「…不合法：」这类断句。
+  function localizeParseDetail(source) {
+    const reason = String(source?.reason || "");
+    if (reason === "json-invalid") {
+      if (String(source?.detailCode || "") === "empty-content") return t("fx.parse.reason.detailEmpty");
+      const line = Number(source?.detailLine) || 0;
+      const column = Number(source?.detailColumn) || 0;
+      if (line > 0 && column > 0) {
+        // 修复变体的行列按修复后的文本换算：文案必须说明基准，否则用户按原回复数行会对不上。
+        return t(source?.detailRepaired ? "fx.parse.reason.detailAtRepaired" : "fx.parse.reason.detailAt", {
+          line,
+          column,
+        });
+      }
+      return t("fx.parse.reason.detailUnknown");
+    }
+    if (reason === "rows-unusable" || reason === "no-usable-rows") return String(source?.detail || "");
+    return "";
+  }
+
+  function describeParseFailure(source, fence, fallbackKey) {
+    const reasonKey = PARSE_REASON_KEYS[String(source?.reason || "")] || "";
+    if (!reasonKey) return t(fallbackKey);
+    const detail = localizeParseDetail(source);
+    const reasonText = detail ? t(reasonKey, { fence, detail }) : t(reasonKey, { fence });
+    return `${t(fallbackKey)} ${reasonText}`;
+  }
+
+  function describeSessionError(lastError, lastErrorDetail) {
     if (!lastError || lastError === "timeout") return "";
+    // 解析失败时持久化的说明已含基础提示与原因：重开工作台后直接复用，避免重复拼接。
+    const detail = String(lastErrorDetail || "").trim();
+    if (detail) return detail;
     if (lastError === "parse-failed") return t("fx.toast.fixParseFailed");
     if (lastError === "verify-parse-failed") return t("fx.toast.verifyParseFailed");
     if (lastError === "verify-expired") return t("fx.toast.verifyExpired");
@@ -1590,6 +1657,9 @@ function createEngine(api, options = {}) {
     if (lastError === "review-parse-failed") return t("fx.toast.reviewParseFailed");
     if (lastError === "session-interrupted") return t("fx.activity.sessionInterrupted");
     if (lastError === "session-empty-response") return t("fx.activity.sessionEmptyResponse");
+    if (lastError === "no-new-reply") return t("fx.activity.noNewReply");
+    if (lastError === "reply-not-started") return t("fx.activity.replyNotStarted");
+    if (lastError === "reply-unconfirmed") return t("fx.activity.replyUnconfirmed");
     return t("fx.activity.failed", { error: lastError });
   }
 
@@ -1608,7 +1678,7 @@ function createEngine(api, options = {}) {
       return {
         ...sessionActivityBase("fix", fix),
         phase: fix.status === "detached" ? "detached" : "error",
-        error: describeSessionError(fix.lastError),
+        error: describeSessionError(fix.lastError, fix.lastErrorDetail),
         timedOut: fix.lastError === "timeout",
       };
     }
@@ -1616,7 +1686,7 @@ function createEngine(api, options = {}) {
       return {
         ...sessionActivityBase("verify", verify),
         phase: verify.status === "detached" ? "detached" : "error",
-        error: describeSessionError(verify.lastError),
+        error: describeSessionError(verify.lastError, verify.lastErrorDetail),
         timedOut: verify.lastError === "timeout",
       };
     }
@@ -1624,7 +1694,7 @@ function createEngine(api, options = {}) {
       return {
         ...sessionActivityBase("review", review),
         phase: review.status === "detached" ? "detached" : "error",
-        error: describeSessionError(review.lastError),
+        error: describeSessionError(review.lastError, review.lastErrorDetail),
         timedOut: review.lastError === "timeout",
       };
     }
@@ -2395,6 +2465,10 @@ function createEngine(api, options = {}) {
     let lastRuntimeProgress = resumed ? null : "";
     // 恢复跟踪时首轮正文同样只建立基线：历史正文不是新进展，不能刷新龄期。
     let lastCombined = resumed ? null : "";
+    // 追问 / 重发场景：发送前的历史正文不是本次要收的结果，必须等正文变化后才允许收尾。
+    // 默认 null：新建会话与继续跟踪保持原行为（用户点「继续跟踪」就是要读已有回复）。
+    const replyBaseline = typeof options.replyBaseline === "string" ? options.replyBaseline : null;
+    let replyFresh = replyBaseline === null;
     let stable = 0;
     // runtime 不可读期间的独立稳定计数：不能复用 stable，否则可读 / 未知切换会沿用旧计数。
     let stableUnknown = 0;
@@ -2412,6 +2486,13 @@ function createEngine(api, options = {}) {
     // 中止或空响应的终态判定：只在 runtime 明确可读、会话明确空闲且没有有效正文时累计。
     let abortedPolls = 0;
     let emptyResponsePolls = 0;
+    // 追问后「宿主已空闲但正文始终未变」的连续轮次：session-error 与正文变化这两条快路径
+    // 都不命中时用它兜底，避免退化成等 20 / 30 分钟的空闲超时。
+    let noFreshReplyPolls = 0;
+    // 追问后「本轮是否真的跑起来」的正向证据：只有观测到运行中的回合，才能把正文没有变化
+    // 判成没有新回复；没有该证据时只给出「尚未开始」的非终态结论。
+    let streamingPolls = 0;
+    let notStartedPolls = 0;
     let sawStreaming = false;
     let sawAssistantRow = false;
     const isErrorStatus = (message) =>
@@ -2483,7 +2564,10 @@ function createEngine(api, options = {}) {
         streamingSession || (focusedConversation && focusedConversation.isStreaming),
       );
       const busy = isStreaming || pendingMessageCount > 0;
-      if (isStreaming) sawStreaming = true;
+      if (isStreaming) {
+        sawStreaming = true;
+        streamingPolls += 1;
+      }
       // 会话仍在运行不代表仍有进展：暂停等待授权、streamStartedAt 未清理或 run 卡死时，
       // 宿主会持续报告流式 / 排队，但没有新的 token、消息或 run 起点。
       // 只有可观测进展才刷新活动时间，空闲看门狗才能按 20 / 30 分钟阈值生效。
@@ -2618,6 +2702,8 @@ function createEngine(api, options = {}) {
         (message) => String(message.content || "").trim() && !isErrorStatus(message),
       );
       const combined = assistants.map((message) => message.content).join("\n\n");
+      // 只有正文相对发送前基线发生变化（新 assistant 行，或既有行内容增长）才算新回复。
+      if (!replyFresh && combined && combined !== replyBaseline) replyFresh = true;
       if (combined) {
         if (lastCombined === null) {
           // 恢复后的首个正文快照只建立基线，不刷新 lastActivityAt / displayUpdateAt。
@@ -2636,13 +2722,49 @@ function createEngine(api, options = {}) {
         abortedPolls = 0;
         emptyResponsePolls = 0;
         updateActivityProgress(conversationId, "streaming", "");
-        if (!busy) {
+        if (!busy && replyFresh) {
           // runtime 可读且确认空闲时才允许快速收尾；不可读时必须经过更长稳定窗口，
           // 避免工具调用期间正文不变就把半成品交给解析器。
+          // replyFresh 为 false 时正文还是发问前那份，收尾只会再次解析失败。
+          noFreshReplyPolls = 0;
+          notStartedPolls = 0;
           if (runtimeKnown && stable >= 1) return combined;
           if (!runtimeKnown && stableUnknown >= WATCH_UNKNOWN_STABLE_POLLS) return combined;
+        } else if (!busy && runtimeKnown) {
+          // 追问后正文仍是发问前那一份，宿主又已确认空闲：只有确实观测到本轮运行
+          // （同一轮里流式快照至少出现两次，排除上一轮遗留的流式条目）才能判定「没有新回复」。
+          // 未观测到本轮时给出「尚未开始」的非终态结论：宿主可能只是还没启动回合，
+          // 此时若提前释放修复中占位，模型随后真的开跑就会与新一轮修复并发修改同一批文件。
+          if (streamingPolls >= WATCH_RETRY_STREAMING_POLLS) {
+            notStartedPolls = 0;
+            noFreshReplyPolls += 1;
+            if (
+              noFreshReplyPolls >= WATCH_NO_NEW_REPLY_POLLS &&
+              nowMs() - startedAt >= WATCH_NO_NEW_REPLY_GRACE_MS
+            ) {
+              throw new Error("no-new-reply");
+            }
+          } else {
+            noFreshReplyPolls = 0;
+            notStartedPolls += 1;
+            if (
+              notStartedPolls >= WATCH_RETRY_NOT_STARTED_POLLS &&
+              nowMs() - startedAt >= WATCH_RETRY_NOT_STARTED_MS
+            ) {
+              throw new Error("reply-not-started");
+            }
+          }
+        } else if (!busy && !replyFresh && nowMs() - startedAt >= WATCH_RETRY_UNCONFIRMED_MS) {
+          // runtime 不可读时没有可观察的运行状态信号：凭正文稳定既不能认定没有新回复，
+          // 也不该退化成 60 分钟的未知态空闲超时，到点给出「未确认」的非终态结论。
+          throw new Error("reply-unconfirmed");
+        } else {
+          // 会话仍在运行（或在排队）：本轮已经跑起来，之前的「尚未开始」计数作废。
+          noFreshReplyPolls = 0;
+          notStartedPolls = 0;
         }
       } else {
+        noFreshReplyPolls = 0;
         const lastContent = String(lastAssistant?.content || "");
         const lastStatus = String(lastAssistant?.status || "").toLowerCase();
         const interruptionReason = String(lastAssistant?.interruptionReason || "").trim();
@@ -2696,7 +2818,7 @@ function createEngine(api, options = {}) {
     const guard = token || guardOverride || captureProject();
     const session = snapshot.state.sessions.review;
     if (!session || session.conversationId !== conversationId) return false;
-    const parsedResult = parseReviewResult(text, {
+    const parsedResult = parseReviewResultDetailed(text, {
       // 旧会话没有范围快照时回退当前设置，保持升级前的行为。
       severities:
         Array.isArray(session.issueSeverities) && session.issueSeverities.length
@@ -2706,21 +2828,28 @@ function createEngine(api, options = {}) {
     // 只有显式空结果才是「未发现问题」；缺少结构化块或内容无法解析必须显式报错，
     // 否则真实缺陷会被静默丢弃，工作台给出错误的干净结论。
     if (parsedResult.status === "failed") {
+      // 「重新解析」读的是同一份回复，原因必须当场说清：缺围栏、JSON 非法还是字段形状不对。
+      const failureText = describeParseFailure(parsedResult, "snow-issues", "fx.toast.reviewParseFailed");
       const failedState = {
         ...snapshot.state,
         sessions: {
           ...snapshot.state.sessions,
-          review: { ...session, status: "error", lastError: "review-parse-failed" },
+          review: {
+            ...session,
+            status: "error",
+            lastError: "review-parse-failed",
+            lastErrorDetail: failureText,
+          },
         },
       };
       store.set({
         state: failedState,
         activity:
           snapshot.activity?.conversationId === conversationId
-            ? { ...snapshot.activity, phase: "error", message: "", error: t("fx.toast.reviewParseFailed") }
+            ? { ...snapshot.activity, phase: "error", message: "", error: failureText }
             : snapshot.activity,
       });
-      setToast("error", t("fx.toast.reviewParseFailed"));
+      setToast("error", failureText);
       await saveState({
         projectId: snapshot.project?.directoryId,
         state: failedState,
@@ -2741,7 +2870,15 @@ function createEngine(api, options = {}) {
       ...snapshot.state,
       sessions: {
         ...snapshot.state.sessions,
-        review: { ...session, status: "done", lastError: "", autoFixIds: [], autoFixReadyAt: 0, autoFixDispatchingAt: 0 },
+        review: {
+          ...session,
+          status: "done",
+          lastError: "",
+          lastErrorDetail: "",
+          autoFixIds: [],
+          autoFixReadyAt: 0,
+          autoFixDispatchingAt: 0,
+        },
       },
     };
     const activityDone =
@@ -2874,7 +3011,8 @@ function createEngine(api, options = {}) {
     const guard = token || options.guard || captureProject();
     const session = snapshot.state.sessions.fix;
     if (!session || session.conversationId !== conversationId) return false;
-    const parsedResults = parseFixResults(text);
+    const parsedFix = parseFixResultsDetailed(text);
+    const parsedResults = parsedFix.results;
     // 只接受 session.issueIds 白名单内的结果，避免模型越界改写其它 issue。
     // 旧数据没有 issueIds 时，退回本会话正在修复的 issue，与 restoreFixingIssues 同口径。
     const allowedIds = (
@@ -2904,6 +3042,10 @@ function createEngine(api, options = {}) {
     if (!results.length) {
       // 手动重新解析已停止跟踪的修复会话时，宿主可能仍在运行：保留 fixing，等待会话结束。
       const keepFixing = options.preserveFixing === true;
+      // 结果带了 id 但都不在本批白名单时，问题不在 JSON 语法，提示要说清是哪一类偏差。
+      const failureText = ignoredResults.length
+        ? t("fx.toast.fixParseIgnored", { count: ignoredResults.length })
+        : describeParseFailure(parsedFix, "snow-fix-results", "fx.toast.fixParseFailed");
       const restored = keepFixing
         ? snapshot.state.issues
         : restoreFixingIssues(snapshot.state.issues, conversationId);
@@ -2914,8 +3056,12 @@ function createEngine(api, options = {}) {
           ...snapshot.state.sessions,
           fix: {
             ...session,
+            // 旧会话没有 issueIds 时把本次推导出的白名单固化进会话：否则重发成功后
+            // 既无法重新占位，下一次 finishFix 的兜底也会取到空集并丢弃全部结果。
+            ...(allowedIds.length ? { issueIds: allowedIds } : {}),
             status: keepFixing ? "detached" : "error",
             lastError: "parse-failed",
+            lastErrorDetail: failureText,
           },
         },
       };
@@ -2926,11 +3072,11 @@ function createEngine(api, options = {}) {
             ? {
                 ...snapshot.activity,
                 phase: keepFixing ? "detached" : "error",
-                error: t("fx.toast.fixParseFailed"),
+                error: failureText,
               }
             : snapshot.activity,
       });
-      setToast("error", t("fx.toast.fixParseFailed"));
+      setToast("error", failureText);
       await saveState({
         projectId: snapshot.project?.directoryId,
         state: nextState,
@@ -2950,7 +3096,7 @@ function createEngine(api, options = {}) {
       issues,
       sessions: {
         ...snapshot.state.sessions,
-        fix: { ...session, status: "done", lastError: "" },
+        fix: { ...session, status: "done", lastError: "", lastErrorDetail: "" },
       },
     };
     store.set({ state: nextState, activity: activityDone });
@@ -2993,6 +3139,8 @@ function createEngine(api, options = {}) {
           ...currentSession,
           status: "error",
           lastError: "batch-create-failed",
+          // 续批失败的原因就是卡片上展示的那句：一并持久化，重开工作台后不会退化成错误码。
+          lastErrorDetail: String(errorMessage || ""),
           activityDismissed: false,
         },
       },
@@ -3604,7 +3752,7 @@ function createEngine(api, options = {}) {
       ...snapshot.state,
       sessions: {
         ...snapshot.state.sessions,
-        fix: { ...session, status: "done", lastError: "", queue: [] },
+        fix: { ...session, status: "done", lastError: "", lastErrorDetail: "", queue: [] },
       },
     };
     store.set({ state: doneState });
@@ -4402,13 +4550,13 @@ function createEngine(api, options = {}) {
   }
 
   // 复审失败收尾：保留会话与重解析入口，不标记完成、不触发自动清理。
-  async function failVerify(snapshot, session, conversationId, lastError, message, guard) {
+  async function failVerify(snapshot, session, conversationId, lastError, message, guard, detail = "") {
     if (guard && !isProjectCurrent(guard)) return true;
     const nextState = {
       ...snapshot.state,
       sessions: {
         ...snapshot.state.sessions,
-        verify: { ...session, status: "error", lastError },
+        verify: { ...session, status: "error", lastError, lastErrorDetail: detail || message },
       },
     };
     store.set({
@@ -4441,7 +4589,8 @@ function createEngine(api, options = {}) {
     const guard = token || guardOverride || captureProject();
     const session = snapshot.state.sessions.verify;
     if (!session || session.conversationId !== conversationId) return false;
-    const results = parseVerifyResults(text);
+    const parsedVerify = parseVerifyResultsDetailed(text);
+    const results = parsedVerify.results;
     // 至少一条结论必须命中本次复审的 issue 白名单；全部不匹配时按解析失败处理，
     // 保留会话与重解析入口，避免把无效输出当成复审完成并触发自动清理。
     const allowedIds = new Set(
@@ -4449,13 +4598,18 @@ function createEngine(api, options = {}) {
     );
     const matched = results.filter((result) => allowedIds.has(String(result.issueId)));
     if (!matched.length) {
+      // 有结论但都不属于本批：问题在 id，不在 JSON 语法，提示要分开说。
+      const failureText = results.length
+        ? t("fx.toast.verifyParseIgnored", { count: results.length })
+        : describeParseFailure(parsedVerify, "snow-verify-results", "fx.toast.verifyParseFailed");
       return failVerify(
         snapshot,
         session,
         conversationId,
         "verify-parse-failed",
-        t("fx.toast.verifyParseFailed"),
+        failureText,
         guard,
+        failureText,
       );
     }
     // 续批创建失败后重新解析同一批：结论已经写过，不能再按“过期”拒绝，否则队列无法继续。
@@ -4489,6 +4643,7 @@ function createEngine(api, options = {}) {
         (Number(session.stillPresentCount) || 0) + (alreadyApplied ? 0 : applied.stillPresent),
       uncertainCount: (Number(session.uncertainCount) || 0) + (alreadyApplied ? 0 : applied.uncertain),
       lastError: "",
+      lastErrorDetail: "",
     };
     const countedState = {
       ...snapshot.state,
@@ -4520,7 +4675,7 @@ function createEngine(api, options = {}) {
     const finalSnapshot = store.get();
     const finishedBase = finalSnapshot.state.sessions.verify;
     if (!finishedBase || finishedBase.conversationId !== conversationId) return true;
-    const finishedSession = { ...finishedBase, status: "done", queue: [], lastError: "" };
+    const finishedSession = { ...finishedBase, status: "done", queue: [], lastError: "", lastErrorDetail: "" };
     const doneState = {
       ...finalSnapshot.state,
       sessions: { ...finalSnapshot.state.sessions, verify: finishedSession },
@@ -4946,6 +5101,7 @@ function createEngine(api, options = {}) {
     try {
       const text = await watchConversation(job.conversationId, timeouts, token, {
         resumed: Boolean(job.resumed),
+        replyBaseline: typeof job.replyBaseline === "string" ? job.replyBaseline : null,
       });
       if (!isCurrentToken(token) || !isProjectCurrent(token)) return;
       if (job.kind === "review") await finishReview(job.conversationId, text, token);
@@ -4958,16 +5114,7 @@ function createEngine(api, options = {}) {
       const snapshot = store.get();
       const sessionKey = sessionKeyOf(job.kind);
       const session = snapshot.state.sessions[sessionKey];
-      const nextState = { ...snapshot.state };
-      if (session && session.conversationId === job.conversationId) {
-        nextState.sessions = {
-          ...nextState.sessions,
-          [sessionKey]: { ...session, status: "error", lastError: timedOut ? "timeout" : message },
-        };
-      }
-      if (job.kind === "fix") {
-        nextState.issues = restoreFixingIssues(snapshot.state.issues, job.conversationId);
-      }
+      // 失败原因先算出展示文案：会话里一并持久化，重开工作台后卡片文案与当时一致。
       const sessionMissing = message === "session-missing";
       const displayError = timedOut
         ? ""
@@ -4979,7 +5126,29 @@ function createEngine(api, options = {}) {
               ? t("fx.activity.sessionInterrupted")
               : message === "session-empty-response"
                 ? t("fx.activity.sessionEmptyResponse")
-                : t("fx.activity.failed", { error: message });
+                : message === "no-new-reply"
+                  ? t("fx.activity.noNewReply")
+                  : message === "reply-not-started"
+                    ? t("fx.activity.replyNotStarted")
+                    : message === "reply-unconfirmed"
+                      ? t("fx.activity.replyUnconfirmed")
+                      : t("fx.activity.failed", { error: message });
+      const nextState = { ...snapshot.state };
+      if (session && session.conversationId === job.conversationId) {
+        nextState.sessions = {
+          ...nextState.sessions,
+          [sessionKey]: {
+            ...session,
+            status: "error",
+            lastError: timedOut ? "timeout" : message,
+            // 上一次的解析失败详情不能再留给本次错误使用。
+            lastErrorDetail: displayError,
+          },
+        };
+      }
+      if (job.kind === "fix") {
+        nextState.issues = restoreFixingIssues(snapshot.state.issues, job.conversationId);
+      }
       store.set({
         state: nextState,
         activity:
@@ -5293,6 +5462,174 @@ function createEngine(api, options = {}) {
         }
         await finishFix(activity.conversationId, text, null, { ...finishOptions, guard });
       }
+    } catch (error) {
+      setToast("error", t("fx.activity.failed", { error: String(error?.message || error) }));
+    }
+  }
+
+  // 解析失败后向同一会话追问一次，让模型只重发结构化结果块。
+  // 「重新解析」读的是同一份回复、用的是同一个解析器，坏 JSON 再解析一次仍然坏；
+  // 这条追问才是能把结果拿回来的路径，因此做成显式按钮，点了才消耗一次模型调用。
+  // 判定带原因：工作台卡片、监控面板与执行入口共用这一处，谁都不另立判据；
+  // 返回值是被拦下的文案键，空串表示可以重发。
+  function structuredRetryBlock(snapshot = store.get()) {
+    const activity = snapshot.activity;
+    if (!activity) return "fx.activity.retryStructuredNoActivity";
+    // 运行中的卡片已经在等结果，已完成的卡片结果已合并：只有失败 / 停止跟踪需要补发。
+    if (activity.phase !== "error" && activity.phase !== "detached") return "fx.activity.retryStructuredSettled";
+    const session = snapshot.state.sessions[sessionKeyOf(activity.kind)];
+    if (!session || session.conversationId !== activity.conversationId) return "fx.activity.sessionError";
+    // 只有「正文已返回但结构化块解析不出来」才值得让模型重发同一块。
+    // 超时、会话异常、续批创建失败等状态下重发没有可恢复的结论：
+    // 续批失败时上一批结果已合并入库，重发成功会让同一批结果被重复应用并重走续批链路。
+    if (!isStructuredRetryError(session.lastError)) return "fx.activity.retryStructuredNotParse";
+    return "";
+  }
+
+  function canRequestStructuredRetry() {
+    return !structuredRetryBlock();
+  }
+
+  // 在途标记同步投影到卡片：按钮据此置灰，避免用户以为没反应而连续点击。
+  function markStructuredRetryPending(conversationId, pending) {
+    const activity = store.get().activity;
+    if (!activity || activity.conversationId !== conversationId) return;
+    if (Boolean(activity.retrying) === pending) return;
+    store.set({ activity: { ...activity, retrying: pending } });
+  }
+
+  async function requestStructuredRetry() {
+    // 在途判定必须早于任何 await：之后的宿主读取期间 activity 仍是 error / detached，
+    // 单靠入口的相位校验拦不住第二次点击。
+    const conversationId = String(store.get().activity?.conversationId || "");
+    if (conversationId && structuredRetryInFlight.has(conversationId)) {
+      // 在途拦截同样要说话：按钮只置灰几百毫秒，用户很可能连点两次。
+      setToast("info", t("fx.activity.retryStructuredInFlight"));
+      return;
+    }
+    if (conversationId) {
+      structuredRetryInFlight.add(conversationId);
+      markStructuredRetryPending(conversationId, true);
+    }
+    try {
+      await runStructuredRetryRequest();
+    } finally {
+      if (conversationId) {
+        structuredRetryInFlight.delete(conversationId);
+        markStructuredRetryPending(conversationId, false);
+      }
+    }
+  }
+
+  async function runStructuredRetryRequest() {
+    const snapshot = store.get();
+    const guard = captureProject();
+    if (!guard || !isProjectCurrent(guard)) return;
+    // 与工作台卡片、监控面板同一判据：不满足时说明原因，不能静默返回让用户以为追问已发出。
+    const blocked = structuredRetryBlock(snapshot);
+    if (blocked) {
+      setToast("error", t(blocked));
+      return;
+    }
+    const activity = snapshot.activity;
+    const sessionKey = sessionKeyOf(activity.kind);
+    const session = snapshot.state.sessions[sessionKey];
+    try {
+      // 会话可能仍在运行：先确认空闲，避免与宿主当前回合并发写同一批文件。
+      // text 同时作为新回复的基线：只有正文相对它发生变化才算 AI 已经重发。
+      const { live, text: replyBaseline } = await readConversationText(activity.conversationId);
+      if (!isProjectCurrent(guard)) return;
+      const runState = await readSessionRunState(activity.conversationId, live);
+      if (!isProjectCurrent(guard)) return;
+      if (runState !== "idle") {
+        setToast("error", t("fx.activity.sessionUnsettled"));
+        return;
+      }
+      // 等待宿主读取期间用户可能关闭卡片、重新挂接或发起新一轮：
+      // 追问是一次有代价的模型调用，投递前必须复核活动与会话仍是入口时那一个。
+      const current = store.get();
+      const currentSession = current.state.sessions[sessionKey];
+      if (
+        current.activity?.conversationId !== activity.conversationId ||
+        current.activity?.phase !== activity.phase ||
+        !currentSession ||
+        currentSession.conversationId !== activity.conversationId ||
+        currentSession.status !== session.status
+      ) {
+        return;
+      }
+      const sent = await runWrite("conversations.sendMessage", {
+        conversationId: activity.conversationId,
+        text: buildStructuredRetryPrompt(activity.kind, api.locale),
+      });
+      if (!isProjectCurrent(guard)) return;
+      if (!sent?.ok) {
+        setToast("error", t("fx.toast.structuredRetryFailed", { error: String(sent?.error || "") }));
+        return;
+      }
+      // 追问已投递：会话与卡片恢复到运行态，再按常规轮询等待新回复。
+      const latest = store.get();
+      const latestSession = latest.state.sessions[sessionKey];
+      if (!latestSession || latestSession.conversationId !== activity.conversationId) return;
+      if (latest.activity?.conversationId !== activity.conversationId) return;
+      const at = nowMs();
+      // 解析失败时已按快照把本批回滚为待修复：会话恢复 running 后必须重新占位，
+      // 否则列表仍显示「待修复」而卡片在等结果，下一次 finishFix 的兜底白名单也会取到空集。
+      const retryIds =
+        sessionKey === "fix" && Array.isArray(latestSession.issueIds)
+          ? latestSession.issueIds
+              .map(String)
+              .filter((id) => {
+                const issue = latest.state.issues.find((item) => item.id === id);
+                // 已归档 / 已定论的条目跳过：markIssuesFixing 会无条件改写状态，
+                // 归档不在可回滚状态内，占位后再次失败回滚会被错放成待修复。
+                return Boolean(issue) && isFixSelectable(issue);
+              })
+          : [];
+      const nextState = {
+        ...latest.state,
+        issues: retryIds.length
+          ? markIssuesFixing(latest.state.issues, retryIds, activity.conversationId)
+          : latest.state.issues,
+        sessions: {
+          ...latest.state.sessions,
+          [sessionKey]: {
+            ...latestSession,
+            status: "running",
+            lastError: "",
+            lastErrorDetail: "",
+            activityDismissed: false,
+            lastUpdateAt: at,
+          },
+        },
+      };
+      store.set({
+        state: nextState,
+        activity: {
+          ...latest.activity,
+          phase: "waiting",
+          message: t("fx.activity.waiting"),
+          error: "",
+          timedOut: false,
+          lastUpdateAt: at,
+        },
+      });
+      await saveState({
+        projectId: guard.directoryId,
+        state: nextState,
+        lifecycle: guard.stopEpoch,
+      });
+      if (!isProjectCurrent(guard)) return;
+      setToast("info", t("fx.toast.structuredRetrySent"));
+      void track({
+        kind: activity.kind,
+        conversationId: activity.conversationId,
+        projectId: guard.directoryId,
+        epoch: guard.epoch,
+        stopEpoch: guard.stopEpoch,
+        resumed: true,
+        replyBaseline: replyBaseline || null,
+      });
     } catch (error) {
       setToast("error", t("fx.activity.failed", { error: String(error?.message || error) }));
     }
@@ -6917,6 +7254,9 @@ function createEngine(api, options = {}) {
     confirmDialog,
     detachTracking,
     retryParse,
+    requestStructuredRetry,
+    canRequestStructuredRetry,
+    structuredRetryBlock,
     resumeActivityTracking,
     resumePendingAutoFix,
     stageRunManually,

@@ -10,7 +10,7 @@ import {
 } from "./constants.js";
 import { createHeadlessEngine, planCleanupRun } from "./engine.js";
 import { createT } from "./i18n.js";
-import { isStageRecoverable, resolveStageRunState } from "./issues.js";
+import { isStageRecoverable, isStructuredRetryError, resolveStageRunState } from "./issues.js";
 import { createStore } from "./store.js";
 import { nowMs } from "./util.js";
 
@@ -100,6 +100,9 @@ const ENTRY_COMPARE_FIELDS = [
   "title",
   "error",
   "timedOut",
+  // 解析类失败才提供「请 AI 重发结果」：面板入口按条目字段渲染，必须参与比较，
+  // 否则重载后其它字段一致时条目不会更新，该入口会一直缺失。
+  "structuredRetry",
   // 本轮冻结的自动化开关：面板据此决定是否显示「暂存改动」与「清理」。
   "stageEnabled",
   "autoCleanup",
@@ -320,6 +323,8 @@ export function buildMonitorEntry(snapshot) {
       cleanupPlan && cleanupPlan.reviewBaselineMissing ? cleanupPlan.reviewCandidateCount : 0,
     error: String(activity.error || ""),
     timedOut: Boolean(activity.timedOut),
+    // 与工作台卡片同一判据：只有解析类失败才在面板上提供「请 AI 重发结果」。
+    structuredRetry: isStructuredRetryError(session?.lastError),
     updatedAt: nowMs(),
   };
 }
@@ -420,6 +425,7 @@ export function buildRecoveredMonitorEntry(snapshot) {
       cleanupPlan && cleanupPlan.reviewBaselineMissing ? cleanupPlan.reviewCandidateCount : 0,
     error: "",
     timedOut: session.lastError === "timeout",
+    structuredRetry: isStructuredRetryError(session.lastError),
     updatedAt: nowMs(),
   };
 }
@@ -573,6 +579,8 @@ export function normalizeMonitorEntry(raw) {
     carryover: normalizeCarryover(raw.carryover),
     error: String(raw.error || ""),
     timedOut: Boolean(raw.timedOut),
+    // 旧登记没有该字段：按「不需要重发」处理，首次快照会按会话的 lastError 校正。
+    structuredRetry: raw.structuredRetry === true,
     updatedAt: numberOr(raw.updatedAt),
   };
 }
@@ -1290,6 +1298,46 @@ export function createMonitor(api, options = {}) {
     }
   }
 
+  // 让 AI 重发结构化结果：与 retry 走同一套引擎写回，但先向会话追加一条追问。
+  // 重新解析读的是同一份回复，输出本身是坏 JSON 时只有重发才可能恢复。
+  async function retryStructured(projectId) {
+    const current = engineFor(projectId);
+    if (current && !isEngineActionReady(current)) {
+      setNotice(projectId, "info", t("fx.monitor.actionNotReady"));
+      return;
+    }
+    const engine = current || (await ensureHeadless(projectId, { force: true }));
+    if (!engine) {
+      setNotice(projectId, "error", t("fx.toast.retryParseUnavailable"));
+      return;
+    }
+    if (!isEngineActionReady(engine)) {
+      setNotice(projectId, "info", t("fx.monitor.actionNotReady"));
+      return;
+    }
+    // 与引擎共用同一判据：面板按持久化的 lastError 显示入口，引擎按当前活动卡片执行，
+    // 两者不一致时必须说明原因，不能让用户以为追问已经发出。
+    const blocked = typeof engine.structuredRetryBlock === "function" ? engine.structuredRetryBlock() : "";
+    if (blocked) {
+      setNotice(projectId, "error", t(blocked));
+      return;
+    }
+    try {
+      await engine.requestStructuredRetry();
+    } catch (error) {
+      // 引擎自身的失败会写自己的 toast 并返回；走到这里说明调用本身抛错（状态写回等），
+      // 必须把原因带给用户，不能只留一个冒号让用户无从判断。
+      const reason = String(error?.message || error || "").trim();
+      setNotice(
+        projectId,
+        "error",
+        reason
+          ? t("fx.toast.structuredRetryFailed", { error: reason })
+          : t("fx.toast.structuredRetryFailedNoReason"),
+      );
+    }
+  }
+
   // 用户在面板上显式补做自动暂存：主引擎与后台引擎共用同一实现，
   // 用户不需要知道当前由哪个引擎跟踪。执行期间按钮显示「暂存中」，
   // 结果直接留在条目上（工作台浮层关闭时 toast 不可见）。
@@ -1700,6 +1748,7 @@ export function createMonitor(api, options = {}) {
     stop,
     resume,
     retry,
+    retryStructured,
     stageRun,
     stageAll,
     beginCleanup,

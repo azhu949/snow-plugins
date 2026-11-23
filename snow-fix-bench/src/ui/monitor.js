@@ -215,6 +215,13 @@ function MonitorEntry({ entry, monitor, api, t, now, current, pending, notice })
       actions.push(
         textAction("resume", t("fx.monitor.resume"), () => void monitor.resume(entry.projectId)),
         textAction("retry", t("fx.monitor.retry"), () => void monitor.retry(entry.projectId)),
+        // 与工作台卡片同一判据：仅解析类失败才提供该入口，
+        // 其它状态下重发没有可恢复的结论，只会重复消耗一次模型调用。
+        entry.structuredRetry
+          ? textAction("structured", t("fx.activity.retryStructured"), () =>
+              void monitor.retryStructured(entry.projectId),
+            )
+          : null,
       );
     }
     actions.push(

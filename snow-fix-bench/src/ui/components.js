@@ -1010,6 +1010,22 @@ function ActivityCard({ activity, engine, api, t }) {
                   { key: "parse", className: "fx-btn small", onClick: () => void engine.retryParse() },
                   t("fx.activity.parseRetry"),
                 ),
+                // 重新解析读的是同一份回复：AI 输出本身是坏 JSON 时只有让它重发才可能恢复；
+                // 超时 / 会话异常 / 续批创建失败没有可重发的结论，不显示该入口。
+                engine.canRequestStructuredRetry?.() === true
+                  ? h(
+                      "button",
+                      {
+                        key: "structured",
+                        className: "fx-btn small",
+                        title: t("fx.activity.retryStructuredHint"),
+                        // 投递期间置灰：入口到发送之间有多处宿主读取，重复点击会重复消耗模型调用。
+                        disabled: Boolean(activity.retrying),
+                        onClick: () => void engine.requestStructuredRetry(),
+                      },
+                      t("fx.activity.retryStructured"),
+                    )
+                  : null,
               ]
             : null,
         h(

@@ -56,6 +56,22 @@ const WATCH_EMPTY_GRACE_MS = 60 * 1000;
 // runtime 不可读时的收尾判定：连续相同正文快照达到该轮次才允许返回。
 // runtime 可读且空闲时仍按稳定快照快速收尾；未知状态用更长窗口覆盖工具调用期间正文不变。
 const WATCH_UNKNOWN_STABLE_POLLS = 5;
+// 追问（请 AI 重发结果）后的兜底收尾：runtime 可读且会话确认空闲，但正文仍是发问前那一份时，
+// 连续多轮说明本次追问没有产出新回复（如宿主以非空正文的 error 消息作答），
+// 显式按 no-new-reply 结束，不再空等 20 / 30 分钟的空闲超时。
+const WATCH_NO_NEW_REPLY_POLLS = 6;
+const WATCH_NO_NEW_REPLY_GRACE_MS = 30 * 1000;
+// 追问后「没有观测到本轮运行」：runtime 可读且持续空闲，正文仍是发问前那一份，
+// 也没有出现过流式快照。空闲期 messages 每 5 秒读一次、轮询 2 秒，实际约 6 秒一轮；
+// 15 轮与 90 秒需同时满足，给宿主排队、建流与首个 token 留出余量。
+const WATCH_RETRY_NOT_STARTED_POLLS = 15;
+const WATCH_RETRY_NOT_STARTED_MS = 90 * 1000;
+// 判定「本轮确实跑过」的最小观测次数：runtime 快照 5 秒一轮，
+// 两次观测可排除上一轮遗留的流式条目（回合结束时 streamStartedAt 才清零）。
+const WATCH_RETRY_STREAMING_POLLS = 2;
+// runtime 不可读时无法观察本轮是否开始：用固定窗口兜底，
+// 避免退化成 60 分钟的未知态空闲超时，同时给宿主排队与建流留出余量。
+const WATCH_RETRY_UNCONFIRMED_MS = 10 * 60 * 1000;
 
 // 并行上限：写入修复提示词，约束同一轮中的并行取证与并行实施数量。
 const DEFAULT_PARALLEL_LIMIT = 3;
@@ -244,6 +260,14 @@ const FALLBACK = {
   "fx.activity.failed": "跟踪失败：{{error}}",
   "fx.activity.parseRetry": "重新解析",
   "fx.activity.resume": "继续跟踪",
+  "fx.activity.retryStructured": "请 AI 重发结果",
+  "fx.activity.retryStructuredHint": "向该会话追加一条追问，只要求它重发结构化结果块；会消耗一次模型调用。",
+  "fx.activity.retryStructuredNoActivity":
+    "找不到这一轮的活动卡片：它可能已关闭，或已被新一轮执行替换。请打开会话查看结果，或在对应项目的工作台里重新解析。",
+  "fx.activity.retryStructuredSettled": "当前卡片不在失败或停止跟踪状态，无需让 AI 重发；会话可能仍在等待输出。",
+  "fx.activity.retryStructuredNotParse":
+    "这次失败不是结构化结果解析问题（如超时、会话中断或续批失败），重发拿不到可恢复的结论；请改用「重新解析」或「继续跟踪」。",
+  "fx.activity.retryStructuredInFlight": "重发请求正在投递，请等待本次结果。",
   "fx.activity.session": "会话 {{id}}",
   "fx.activity.hint": "面板只读取会话进度，不会中止 AI 运行。",
   "fx.activity.elapsed": "已运行 {{time}}",
@@ -261,6 +285,12 @@ const FALLBACK = {
   "fx.activity.sessionError": "会话未产生有效输出，可能已失败。",
   "fx.activity.sessionInterrupted": "会话已中止，且没有产生任何回复；已停止跟踪并释放修复中状态。",
   "fx.activity.sessionEmptyResponse": "会话已结束，但没有产生有效回复；已停止跟踪并释放修复中状态。",
+  "fx.activity.noNewReply":
+    "已向该会话追问，但会话已回到空闲且没有产生新回复；已停止跟踪并释放修复中状态，可打开会话查看，或稍后重新解析。",
+  "fx.activity.replyNotStarted":
+    "已向该会话追问，但没有观测到新一轮运行开始；已停止跟踪。该会话仍可能继续运行，在确认结束前不会对同一批 issue 再发起修复，可继续跟踪或打开会话查看。",
+  "fx.activity.replyUnconfirmed":
+    "已向该会话追问，但运行状态无法读取，无法确认是否已开始新一轮；已停止跟踪。该会话仍可能继续运行，在确认结束前不会对同一批 issue 再发起修复，可继续跟踪或打开会话查看。",
   "fx.activity.sessionMissing": "会话已不存在或无法读取，已停止跟踪并释放修复中状态。",
   "fx.activity.fixUnsettled": "修复会话可能仍在运行，请先继续跟踪或等待其结束后再重新解析。",
   "fx.activity.sessionUnsettled": "会话可能仍在运行，请先继续跟踪或等待其结束后再重新解析。",
@@ -344,16 +374,35 @@ const FALLBACK = {
   "fx.toast.fixStarted": "已新建修复会话，正在跟踪结果。",
   "fx.toast.fixDone": "修复完成：{{fixed}} 条已修复，{{notFound}} 条不存在，{{blocked}} 条待处理。",
   "fx.toast.fixParseFailed": "未找到结构化修复结果，issue 状态保持不变。",
+  "fx.toast.fixParseIgnored": "未找到结构化修复结果：解析出的修复结果（{{count}} 条）都不属于本批 issue，issue 状态保持不变。",
   "fx.toast.fixFailed": "修复启动失败：{{error}}",
   "fx.toast.fixBusy": "已有修复任务正在运行，请等待完成或先停止跟踪。",
   "fx.toast.verifyStarted": "修复完成，已自动开始复审 {{count}} 条已修复 issue。",
   "fx.toast.verifyDone": "复审完成：{{confirmed}} 条已确认修复，{{still}} 条仍存在，{{uncertain}} 条待确认。",
   "fx.toast.verifyParseFailed": "未能从复审结果中解析出结论；修复状态保持不变，可重新解析或手动清理。",
+  "fx.toast.verifyParseIgnored": "未能从复审结果中解析出结论：解析出的复核结论（{{count}} 条）都不属于本批 issue，修复状态保持不变。",
   "fx.toast.verifyExpired": "复审结果已过期：目标 issue 已被新一轮修复或审查改写，未写入任何结论。可重新解析或等待本轮结束后重新复审。",
   "fx.toast.verifyFailed": "复审启动失败：{{error}}",
   "fx.toast.verifyBusy": "已有复审任务正在运行，本次复审未启动；本轮修复结果未自动清理，请等待当前复审结束后手动处理。",
   "fx.toast.verifyWaitFix": "修复会话仍在运行或可能仍在运行，本次复审未启动；请等待修复结束（必要时先继续跟踪旧会话）后重试，本轮修复结果未自动清理。",
   "fx.toast.fixWaitVerify": "复审会话仍在运行或可能仍在运行，本次修复未启动；请等待复审结束，避免复审基于半成品代码下结论。",
+  "fx.parse.reason.fenceMissing": "结果块（```{{fence}}）不存在。",
+  "fx.parse.reason.jsonInvalid": "结果块（```{{fence}}）里的 JSON 不合法。{{detail}}",
+  "fx.parse.reason.detailEmpty": "该结果块为空（没有内容），请让 AI 重发结构化结果。",
+  "fx.parse.reason.detailAt": "第 {{line}} 行第 {{column}} 列附近无法解析。",
+  "fx.parse.reason.detailAtRepaired":
+    "第 {{line}} 行第 {{column}} 列附近无法解析（位置按修复后的文本换算，与原回复的行列可能略有差异）。",
+  "fx.parse.reason.detailUnknown": "解析器没有给出可用的位置信息，请检查该结果块是否为完整、合法的 JSON。",
+  "fx.parse.reason.shapeMismatch": "结果块（```{{fence}}）的 JSON 结构不符合要求（应为对象数组）。",
+  "fx.parse.reason.rowsUnusable":
+    "结果块（```{{fence}}）有 {{detail}} 个元素，但没有可用条目（字段不符合该结果块的约定）。",
+  "fx.parse.reason.emptyArray":
+    "结果块（```{{fence}}）为空（0 个元素），本次没有任何结论；请确认 AI 是否漏写了结果，或让它重发结构化结果。",
+  "fx.parse.reason.truncated":
+    "结果块（```{{fence}}）不完整：输出在生成过程中被截断，尾部条目已丢失，本次未写入任何结论。请点「请 AI 重发结果」。",
+  "fx.toast.structuredRetrySent": "已请 AI 重发结构化结果，正在等待新回复。",
+  "fx.toast.structuredRetryFailed": "请求 AI 重发结果失败：{{error}}",
+  "fx.toast.structuredRetryFailedNoReason": "请求 AI 重发结果失败，本次未取得失败原因；请打开会话检查，或稍后重试。",
   "fx.toast.verifyBatchStarted": "第 {{batch}}/{{total}} 批复审已启动（{{count}} 条）。",
   "fx.toast.verifyBatchCreateFailed": "下一批复审会话创建失败：{{error}}；剩余批次已保留，可重新解析后继续。",
   "fx.toast.verifyBatchEmpty": "下一批复审目标已被改写，剩余批次已保留；请重新解析或重新复审。",
@@ -665,6 +714,12 @@ export {
   WATCH_EMPTY_POLLS,
   WATCH_EMPTY_GRACE_MS,
   WATCH_UNKNOWN_STABLE_POLLS,
+  WATCH_NO_NEW_REPLY_POLLS,
+  WATCH_NO_NEW_REPLY_GRACE_MS,
+  WATCH_RETRY_NOT_STARTED_POLLS,
+  WATCH_RETRY_NOT_STARTED_MS,
+  WATCH_RETRY_STREAMING_POLLS,
+  WATCH_RETRY_UNCONFIRMED_MS,
   DEFAULT_PARALLEL_LIMIT,
   MIN_PARALLEL_LIMIT,
   MAX_PARALLEL_LIMIT,

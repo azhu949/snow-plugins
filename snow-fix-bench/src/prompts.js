@@ -483,7 +483,7 @@ function buildReviewPrompt(options) {
   return lines.join("\n");
 }
 
-export { buildReviewPrompt, buildFixPrompt, buildVerifyPrompt, estimateVerifyIssueChars, defaultRulesForSlot };
+export { buildReviewPrompt, buildFixPrompt, buildVerifyPrompt, estimateVerifyIssueChars, defaultRulesForSlot, buildStructuredRetryPrompt };
 
 // 编辑弹窗展示的只读固定规则：与三个构建函数引用同一份语言文案，避免展示与实际漂移。
 function defaultRulesForSlot(slot, locale) {
@@ -734,5 +734,69 @@ function buildFixPrompt(options) {
   lines.push(JSON.stringify(rows, null, 2));
   lines.push("```");
   return lines.join("\n");
+}
+
+// 解析失败后的补救追问：只让模型重发结构化块，并明确禁止重做任务本身。
+// 「重新解析」读的是同一份回复，只有让模型重新输出才可能拿到合法 JSON。
+const STRUCTURED_RETRY = {
+  zh: {
+    review: [
+      "上一次回复末尾的结构化结果块（```snow-issues）不是合法 JSON，插件无法解析。",
+      "请只重发这一个围栏代码块，内容必须是合法 JSON 数组：",
+      "- 不要重新审查、不要再次读取文件、不要调用任何工具、不要改动代码；",
+      "- 不要重复解释过程，不要输出其它围栏代码块；",
+      "- 字段：severity（严重 / 一般 / 建议）、title、location、impact、suggestion；",
+      "- 字符串内部的换行写成 \\n，不要写注释，不要有尾逗号；",
+      "- 确实没有纳入范围的问题时输出 []。",
+    ].join("\n"),
+    fix: [
+      "上一次回复末尾的结构化结果块（```snow-fix-results）不是合法 JSON，插件无法解析。",
+      "请只重发这一个围栏代码块，内容必须是合法 JSON 数组：",
+      "- 不要重新修改代码、不要再次读取文件、不要调用任何工具、不要重复验证；",
+      "- 不要重复解释过程，不要输出其它围栏代码块；",
+      "- 字段：issueId（与本次修复的 issue id 完全一致）、status（fixed / not_found / blocked）、summary、files（数组）、verification；",
+      "- 字符串内部的换行写成 \\n，不要写注释，不要有尾逗号。",
+    ].join("\n"),
+    verify: [
+      "上一次回复末尾的结构化结果块（```snow-verify-results）不是合法 JSON，插件无法解析。",
+      "请只重发这一个围栏代码块，内容必须是合法 JSON 数组：",
+      "- 不要再次读取文件、不要重新复核、不要调用任何工具、不要改动代码；",
+      "- 不要重复解释过程，不要输出其它围栏代码块；",
+      "- 字段：issueId（与本次复核的 issue id 完全一致）、status（confirmed / still_present / uncertain）、summary、evidence；",
+      "- 字符串内部的换行写成 \\n，不要写注释，不要有尾逗号。",
+    ].join("\n"),
+  },
+  en: {
+    review: [
+      "The structured result block (```snow-issues) at the end of your last reply is not valid JSON, so the plugin could not parse it.",
+      "Please resend only that fenced block; its content must be a valid JSON array:",
+      "- Do not review again, do not read files again, do not call tools, do not modify code;",
+      "- Do not repeat the explanation and do not output any other fenced block;",
+      "- Fields: severity (critical / major / minor), title, location, impact, suggestion;",
+      "- Escape line breaks inside strings as \\n, write no comments, and leave no trailing commas;",
+      "- Output [] when nothing is within scope.",
+    ].join("\n"),
+    fix: [
+      "The structured result block (```snow-fix-results) at the end of your last reply is not valid JSON, so the plugin could not parse it.",
+      "Please resend only that fenced block; its content must be a valid JSON array:",
+      "- Do not edit code again, do not read files again, do not call tools, do not re-run verification;",
+      "- Do not repeat the explanation and do not output any other fenced block;",
+      "- Fields: issueId (must match the issue id being fixed), status (fixed / not_found / blocked), summary, files (array), verification;",
+      "- Escape line breaks inside strings as \\n, write no comments, and leave no trailing commas.",
+    ].join("\n"),
+    verify: [
+      "The structured result block (```snow-verify-results) at the end of your last reply is not valid JSON, so the plugin could not parse it.",
+      "Please resend only that fenced block; its content must be a valid JSON array:",
+      "- Do not read files again, do not re-check again, do not call tools, do not modify code;",
+      "- Do not repeat the explanation and do not output any other fenced block;",
+      "- Fields: issueId (must match the issue being verified), status (confirmed / still_present / uncertain), summary, evidence;",
+      "- Escape line breaks inside strings as \\n, write no comments, and leave no trailing commas.",
+    ].join("\n"),
+  },
+};
+
+function buildStructuredRetryPrompt(kind, locale) {
+  const table = STRUCTURED_RETRY[pickLang(locale)] || STRUCTURED_RETRY.zh;
+  return table[kind] || table.review;
 }
 
