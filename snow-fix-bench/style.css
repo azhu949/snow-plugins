@@ -1286,6 +1286,70 @@
   margin-left: auto;
 }
 
+/* ---------------- 手动关联会话 ---------------- */
+
+/* 输入区单独成块：失败原因贴在输入框下方，不挤占卡片底部的动作行。 */
+.fx-relink {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 8px 0 0;
+  margin-top: 8px;
+  border-top: 1px solid var(--fx-line-soft);
+}
+
+.fx-relink-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--fx-text-2);
+}
+
+.fx-relink-input {
+  width: 100%;
+  height: 26px;
+  padding: 0 8px;
+  border: 1px solid var(--fx-line);
+  border-radius: var(--fx-r-sm);
+  background: var(--fx-surface-2);
+  color: var(--fx-text);
+  font: inherit;
+  font-size: 11px;
+  line-height: 1;
+}
+
+.fx-relink-input:focus {
+  outline: none;
+  border-color: var(--fx-accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--fx-accent) 24%, transparent);
+}
+
+.fx-relink-hint {
+  font-size: 10px;
+}
+
+.fx-relink-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+/* 监控面板条目更紧凑：输入行跟随面板的 10px 字号。 */
+.fx-monitor-relink {
+  padding: 6px 0 0;
+  margin-top: 4px;
+}
+
+.fx-monitor-relink .fx-relink-label,
+.fx-monitor-relink .fx-relink-input,
+.fx-monitor-relink .fx-relink-hint {
+  font-size: 10px;
+}
+
+.fx-monitor-relink .fx-relink-input {
+  height: 22px;
+}
+
 .fx-pulse {
   flex: none;
   display: inline-block;
@@ -1896,6 +1960,27 @@
   letter-spacing: 0.08em;
   text-transform: uppercase;
   color: var(--fx-text-3);
+}
+
+/* 执行作用域：作用范围切换与当前生效值提示，位于执行分组卡片上方。 */
+.fx-settings-scope {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 9px 11px;
+  border: 1px solid var(--fx-line-soft);
+  border-radius: var(--fx-r);
+}
+
+.fx-settings-scope-effective {
+  font-variant-numeric: tabular-nums;
+}
+
+.fx-settings-scope-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 
 .fx-settings-card {

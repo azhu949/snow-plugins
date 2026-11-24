@@ -68,6 +68,37 @@ function primaryAction(key, label, onClick) {
 function MonitorEntry({ entry, monitor, api, t, now, current, pending, notice }) {
   const running = entry.status === "running";
   const resumable = entry.status === "error" || entry.status === "detached";
+  // 手动关联会话：宿主读不到工作台新建的会话时，粘贴会话 id 即可换绑并继续跟踪。
+  // 结果由控制器写入条目提示，组件只负责输入与收起。
+  const [relinkOpen, setRelinkOpen] = useState(false);
+  const [relinkValue, setRelinkValue] = useState("");
+  const [relinkBusy, setRelinkBusy] = useState(false);
+  // 归属无法确认时先提示，用户再次提交即按确认处理。
+  const [relinkConfirm, setRelinkConfirm] = useState(false);
+  async function submitRelink(event) {
+    if (event) event.preventDefault();
+    if (relinkBusy) return;
+    setRelinkBusy(true);
+    try {
+      const result = await monitor.relink(entry.projectId, relinkValue, {
+        confirmUnconfirmed: relinkConfirm,
+      });
+      if (result?.status === "linked") {
+        setRelinkOpen(false);
+        setRelinkValue("");
+        setRelinkConfirm(false);
+      } else if (result?.status === "unconfirmed") {
+        setRelinkConfirm(result?.confirmable === true);
+      } else {
+        setRelinkConfirm(false);
+      }
+    } catch {
+      // 失败原因已由控制器写入条目提示。
+    } finally {
+      setRelinkBusy(false);
+    }
+  }
+
   const elapsedEnd = running
     ? now
     : Math.max(entry.completedAt || entry.lastUpdateAt || 0, entry.startedAt || 0);
@@ -215,6 +246,7 @@ function MonitorEntry({ entry, monitor, api, t, now, current, pending, notice })
       actions.push(
         textAction("resume", t("fx.monitor.resume"), () => void monitor.resume(entry.projectId)),
         textAction("retry", t("fx.monitor.retry"), () => void monitor.retry(entry.projectId)),
+        textAction("relink", t("fx.relink.open"), () => setRelinkOpen(true)),
         // 与工作台卡片同一判据：仅解析类失败才提供该入口，
         // 其它状态下重发没有可恢复的结论，只会重复消耗一次模型调用。
         entry.structuredRetry
@@ -337,6 +369,50 @@ function MonitorEntry({ entry, monitor, api, t, now, current, pending, notice })
               : null,
             textAction("carryover-dismiss", t("fx.monitor.carryoverDismiss"), () =>
               monitor.dismissCarryover(entry.projectId),
+            ),
+          ),
+        )
+      : null,
+    // 手动关联会话：只提交会话 id，校验与换绑由对应项目的引擎完成。
+    relinkOpen
+      ? h(
+          "form",
+          { className: "fx-relink fx-monitor-relink", onSubmit: submitRelink },
+          h("label", { className: "fx-relink-label" }, t("fx.relink.title")),
+          h("input", {
+            className: "fx-relink-input",
+            type: "text",
+            value: relinkValue,
+            placeholder: t("fx.relink.placeholder"),
+            "aria-label": t("fx.relink.title"),
+            autoComplete: "off",
+            spellCheck: "false",
+            onInput: (event) => {
+              setRelinkValue(event.currentTarget.value);
+              setRelinkConfirm(false);
+            },
+          }),
+          h("div", { className: "fx-hint fx-relink-hint" }, t("fx.relink.hint")),
+          h(
+            "div",
+            { className: "fx-relink-actions" },
+            h(
+              "button",
+              { type: "submit", className: "fx-btn small primary", disabled: relinkBusy },
+              relinkBusy
+                ? t("fx.relink.confirming")
+                : relinkConfirm
+                  ? t("fx.relink.confirmUnconfirmed")
+                  : t("fx.relink.confirm"),
+            ),
+            h(
+              "button",
+              {
+                type: "button",
+                className: "fx-btn small ghost",
+                onClick: () => setRelinkOpen(false),
+              },
+              t("fx.relink.cancel"),
             ),
           ),
         )

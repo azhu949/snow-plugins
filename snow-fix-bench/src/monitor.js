@@ -1338,6 +1338,51 @@ export function createMonitor(api, options = {}) {
     }
   }
 
+  // 手动关联会话：宿主读不到工作台新建的会话时，允许用户在面板上粘贴会话 id。
+  // 校验与换绑共用引擎实现，主引擎与后台引擎都能挂接并继续跟踪。
+  async function relink(projectId, rawId, options = {}) {
+    const current = engineFor(projectId);
+    if (current && !isEngineActionReady(current)) {
+      setNotice(projectId, "info", t("fx.monitor.actionNotReady"));
+      return { status: "deferred" };
+    }
+    const engine = current || (await ensureHeadless(projectId, { force: true }));
+    if (!engine) {
+      setNotice(projectId, "error", t("fx.relink.unavailable"));
+      return { status: "error" };
+    }
+    if (!isEngineActionReady(engine)) {
+      setNotice(projectId, "info", t("fx.monitor.actionNotReady"));
+      return { status: "deferred" };
+    }
+    if (typeof engine.relinkConversation !== "function") {
+      setNotice(projectId, "error", t("fx.relink.unavailable"));
+      return { status: "error" };
+    }
+    let result = null;
+    try {
+      result = await engine.relinkConversation(rawId, {
+        confirmUnconfirmed: options.confirmUnconfirmed === true,
+      });
+    } catch {
+      setNotice(projectId, "error", t("fx.relink.failed"));
+      return { status: "error" };
+    }
+    if (result?.message) {
+      // 可确认的 unconfirmed 是中间态；归属无法核对被拒绝时按错误级别展示，避免 6 秒后自动消失。
+      const level =
+        result.status === "linked"
+          ? "success"
+          : result.status === "unconfirmed"
+            ? result.confirmable === true
+              ? "info"
+              : "error"
+            : "error";
+      setNotice(projectId, level, result.message);
+    }
+    return result || { status: "error" };
+  }
+
   // 用户在面板上显式补做自动暂存：主引擎与后台引擎共用同一实现，
   // 用户不需要知道当前由哪个引擎跟踪。执行期间按钮显示「暂存中」，
   // 结果直接留在条目上（工作台浮层关闭时 toast 不可见）。
@@ -1748,6 +1793,7 @@ export function createMonitor(api, options = {}) {
     stop,
     resume,
     retry,
+    relink,
     retryStructured,
     stageRun,
     stageAll,

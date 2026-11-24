@@ -44,6 +44,10 @@ function normalizeCustomPrompts(raw) {
 // autoFixAfterReview 默认开启，但未确认前不会静默修改工作区。
 const SETTINGS_SCHEMA_VERSION = 5;
 
+// 可按项目覆盖的执行字段：只覆盖「走哪个 API 档案」与「并发上限」，
+// 其余设置保持全局共享，避免每个项目各维护一份完整配置。
+const EXECUTION_OVERRIDE_FIELDS = ["apiProfile", "parallelLimit"];
+
 const DEFAULT_SETTINGS = Object.freeze({
   schemaVersion: SETTINGS_SCHEMA_VERSION,
   parallelLimit: DEFAULT_PARALLEL_LIMIT,
@@ -74,6 +78,19 @@ function normalizeParallelLimit(value) {
   return clamp(Math.round(number), MIN_PARALLEL_LIMIT, MAX_PARALLEL_LIMIT);
 }
 
+// 项目覆盖专用：只有真正落在允许区间内的值才算「本项目覆盖了并行上限」。
+// 不能复用 normalizeParallelLimit —— 它把空值/非法值回退成默认值，写进覆盖后会把
+// 全局设置压掉（全局 8 也会被项目覆盖成 3）；越界值同理，回退成区间端点同样是一次
+// 用户没有做过的显式选择。返回 null 表示该字段未覆盖，交由全局值决定。
+function normalizeOverrideParallelLimit(value) {
+  if (value === "" || value === null || value === undefined) return null;
+  const number = Number(value);
+  if (!Number.isFinite(number)) return null;
+  const rounded = Math.round(number);
+  if (rounded < MIN_PARALLEL_LIMIT || rounded > MAX_PARALLEL_LIMIT) return null;
+  return rounded;
+}
+
 // 自动清理会话范围：字段缺失或类型非法时回退默认（修复 + 复审）。
 // 显式空数组保留，表示只处理 issue、不动任何会话；顺序固定为 review / fix / verify。
 function normalizeCleanupSessionKinds(value) {
@@ -84,6 +101,61 @@ function normalizeCleanupSessionKinds(value) {
 
 function normalizeApiProfile(value) {
   return typeof value === "string" ? value.trim().slice(0, 200) : "";
+}
+
+// 项目执行覆盖：只保存用户显式写过的字段。字段缺失表示沿用全局默认。
+// 空串 apiProfile 不写入覆盖：会话创建时空串表示「跟随宿主当前激活档案」，
+// 而项目作用域的「跟随全局设置」应当沿用全局层选定的档案，写成覆盖会把它压成空串；
+// 旧存储里残留的空串覆盖同样按「未覆盖」处理。
+function normalizeExecutionOverride(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const override = {};
+  if (Object.prototype.hasOwnProperty.call(raw, "apiProfile")) {
+    const apiProfile = normalizeApiProfile(raw.apiProfile);
+    if (apiProfile) override.apiProfile = apiProfile;
+  }
+  if (Object.prototype.hasOwnProperty.call(raw, "parallelLimit")) {
+    // 非法/越界值不写入覆盖：否则损坏的旧数据或空输入会被归一化成默认值并长期压掉全局设置。
+    const parallelLimit = normalizeOverrideParallelLimit(raw.parallelLimit);
+    if (parallelLimit !== null) override.parallelLimit = parallelLimit;
+  }
+  return Object.keys(override).length ? override : null;
+}
+
+// 生效设置 = 全局设置叠加项目覆盖。覆盖只会包含执行字段，其它设置仍取全局值。
+function mergeExecutionSettings(settings, override) {
+  const base = settings && typeof settings === "object" ? settings : DEFAULT_SETTINGS;
+  if (!override) return base;
+  const merged = { ...base };
+  for (const field of EXECUTION_OVERRIDE_FIELDS) {
+    if (Object.prototype.hasOwnProperty.call(override, field)) merged[field] = override[field];
+  }
+  return merged;
+}
+
+function hasExecutionOverride(override, field) {
+  return Boolean(override) && Object.prototype.hasOwnProperty.call(override, field);
+}
+
+// 执行作用域草稿：{ global: { parallelLimit, apiProfile }, project: {...} }，只保存用户
+// 切走某个作用域时还没提交的表单值，切回该作用域时回填，避免未保存的编辑被快照值覆盖。
+// 引擎把某个作用域的执行字段对齐到存储值（清除项目覆盖、失效档案回退）时必须同步丢弃
+// 对应草稿，否则切回该作用域会把已被清除的值填回表单并在保存时再次写盘。
+// field 省略时丢弃整个作用域的草稿；传入字段名时只丢该字段，其余草稿继续保留。
+function dropScopeDraft(drafts, scope, field) {
+  const base = drafts && typeof drafts === "object" ? drafts : null;
+  const draft = base?.[scope];
+  if (!draft || typeof draft !== "object") return drafts;
+  const next = { ...base };
+  if (!field) {
+    delete next[scope];
+    return next;
+  }
+  const remaining = { ...draft };
+  delete remaining[field];
+  if (Object.keys(remaining).length) next[scope] = remaining;
+  else delete next[scope];
+  return next;
 }
 
 function normalizeSettings(raw) {
@@ -134,11 +206,16 @@ function normalizeSettings(raw) {
 export {
   DEFAULT_SETTINGS,
   SETTINGS_SCHEMA_VERSION,
+  EXECUTION_OVERRIDE_FIELDS,
   REVIEW_MODES,
   DEFAULT_REVIEW_MODE,
   normalizeReviewMode,
   normalizeParallelLimit,
   normalizeApiProfile,
+  normalizeExecutionOverride,
+  mergeExecutionSettings,
+  hasExecutionOverride,
+  dropScopeDraft,
   normalizeCleanupSessionKinds,
   normalizeCustomPrompts,
   normalizeCustomPromptSlot,

@@ -2,6 +2,7 @@
 import {
   STORE_PREFIX,
   SETTINGS_KEY,
+  PROJECT_SETTINGS_PREFIX,
   REVIEW_IDLE_TIMEOUT_MS,
   REVIEW_MAX_TIMEOUT_MS,
   FIX_IDLE_TIMEOUT_MS,
@@ -59,6 +60,7 @@ import {
   markIssuesFixing,
   restoreFixingIssues,
   restoreFixingIssuesForConversations,
+  rebindFixingIssues,
   removeIssues,
   findConversationInDomain,
   shouldDeclareSessionMissing,
@@ -102,6 +104,10 @@ import {
   DEFAULT_REVIEW_MODE,
   normalizeParallelLimit,
   normalizeApiProfile,
+  normalizeExecutionOverride,
+  mergeExecutionSettings,
+  hasExecutionOverride,
+  dropScopeDraft,
   normalizeCleanupSessionKinds,
   normalizeCustomPrompts,
   normalizeCustomPromptSlot,
@@ -567,6 +573,13 @@ function createEngine(api, options = {}) {
     severityFilter: "all",
     searchQuery: "",
     settings: DEFAULT_SETTINGS,
+    // 全局默认设置：项目执行覆盖未涉及的非执行字段与设置在弹窗里都以它为基线。
+    settingsGlobal: DEFAULT_SETTINGS,
+    // 当前项目的执行覆盖（可只含 apiProfile / parallelLimit 之一）；null 表示沿用全局默认。
+    settingsOverride: null,
+    // 项目执行覆盖读取失败的原因（{ code, message, key }）；null 表示读取正常。
+    // 失败时生效值已回退全局默认，设置弹窗据此提示，不能当成「本项目没有覆盖」静默处理。
+    settingsOverrideError: null,
     // 设置读取失败时默认值不可信：自动修复必须先等待用户确认。
     settingsLoadFailed: false,
     selected: [],
@@ -903,15 +916,55 @@ function createEngine(api, options = {}) {
     return { ...fallback, apiProfileFallback: bound, apiProfileCleared: cleared };
   }
 
-  // 回退成功说明设置里的档案绑定已失效：清空绑定，避免之后每轮创建会话都先失败再重试。
-  // 只清理仍然是同一个档案名的设置，避免覆盖用户在等待期间做出的新选择。
+  // 回退成功说明生效设置里的档案绑定已失效：清空实际生效来源（项目覆盖或全局），
+  // 避免之后每轮创建会话都先失败再重试。只清理仍然是同一个档案名的值，
+  // 避免覆盖用户在等待期间做出的新选择。
   async function clearInvalidApiProfile(name) {
-    // 已被其它流程清理或用户已改选其它档案：绑定已不再指向该档案，无需重复清理。
-    if (normalizeApiProfile(store.get().settings?.apiProfile) !== name) {
+    const snapshot = store.get();
+    const override = snapshot.settingsOverride || null;
+    const scoped = hasExecutionOverride(override, "apiProfile");
+    const globalProfile = normalizeApiProfile(
+      snapshot.settingsGlobal?.apiProfile ?? snapshot.settings?.apiProfile,
+    );
+    const effective = normalizeApiProfile(scoped ? override.apiProfile : globalProfile);
+    if (effective !== name) {
       invalidApiProfiles.delete(name);
       return true;
     }
-    const result = await setSettings({ apiProfile: "" });
+    // 项目覆盖里的「跟随全局设置」是删除这条字段：空串在存储层会被当作「未覆盖」，
+    // 而会话创建时的空串表示「跟随宿主当前激活档案」，用它清项目层会把全局选定的档案压掉。
+    if (scoped) {
+      const projectResult = await setSettings({ apiProfile: "" }, { scope: "project" });
+      // 与下方全局清理同口径：persisted === false 且无 error 表示设置读取失败、只改了内存，
+      // 本次运行仍已生效；有 error 表示写盘失败且内存已回滚，交给提示文案让用户手动处理。
+      const projectCleared =
+        projectResult.ok || (projectResult.persisted === false && !projectResult.error);
+      if (!projectCleared) return false;
+      // 全局层没有指向同一个失效档案时，删除项目覆盖已经回到有效的全局选择，到此结束。
+      if (globalProfile !== name) {
+        invalidApiProfiles.delete(name);
+        const projectDialog = store.get().dialog;
+        if (
+          projectDialog &&
+          projectDialog.type === "settings" &&
+          projectDialog.settingsScope === "project" &&
+          normalizeApiProfile(projectDialog.apiProfile) === name
+        ) {
+          // 覆盖已删除：表单回到全局选择，避免用户再次保存时把失效档案写回覆盖。
+          // 项目作用域草稿里的失效档案名同样丢弃，否则切回项目会把已失效的选择重新填回。
+          store.set({
+            dialog: {
+              ...projectDialog,
+              apiProfile: globalProfile,
+              projectApiProfile: null,
+              scopeDrafts: dropScopeDraft(projectDialog.scopeDrafts, "project", "apiProfile"),
+            },
+          });
+        }
+        return true;
+      }
+    }
+    const result = await setSettings({ apiProfile: "" }, { scope: "global" });
     // persisted === false 且无 error 表示设置读取失败、只改了内存，本次运行仍已生效；
     // 有 error 表示写盘失败且内存已回滚，交给提示文案让用户手动处理。
     const cleared = result.ok || (result.persisted === false && !result.error);
@@ -919,15 +972,26 @@ function createEngine(api, options = {}) {
     // 设置已成功清空：移除失效缓存，用户重新绑定同名档案后不再被误判跳过绑定。
     invalidApiProfiles.delete(name);
     const dialog = store.get().dialog;
-    // 设置弹窗同时打开时同步选择与基线，避免用户保存弹窗时把失效值再写回去。
+    // 设置弹窗同时打开时同步对应作用域的选择与基线，避免用户保存弹窗时把失效值再写回去。
     if (dialog && dialog.type === "settings" && normalizeApiProfile(dialog.apiProfile) === name) {
-      store.set({
-        dialog: {
-          ...dialog,
-          apiProfile: "",
-          baseline: { ...dialog.baseline, apiProfile: "" },
-        },
-      });
+      // 全局档案被清空时基线与全局选择一并清空，弹窗保存不会按旧基线写回失效值；
+      // 项目作用域只清该项目的覆盖值（null 表示没有覆盖，即跟随全局选择），全局基线保持不变。
+      // 对应作用域的草稿也一并丢弃该字段：草稿里仍是失效档案名时，切回作用域会把它填回，
+      // 保存时又会被写回设置，与本次清空的目的相反。
+      const patch =
+        dialog.settingsScope === "project"
+          ? {
+              apiProfile: "",
+              projectApiProfile: null,
+              scopeDrafts: dropScopeDraft(dialog.scopeDrafts, "project", "apiProfile"),
+            }
+          : {
+              apiProfile: "",
+              globalApiProfile: "",
+              baseline: { ...dialog.baseline, apiProfile: "" },
+              scopeDrafts: dropScopeDraft(dialog.scopeDrafts, "global", "apiProfile"),
+            };
+      store.set({ dialog: { ...dialog, ...patch } });
     }
     return true;
   }
@@ -1179,24 +1243,215 @@ function createEngine(api, options = {}) {
     return normalizeSettings(await api.storage.getJson(SETTINGS_KEY));
   }
 
-  async function loadSettings() {
+  // 项目执行覆盖：只含 API 档案与并行上限。单个项目的数据损坏按「没有覆盖」处理，
+  // 不能因为一个项目读不出来就让整个工作台回退默认值。
+  // strict 用于写盘前重读基线：此时必须区分「读取失败」与「没有覆盖」，读取失败要抛出
+  // 让调用方中止保存，否则会以空对象为基线把磁盘上的其它执行字段整份抹掉。
+  // 数据损坏不抛出：损坏的原始内容已由存储层备份到 `:corrupt` 键，此时磁盘上已没有
+  // 可保留的执行字段，继续写入才能让该项目恢复可用。
+  async function readProjectExecutionOverride(projectId, options = {}) {
+    if (!projectId) return null;
     try {
-      store.set({ settings: await readSettingsFromStorage(), settingsLoadFailed: false });
-    } catch {
-      store.set({ settings: DEFAULT_SETTINGS, settingsLoadFailed: true });
+      return normalizeExecutionOverride(await api.storage.getJson(PROJECT_SETTINGS_PREFIX + projectId));
+    } catch (error) {
+      if (options?.strict === true && error?.code !== "parse") throw error;
+      return null;
     }
   }
 
-  async function setSettings(patch) {
+  // 读取结果额外区分「没有覆盖」与「读取失败」：两者都按未覆盖生效，但失败必须留下标记，
+  // 否则用户设置过的「仅当前项目」API 档案与并行上限会静默回退到全局默认，界面还提示
+  // 「本项目尚未设置独立执行参数」。数据损坏（parse）同样走这个标记：原始内容已被存储层
+  // 备份到 `<key>:corrupt`，磁盘上没有可保留的执行字段，本次读取按未覆盖处理但不静默。
+  async function readProjectExecutionOverrideResult(projectId) {
+    if (!projectId) return { override: null, error: null };
+    try {
+      const override = normalizeExecutionOverride(
+        await api.storage.getJson(PROJECT_SETTINGS_PREFIX + projectId),
+      );
+      return { override, error: null };
+    } catch (error) {
+      return {
+        override: null,
+        error: {
+          code: error?.code === "parse" ? "parse" : "read",
+          message: String(error?.cause?.message || error?.message || error || ""),
+          key: String(error?.storageKey || PROJECT_SETTINGS_PREFIX + projectId),
+        },
+      };
+    }
+  }
+
+  // 全局设置变化后重算生效值：项目覆盖优先，其余字段继续取全局默认。
+  function applyGlobalSettings(value) {
+    store.set({
+      settingsGlobal: value,
+      settings: mergeExecutionSettings(value, store.get().settingsOverride),
+    });
+  }
+
+  // 生效设置 = 全局默认 + 当前项目覆盖。项目切换后必须重载，否则会沿用上一个项目的
+  // API 档案与并发上限；但项目切换不能重读全局设置：启动时的一次瞬时读取失败会在
+  // 第二次读取成功后被静默清除，settingsLoadFailed 契约（首次读取失败即需用户确认）
+  // 随之失效。全局设置由启动 / reload 读取一次，之后以内存与 setSettings 落盘结果为准。
+  async function loadSettings() {
+    let global = DEFAULT_SETTINGS;
+    let failed = false;
+    try {
+      global = await readSettingsFromStorage();
+    } catch {
+      failed = true;
+    }
+    const { override, error: overrideError } = await readProjectExecutionOverrideResult(currentProjectId());
+    store.set({
+      settingsGlobal: global,
+      settingsOverride: override,
+      settings: mergeExecutionSettings(global, override),
+      settingsLoadFailed: failed,
+      // 项目覆盖读取失败时生效值已回退到全局默认：单独记录原因，设置弹窗据此提示，
+      // 不再把「读取失败」显示成「本项目尚未设置独立执行参数」。
+      settingsOverrideError: overrideError,
+    });
+    return true;
+  }
+
+  // 项目覆盖只接受执行字段：弹窗按作用域分开发起，其余设置仍走全局设置。
+  // 先读后合，避免读取失败时把磁盘上的其它字段抹掉。
+  async function setProjectSettings(patch) {
+    const guard = captureProject();
+    // 返回结果的 persisted 只表示「是否写盘成功」，各类失败都带 error，据此与 persisted 区分：
+    // 1) 项目已切换（前置校验）：未写盘、未改内存，persisted 为 false；
+    // 2) 读取基线失败（strict 重读）：未写盘、未改内存，persisted 为 false；
+    // 3) 写盘抛错：磁盘保持旧值、内存未改，persisted 为 false。
+    // 另有一个落盘成功但内存未更新的分支：写盘完成后才发现项目已切换，其 persisted 为 true
+    // （键冻结在旧项目，磁盘确已写入），ok 为 false 只表示内存未更新。
+    if (!guard || !isProjectCurrent(guard)) {
+      return { ok: false, persisted: false, error: new Error(t("fx.error.projectSwitched")) };
+    }
     const before = store.get();
-    let base = before.settings;
+    // 不含任何执行字段的 patch 视为清除：写入空对象，读取侧按「未覆盖」处理。
+    const patchHasFields =
+      Object.prototype.hasOwnProperty.call(patch, "apiProfile") ||
+      Object.prototype.hasOwnProperty.call(patch, "parallelLimit");
+    let base = before.settingsOverride;
+    // 只有需要按现有记录合并时才读盘。读取失败不能当成「没有覆盖」：否则本次只改一个
+    // 字段会以空对象为基线合并，把磁盘上的其它字段（例如 API 档案覆盖）整份抹掉，
+    // 该项目之后会静默改用全局 API 档案。这里中止保存，让用户检查后重试。
+    if (patchHasFields && (base === undefined || base === null)) {
+      try {
+        base = await readProjectExecutionOverride(guard.directoryId, { strict: true });
+      } catch (error) {
+        setToast(
+          "error",
+          t("fx.settings.overrideReadFailed", {
+            error: String(error?.cause?.message || error?.message || error),
+          }),
+        );
+        return { ok: false, persisted: false, error };
+      }
+    }
+    const merged = patchHasFields ? { ...(base || {}) } : {};
+    if (Object.prototype.hasOwnProperty.call(patch, "apiProfile")) {
+      merged.apiProfile = normalizeApiProfile(patch.apiProfile);
+    }
+    if (Object.prototype.hasOwnProperty.call(patch, "parallelLimit")) {
+      // 原样透传：空值/非法值交给下面的 normalizeExecutionOverride 统一丢弃（回退全局），
+      // 这里提前归一化会把它变成默认上限并固化进项目覆盖。
+      merged.parallelLimit = patch.parallelLimit;
+    }
+    const next = normalizeExecutionOverride(merged);
+    const global = before.settingsGlobal || DEFAULT_SETTINGS;
+    try {
+      // 清除时写入空对象：读取侧把「没有任何执行字段」视为未覆盖。
+      await api.storage.setJson(PROJECT_SETTINGS_PREFIX + guard.directoryId, next || {});
+    } catch (error) {
+      setToast(
+        "error",
+        t("fx.settings.failed", {
+          error: String(error?.cause?.message || error?.message || error),
+        }),
+      );
+      // 写盘失败：磁盘仍是旧值，本函数又在写盘成功之后才改内存，此处磁盘与内存都未变，
+      // persisted 必须为 false。带 error 即区别于 setSettings 的「仅内存生效」返回。
+      return { ok: false, persisted: false, error };
+    }
+    // 写盘期间切换了项目：写入键冻结的是发起时的 directoryId，磁盘内容属于旧项目，
+    // 这次落盘本身是正确的；但此刻内存里的 project 已经换成新项目，继续写 store 会把
+    // 上一个项目的执行覆盖套成新项目的生效设置（旧 API 档案 / 旧并行上限），并一直残留
+    // 到下次切换项目或重开工作台。与 loadSettings 同口径：await 之后再校验一次代次，
+    // 失配时只保留落盘结果，不改内存。refreshAutoFixEntry 同样跳过，新项目由自己的
+    // loadSettings 重新判定入口。
+    if (!isProjectCurrent(guard)) {
+      return { ok: false, persisted: true, error: new Error(t("fx.error.projectSwitched")) };
+    }
+    const effective = mergeExecutionSettings(global, next);
+    // 本次保存已成功落盘：读取失败的标记随之失效，否则弹窗会一直提示回退到全局默认。
+    store.set({ settingsOverride: next, settings: effective, settingsOverrideError: null });
+    refreshAutoFixEntry();
+    return { ok: true, persisted: true, settings: effective, override: next };
+  }
+
+  // 清除当前项目的执行覆盖：回到完全跟随全局默认。
+  async function clearProjectExecutionOverride() {
+    const result = await setProjectSettings({});
+    if (result.ok) {
+      setToast("success", t("fx.settings.projectOverrideCleared"));
+      // 只刷新与项目覆盖相关的字段：弹窗里其它未保存的编辑（修复范围、自动化开关、
+      // 审查方式等）不能因为这次清除被静默回滚，所以不能用 openSettingsDialog 整体重建。
+      const snapshot = store.get();
+      if (snapshot.dialog?.type === "settings") {
+        const globalSettings = snapshot.settingsGlobal || snapshot.settings || DEFAULT_SETTINGS;
+        const effective = result.settings || snapshot.settings || DEFAULT_SETTINGS;
+        const globalApiProfile = normalizeApiProfile(globalSettings.apiProfile);
+        const globalParallelLimit = normalizeParallelLimit(globalSettings.parallelLimit);
+        // 覆盖已删除：作用域与 openSettingsDialog 的口径一致回到全局默认，
+        // 执行字段一并展示全局值，避免保存时把项目作用域的草稿写进全局设置。
+        updateDialog({
+          settingsScope: "global",
+          hasProjectOverride: false,
+          // 项目覆盖已清除：项目作用域的草稿随之失效，否则切回「仅当前项目」会看到
+          // 已被清除的旧值，并在保存时静默重建刚删除的覆盖。全局草稿不受影响。
+          scopeDrafts: dropScopeDraft(snapshot.dialog.scopeDrafts, "project"),
+          // 清除成功即恢复为正常的「跟随全局」：上一轮读取失败的告警随之失效。
+          overrideUnavailable: false,
+          overrideError: "",
+          overrideErrorKey: "",
+          projectApiProfile: null,
+          projectParallelLimit: null,
+          effectiveApiProfile: normalizeApiProfile(effective.apiProfile),
+          effectiveParallelLimit: normalizeParallelLimit(effective.parallelLimit),
+          apiProfile: globalApiProfile,
+          parallelLimit: globalParallelLimit,
+          // 清除成功即回到「跟随全局」：上一轮失败留下的内联错误随之失效。
+          error: "",
+        });
+      }
+    } else {
+      // 失败必须在弹窗内说明原因：项目已切换等分支此前只返回结果，按钮看起来毫无反应。
+      const detail = String(result?.error?.cause?.message || result?.error?.message || result?.error || "");
+      setDialogError(
+        "settings",
+        detail === t("fx.error.projectSwitched")
+          ? t("fx.error.projectSwitched")
+          : t("fx.settings.projectOverrideClearFailed", {
+              error: detail || t("fx.error.projectSwitched"),
+            }),
+      );
+    }
+    return result;
+  }
+
+  async function setSettings(patch, options = {}) {
+    if (options?.scope === "project") return await setProjectSettings(patch);
+    const before = store.get();
+    let base = before.settingsGlobal || before.settings;
     let loaded = !before.settingsLoadFailed;
     // 读取失败时内存里是默认值：写盘前再读一次，避免把默认值整份覆盖用户配置。
     if (!loaded) {
       try {
         base = await readSettingsFromStorage();
         loaded = true;
-        store.set({ settings: base, settingsLoadFailed: false });
+        store.set({ settingsGlobal: base, settings: mergeExecutionSettings(base, before.settingsOverride), settingsLoadFailed: false });
       } catch {
         // 仍读不到：本次只更新内存，不落盘，保留读取失败标记。
       }
@@ -1215,11 +1470,11 @@ function createEngine(api, options = {}) {
       next.autoFixOptInConfirmedAt = nowMs();
     }
     if (!loaded) {
-      store.set({ settings: next });
+      applyGlobalSettings(next);
       refreshAutoFixEntry();
       return { ok: false, persisted: false, settings: next };
     }
-    store.set({ settings: next });
+    applyGlobalSettings(next);
     refreshAutoFixEntry();
     try {
       await api.storage.setJson(SETTINGS_KEY, next);
@@ -1239,7 +1494,7 @@ function createEngine(api, options = {}) {
       return { ok: true, persisted: true, settings: next };
     } catch (error) {
       // 写盘失败时回滚到本次合并前的可信基底，避免未保存的值继续参与后续逻辑。
-      store.set({ settings: base });
+      applyGlobalSettings(base);
       setToast(
         "error",
         t("fx.settings.failed", {
@@ -1778,12 +2033,24 @@ function createEngine(api, options = {}) {
         sessions: { ...state.sessions, fix: releaseFixSession(dismissedFix) },
       };
     }
+    // 项目执行覆盖与 project/state 同批发布：先发布 ready 快照再回填设置，会让 store.settings
+    // 在这段时间里仍是上一个项目的 API 档案与并行上限——设置弹窗的「当前生效」与自动修复入口
+    // 都会按旧值求值，此时新建的会话也会用错渠道与并发上限。
+    const { override: settingsOverride, error: settingsOverrideError } =
+      await readProjectExecutionOverrideResult(project.directoryId);
+    // 读取期间又切换了项目：丢弃本次加载，避免旧项目晚到覆盖新项目。
+    if (epoch !== projectEpoch) return;
+    const settingsGlobal = store.get().settingsGlobal || DEFAULT_SETTINGS;
+    const settings = mergeExecutionSettings(settingsGlobal, settingsOverride);
     store.set({
       project,
       state,
       status: "ready",
       error: "",
       stateUnavailable: Boolean(loadError),
+      settingsOverride,
+      settings,
+      settingsOverrideError,
       selected: [],
       statusFilter: "all",
       severityFilter: "all",
@@ -1792,7 +2059,8 @@ function createEngine(api, options = {}) {
       activity: buildActivityFromState(state),
       // 审查完成但自动修复未派发（未确认 / 互斥 / 设置读取失败）时恢复列表入口；
       // autoFixIds 随项目状态持久化，切回项目或重载后都不会丢失。
-      pendingAutoFix: restorePendingAutoFix(state),
+      // 按本项目刚合并的生效设置求值：restorePendingAutoFix 默认读 store，此刻里面还是上一个项目。
+      pendingAutoFix: restorePendingAutoFix(state, { ...store.get(), settings }),
       tree: { root: project.path, nodes: [], expanded: {}, loading: {}, error: "", unavailable: false },
       git: {
         loading: true,
@@ -1804,6 +2072,9 @@ function createEngine(api, options = {}) {
         commandError: "",
       },
     });
+    // 项目级执行覆盖已随上面的 ready 快照一并发布：快照发布后 store.settings 立即属于本项目，
+    // 不再有「先 ready 后回填」的窗口。
+    if (epoch !== projectEpoch) return;
     // 后台引擎只维护会话状态，不读取 Git / 文件树，避免切换项目时为非当前项目
     // 产生多余的终端与文件系统调用。
     if (!headless) {
@@ -5708,6 +5979,343 @@ function createEngine(api, options = {}) {
     });
   }
 
+  // 会话关联兜底：宿主极少数情况下会把工作台与宿主会话对不上（会话列表短暂读不到该 id、
+  // 创建回包缺 id、项目切换后恢复失败等）。允许用户从宿主复制会话 id 手动挂接：
+  // 先确认该会话在当前宿主可读且归属当前项目，再换绑到活动对应的会话槽，按原有轮询继续跟踪。
+  const RELINK_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{3,199}$/;
+  // 归属无法确认时展示的首条用户消息长度：够用户认出是哪个会话，又不把整段提示词搬进界面。
+  const RELINK_PREVIEW_CHARS = 80;
+
+  function normalizeRelinkId(raw) {
+    let value = String(raw || "").trim();
+    // 容忍从 URL、日志或「conversationId=...」这类片段里复制：只取 id 本体。
+    const match = value.match(/(?:conversationId=|\/conversation\/)([A-Za-z0-9._:-]+)/i);
+    if (match) value = match[1];
+    value = value.replace(/^[<"'`\s]+|[>"'`\s]+$/g, "");
+    return RELINK_ID_RE.test(value) ? value : "";
+  }
+
+  // 会话归属判定：conversations 域的 items / pinned 由宿主按 directoryId 过滤，且只包含
+  // 一部分会话（子代理会话、workflow 节点会话、已归档会话与非 active / 非 pin 状态的会话
+  // 都不会出现），列表未命中推不出「属于别的项目」。只有 active 是宿主焦点会话并带着自身
+  // directoryId，可以据此下硬结论。返回 "owned"（属于本项目）/ "foreign"（明确属于别处）/
+  // "unlisted"（列表可读但未命中）/ "unknown"（字段缺失，无法判断）。
+  function ownsConversation(domain, conversationId, directoryId) {
+    const id = String(conversationId || "");
+    if (!id || !directoryId || !domain || typeof domain !== "object") return "unknown";
+    const sameId = (item) => String(item?.conversationId || "") === id;
+    const items = Array.isArray(domain.items) ? domain.items : null;
+    const pinned = Array.isArray(domain.pinned) ? domain.pinned : null;
+    // 列表命中即本项目：宿主已按目录过滤，项自身缺 directoryId 时保留原宽松口径，
+    // 避免宿主裁剪字段导致正常换绑被误拒。
+    const listedHit = (item) =>
+      sameId(item) && (!item.directoryId || String(item.directoryId) === directoryId);
+    if ((items || []).some(listedHit) || (pinned || []).some(listedHit)) return "owned";
+    if (domain.active && sameId(domain.active)) {
+      // active 不按目录过滤，必须自身 directoryId 与当前项目严格相等才算命中；
+      // 字段缺失时归属无法确认，不得放行，由调用方提示稍后重试。
+      const activeDirectory = String(domain.active.directoryId || "");
+      if (activeDirectory === directoryId) return "owned";
+      if (activeDirectory) return "foreign";
+      return "unknown";
+    }
+    if (!items && !pinned) return "unknown";
+    // 列表可读但未命中不等于「属于别的项目」，交回「无法确认」处理。
+    return "unlisted";
+  }
+
+  // 目标会话是否可接管：必须同时满足「会话存在」与「归属当前项目」。
+  // messages 域按 id 全局可读且不含项目信息（live 只是宿主的焦点会话），单靠它无法判断归属；
+  // conversations 域按 directoryId 取当前项目的会话列表，但该列表只是子集，未命中不能当作
+  // 「属于别的项目」，只有 active 会话带着明确且不一致的 directoryId 才判 foreign。
+  async function readRelinkTarget(conversationId, directoryId) {
+    let listed = "unknown";
+    try {
+      const response = await api.metadata.get(["conversations"], { params: { directoryId } });
+      listed = ownsConversation(response?.domains?.conversations, conversationId, directoryId);
+    } catch {
+      listed = "unknown";
+    }
+    if (listed === "owned") return { state: "found" };
+    if (listed === "foreign") return { state: "foreign" };
+    // 归属无法确认：既不能放行，也不能断言不存在，交给调用方提示稍后重试。
+    if (listed === "unknown") return { state: "unknown" };
+    // 列表未命中：messages 域只能区分「会话里已有内容」与「读不到内容」，不含项目归属。
+    // 只把用户能核对的内容当作证据：首条用户消息正文（压缩空白后截断）与消息条数；
+    // 取不到任何正文时不给确认入口，避免在零依据的情况下被确认绑入当前项目。
+    try {
+      const response = await api.metadata.get(["messages"], { params: { conversationId } });
+      const domain = response?.domains?.messages;
+      const items = Array.isArray(domain?.items) ? domain.items : null;
+      const live = domain?.live && typeof domain.live === "object" ? domain.live : null;
+      const liveHit = Boolean(live && String(live.conversationId || "") === conversationId);
+      if (!items && !liveHit) return { state: "unknown" };
+      if ((items && items.length > 0) || liveHit) {
+        // 按码点截断，避免把代理对切成半个字符（消息正文可能来自任意宿主会话）。
+        const textOf = (message) => {
+          const text = String(message?.content || "")
+            .replace(/\s+/g, " ")
+            .trim();
+          return text ? Array.from(text).slice(0, RELINK_PREVIEW_CHARS).join("") : "";
+        };
+        const firstUser = (items || []).find(
+          (message) => String(message?.role || "").toLowerCase() === "user" && textOf(message),
+        );
+        const firstAny = (items || []).find((message) => textOf(message));
+        const preview = textOf(firstUser || firstAny);
+        return {
+          state: "unconfirmed",
+          // 没有任何正文时不给确认入口：调用方按 no-evidence 拒绝，避免零依据放行。
+          reason: preview ? "exists" : "no-evidence",
+          preview,
+          // 条数只用于让用户确认会话规模，不作为归属判据。
+          count: items ? items.length : 0,
+        };
+      }
+      return { state: "missing" };
+    } catch {
+      return { state: "unknown" };
+    }
+  }
+
+  async function relinkConversation(rawId, options = {}) {
+    const guard = captureProject();
+    if (!guard || !isProjectCurrent(guard)) {
+      return { status: "deferred", message: t("fx.error.projectSwitched") };
+    }
+    const snapshot = store.get();
+    const activity = snapshot.activity;
+    if (!activity) return { status: "invalid", message: t("fx.relink.noActivity") };
+    // 只接管已停止跟踪 / 跟踪中断的卡片：运行中的会话换绑会丢结果或被并发解析。
+    if (activity.phase !== "error" && activity.phase !== "detached") {
+      return { status: "busy", message: t("fx.relink.busy") };
+    }
+    const conversationId = normalizeRelinkId(rawId);
+    if (!conversationId) return { status: "invalid", message: t("fx.relink.invalidId") };
+    const sessionKey = sessionKeyOf(activity.kind);
+    const session = snapshot.state.sessions[sessionKey];
+    // 修复 / 复审没有会话目标就无从回写：只有审查允许在创建失败时补建记录。
+    if (!session && sessionKey !== "review") {
+      return { status: "invalid", message: t("fx.relink.noSession") };
+    }
+    if (
+      session &&
+      session.conversationId === conversationId &&
+      activity.conversationId === conversationId
+    ) {
+      return { status: "same", message: t("fx.relink.same") };
+    }
+    const runningToken = tracking.get(sessionKey);
+    if (session && session.status === "running" && runningToken && !runningToken.cancelled) {
+      return { status: "busy", message: t("fx.relink.busy") };
+    }
+    // 同一会话不能被两类执行同时跟踪：否则两边会各自解析、各自回写。
+    for (const kind of ["review", "fix", "verify"]) {
+      if (kind === sessionKey) continue;
+      const other = snapshot.state.sessions[kind];
+      if (!other || String(other.conversationId || "") !== conversationId) continue;
+      if (other.status === "running") {
+        return { status: "conflict", message: t("fx.relink.conflict") };
+      }
+    }
+    const target = await readRelinkTarget(conversationId, guard.directoryId);
+    if (!isProjectCurrent(guard)) return { status: "deferred", message: t("fx.error.projectSwitched") };
+    if (target.state === "unknown") return { status: "unreadable", message: t("fx.relink.unreadable") };
+    if (target.state === "missing") return { status: "not-found", message: t("fx.relink.notFound") };
+    // 会话存在但不属于当前项目：换绑会把其它项目的结论写进本项目台账，直接拒绝。
+    if (target.state === "foreign") return { status: "foreign", message: t("fx.relink.foreign") };
+    // 归属无法确认（宿主列表只是子集，会话本身已有内容）：确认态必须带上可核对内容，
+    // 用户才能判断这个会话是不是本项目的。没有任何正文时不提供确认入口：即使调用方强行
+    // 带上确认标记，也一律拒绝，避免在零依据的情况下被确认绑入当前项目。
+    if (target.state === "unconfirmed") {
+      if (!target.preview) {
+        return {
+          status: "unconfirmed",
+          confirmable: false,
+          message: t("fx.relink.unconfirmedNoDetail"),
+        };
+      }
+      if (options.confirmUnconfirmed !== true) {
+        return {
+          status: "unconfirmed",
+          confirmable: true,
+          preview: target.preview,
+          message: t("fx.relink.unconfirmedPreview", {
+            preview: target.preview,
+            count: Number(target.count) || 0,
+          }),
+        };
+      }
+    }
+    // 读取期间活动可能已被新一轮执行替换：此时换绑会改错卡片。
+    const current = store.get();
+    if (
+      current.activity?.conversationId !== activity.conversationId ||
+      current.activity?.kind !== activity.kind
+    ) {
+      return { status: "deferred", message: t("fx.error.projectSwitched") };
+    }
+    const at = nowMs();
+    const base = session || {
+      title: t("fx.title.review", {
+        project: current.project?.name || "",
+        time: formatStamp(new Date()),
+      }),
+      startedAt: at,
+      flowStartedAt: at,
+      stageStartedAt: at,
+      scopeLabel: "",
+      issueSeverities: [...normalizeSeverityScope(current.settings?.issueSeverities)],
+      autoFixEnabled: false,
+      autoFixReadyAt: 0,
+      autoFixDispatchingAt: 0,
+      issueIds: [],
+    };
+    const nextSession = {
+      ...base,
+      conversationId,
+      status: "running",
+      lastError: "",
+      lastErrorDetail: "",
+      activityDismissed: false,
+      receivedChars: 0,
+      // 会话集合同步换绑：planCleanupRun 用 sessionIds 判定「本轮已修复」并决定归档 / 删除
+      // 哪些会话，stageRunIdsOf 也用它算暂存去重键。只改 conversationId 会留下旧集合：
+      // 新会话既不计入清理计划，本批在换绑后产出的修复结论也会在 isFixedForRun 处全部判否。
+      // 保留旧 id（失败的那次尝试仍随本轮一起清理），并追加新 id 使计划与实际会话一致。
+      // 审查会话的 sessionIds 不参与清理与暂存口径，保持原值不动。
+      sessionIds:
+        sessionKey === "review"
+          ? base.sessionIds
+          : Array.from(
+              new Set(
+                [...(Array.isArray(base.sessionIds) ? base.sessionIds : []), conversationId]
+                  .map(String)
+                  .filter(Boolean),
+              ),
+            ),
+      // 新会话的进展时刻从现在起算；startedAt 保留，总耗时仍从本轮开始累计。
+      lastUpdateAt: at,
+    };
+    const nextActivity = {
+      ...sessionActivityBase(activity.kind, nextSession),
+      phase: "waiting",
+      message: t("fx.activity.waiting"),
+      error: "",
+      timedOut: false,
+      retrying: false,
+      issueIds:
+        Array.isArray(activity.issueIds) && activity.issueIds.length
+          ? activity.issueIds
+          : nextSession.issueIds || [],
+      receivedChars: 0,
+    };
+    // 换绑把会话 id 从旧值换成新值：本批仍处于修复中的占位必须一起改名，
+    // 否则 finishFix、关闭卡片与下一轮修复都按新 id 匹配不到 issue.fix.conversationId，
+    // 这批条目会永久停在「修复中」并被 hasFixConflict 挡住重新修复。
+    const legacyConversationId = String(session?.conversationId || activity.conversationId || "");
+    const rebindBatchIds = [
+      ...(Array.isArray(session?.issueIds) ? session.issueIds : []),
+      ...(Array.isArray(activity.issueIds) ? activity.issueIds : []),
+    ]
+      .map(String)
+      .filter(Boolean);
+    const rebindPlan =
+      activity.kind === "fix" && legacyConversationId && legacyConversationId !== conversationId
+        ? rebindFixingIssues(current.state.issues, rebindBatchIds, legacyConversationId, conversationId)
+        : { issues: current.state.issues, changes: [] };
+    const state = {
+      ...current.state,
+      issues: rebindPlan.issues,
+      sessions: { ...current.state.sessions, [sessionKey]: nextSession },
+      conversationLog: appendConversationLog(current.state.conversationLog, {
+        conversationId,
+        kind: activity.kind,
+        title: nextSession.title || "",
+        createdAt: Number(base.startedAt) || at,
+      }),
+    };
+    store.set({ state, activity: nextActivity });
+    const saved = await saveState({
+      projectId: guard.directoryId,
+      state,
+      lifecycle: guard.stopEpoch,
+    });
+    if (saved?.stopped || !isProjectCurrent(guard)) {
+      return { status: "deferred", message: t("fx.error.projectSwitched") };
+    }
+    // 写盘失败（写入被暂停 / 存储抛错）：磁盘上没有换绑记录，界面若保留换绑结果，
+    // 重开工作台后关联就会丢失，还会留下「已关联却无人跟踪」的卡片，因此按失败处理，
+    // 不提示成功、不启动 track。只回滚本次写入的会话槽、修复占位、台账与活动卡片，
+    // 不覆盖保存窗口内可能发生的其它更新。
+    if (saved?.ok !== true) {
+      const latest = store.get();
+      const latestSession = latest.state.sessions[sessionKey];
+      const sessionDirty = Boolean(latestSession) && latestSession.conversationId === conversationId;
+      const activityDirty =
+        latest.activity?.conversationId === conversationId && latest.activity?.kind === activity.kind;
+      // 修复占位要按每条条目自己的旧 id 回收：保存窗口内已被 finishFix 写入终态的
+      // 条目不再处于 fixing，函数会自动跳过，不会被退回旧会话。
+      const rebindIds = new Set(rebindPlan.changes.map((change) => String(change.issueId)));
+      const issuesDirty =
+        rebindIds.size > 0 &&
+        (Array.isArray(latest.state.issues) ? latest.state.issues : []).some(
+          (issue) =>
+            issue?.id &&
+            rebindIds.has(String(issue.id)) &&
+            issue.status === ISSUE_STATUS.fixing &&
+            String(issue.fix?.conversationId || "") === conversationId,
+        );
+      let rolledIssues = latest.state.issues;
+      if (issuesDirty) {
+        for (const change of rebindPlan.changes) {
+          rolledIssues = rebindFixingIssues(
+            rolledIssues,
+            [change.issueId],
+            conversationId,
+            change.from,
+          ).issues;
+        }
+      }
+      if (sessionDirty || activityDirty || issuesDirty) {
+        const sessions = { ...latest.state.sessions };
+        if (sessionDirty) {
+          // 复审允许在缺少记录时补建：回滚要把这个新建的会话槽一起撤掉。
+          if (session) sessions[sessionKey] = session;
+          else delete sessions[sessionKey];
+        }
+        // 只撤销本次追加的那一条台账记录：长度恰好多 1 且尾部就是本次会话。
+        const baseLog = Array.isArray(current.state.conversationLog) ? current.state.conversationLog : [];
+        const latestLog = Array.isArray(latest.state.conversationLog) ? latest.state.conversationLog : [];
+        const logDirty =
+          sessionDirty &&
+          latestLog.length === baseLog.length + 1 &&
+          String(latestLog[latestLog.length - 1]?.conversationId || "") === conversationId;
+        store.set({
+          state: {
+            ...latest.state,
+            sessions,
+            issues: rolledIssues,
+            conversationLog: logDirty ? baseLog : latest.state.conversationLog,
+          },
+          ...(activityDirty ? { activity } : {}),
+        });
+      }
+      return { status: "failed", message: t("fx.relink.failed") };
+    }
+    const message = t("fx.relink.linked", { id: conversationId });
+    setToast("success", message);
+    void track({
+      kind: activity.kind,
+      conversationId,
+      projectId: guard.directoryId,
+      epoch: guard.epoch,
+      stopEpoch: guard.stopEpoch,
+      resumed: true,
+    });
+    return { status: "linked", message, conversationId };
+  }
+
   // 修复流程起点：选中 issue 全部来自当前审查会话时，沿用该审查的流程起点
   // （审查 → 修复 → 自动复审属于同一条自动化链）；否则（历史 issue、混合来源、
   // 直接修复）本轮修复自身就是流程起点，避免把几天前的审查时长算进来。
@@ -6949,22 +7557,36 @@ function createEngine(api, options = {}) {
 
   function openSettingsDialog() {
     const snapshot = store.get();
+    const globalSettings = snapshot.settingsGlobal || snapshot.settings || DEFAULT_SETTINGS;
     const settings = snapshot.settings || DEFAULT_SETTINGS;
+    const override = snapshot.settingsOverride || null;
+    // 已有独立执行设置的项目直接落在「仅当前项目」；其余项目从全局默认起步。
+    const scope = override ? "project" : "global";
+    const globalApiProfile = normalizeApiProfile(globalSettings.apiProfile);
+    const globalParallelLimit = normalizeParallelLimit(globalSettings.parallelLimit);
+    // null 表示该项目没有覆盖这个字段：表单先展示全局值，保存时才决定是否写入覆盖。
+    const projectApiProfile = hasExecutionOverride(override, "apiProfile")
+      ? normalizeApiProfile(override.apiProfile)
+      : null;
+    const projectParallelLimit = hasExecutionOverride(override, "parallelLimit")
+      ? normalizeParallelLimit(override.parallelLimit)
+      : null;
     // 记录弹窗打开时的基线：设置读取失败时内存里是默认值，保存时只提交相对基线改动过的字段，
     // 否则未改动字段会带着默认值写回，静默重置本地存储里用户已保存的配置。
+    // 执行字段（API 供应商 / 并行上限）的保存比较按作用域单独进行；基线里的 apiProfile
+    // 记录打开时的全局档案名，供档案失效回退时同步清空弹窗与基线。
     const baseline = {
-      parallelLimit: settings.parallelLimit,
-      apiProfile: normalizeApiProfile(settings.apiProfile),
-      autoFixAfterReview: settings.autoFixAfterReview,
-      autoCleanupAfterFix: settings.autoCleanupAfterFix,
-      autoCleanupAction: settings.autoCleanupAction,
-      autoCleanupSessionKinds: normalizeCleanupSessionKinds(settings.autoCleanupSessionKinds),
-      verifyAfterFix: settings.verifyAfterFix,
+      apiProfile: globalApiProfile,
+      autoFixAfterReview: globalSettings.autoFixAfterReview,
+      autoCleanupAfterFix: globalSettings.autoCleanupAfterFix,
+      autoCleanupAction: globalSettings.autoCleanupAction,
+      autoCleanupSessionKinds: normalizeCleanupSessionKinds(globalSettings.autoCleanupSessionKinds),
+      verifyAfterFix: globalSettings.verifyAfterFix,
       // 自动暂存默认关闭：旧设置没有该键时按 false 展示与比较。
-      autoStageAfterFix: settings.autoStageAfterFix === true,
-      issueSeverities: [...settings.issueSeverities],
+      autoStageAfterFix: globalSettings.autoStageAfterFix === true,
+      issueSeverities: [...globalSettings.issueSeverities],
       // 审查方式可能尚未写入存储：缺失时按默认值展示与比较。
-      reviewMode: normalizeReviewMode(settings.reviewMode),
+      reviewMode: normalizeReviewMode(globalSettings.reviewMode),
     };
     store.set({
       dialog: {
@@ -6973,8 +7595,24 @@ function createEngine(api, options = {}) {
         // 读取失败标记随弹窗保存：UI 据此提示「当前显示默认值、只写入改动项」。
         loadFailed: Boolean(snapshot.settingsLoadFailed),
         baseline,
-        parallelLimit: baseline.parallelLimit,
-        apiProfile: baseline.apiProfile,
+        settingsScope: scope,
+        projectName: snapshot.project?.name || "",
+        globalApiProfile,
+        globalParallelLimit,
+        projectApiProfile,
+        projectParallelLimit,
+        // 作用域草稿随弹窗创建清空：只保存本次打开期间用户切走作用域时未提交的表单值。
+        scopeDrafts: {},
+        hasProjectOverride: Boolean(override),
+        // 项目执行覆盖读取失败时生效值已回退全局默认：把原因一并交给弹窗，
+        // 由它同时更新生效值说明与告警，避免显示成「本项目尚未设置独立执行参数」。
+        overrideUnavailable: Boolean(snapshot.settingsOverrideError),
+        overrideError: String(snapshot.settingsOverrideError?.message || ""),
+        overrideErrorKey: String(snapshot.settingsOverrideError?.key || ""),
+        effectiveApiProfile: normalizeApiProfile(settings.apiProfile),
+        effectiveParallelLimit: normalizeParallelLimit(settings.parallelLimit),
+        parallelLimit: scope === "project" ? projectParallelLimit ?? globalParallelLimit : globalParallelLimit,
+        apiProfile: scope === "project" ? projectApiProfile ?? globalApiProfile : globalApiProfile,
         apiProfiles: [],
         apiProfilesState: "loading",
         autoFixAfterReview: baseline.autoFixAfterReview,
@@ -7082,57 +7720,96 @@ function createEngine(api, options = {}) {
   }
 
   async function saveSettingsDialog(dialog) {
+    // 执行字段（API 供应商 / 并行上限）按弹窗里的作用域分开提交：「仅当前项目」只写
+    // 当前项目的覆盖记录，其余设置与「全局默认」作用域下的执行字段都写全局设置。
+    const scope = dialog.settingsScope === "project" ? "project" : "global";
     // 只提交用户相对打开弹窗时的基线真正改动过的字段：读取失败后重读成功时，
     // 未改动字段保持存储里的原值，而不是被弹窗展示的默认值覆盖。
-    const baseline = dialog.baseline || store.get().settings;
+    // 基线里只有非执行字段，执行字段按作用域单独比较。
+    const baseline = dialog.baseline || store.get().settingsGlobal || DEFAULT_SETTINGS;
     // 用户显式保存设置即视为重新确认当前档案绑定：清除该档案的失效缓存。
     // 同名档案可能已被重建并重新选中（此时 dialog 与基线相同、不会生成 patch），
     // 缓存若不清理，后续会话会命中缓存跳过绑定、静默改用全局档案。
     invalidApiProfiles.delete(normalizeApiProfile(dialog.apiProfile));
-    const patch = {};
-    if (normalizeParallelLimit(dialog.parallelLimit) !== baseline.parallelLimit) {
-      patch.parallelLimit = dialog.parallelLimit;
-    }
-    // 档案名与基线不同才提交：显式改回空串（跟随全局激活档案）同样有效。
-    if (normalizeApiProfile(dialog.apiProfile) !== normalizeApiProfile(baseline.apiProfile)) {
-      patch.apiProfile = normalizeApiProfile(dialog.apiProfile);
+    // 非执行字段始终写全局默认：这些设置对所有项目共享。
+    const globalPatch = {};
+    // 执行字段按作用域归档：全局默认写全局设置，项目作用域写本项目覆盖。
+    const projectPatch = {};
+    if (scope === "global") {
+      if (normalizeParallelLimit(dialog.parallelLimit) !== normalizeParallelLimit(dialog.globalParallelLimit)) {
+        globalPatch.parallelLimit = dialog.parallelLimit;
+      }
+      // 档案名与基线不同才提交：显式改回空串（跟随全局激活档案）同样有效。
+      if (normalizeApiProfile(dialog.apiProfile) !== normalizeApiProfile(dialog.globalApiProfile)) {
+        globalPatch.apiProfile = normalizeApiProfile(dialog.apiProfile);
+      }
+    } else {
+      // 项目侧 null 表示该项目此前没有覆盖该字段，表单初值就是全局值：
+      // 只有用户把值改成与全局不同才需要新写一条覆盖。
+      const parallelRaw = dialog.parallelLimit;
+      // 空输入表示「跟随全局默认」：直接归一化会得到默认上限并固化成覆盖，把全局值压掉，
+      // 因此改为清除本项目的该字段（null 透传给 setProjectSettings 后被丢弃）。
+      const parallelFollowsGlobal =
+        parallelRaw === "" || parallelRaw === null || parallelRaw === undefined;
+      const hasProjectParallel = dialog.projectParallelLimit !== null && dialog.projectParallelLimit !== undefined;
+      if (parallelFollowsGlobal) {
+        if (hasProjectParallel) projectPatch.parallelLimit = null;
+      } else {
+        const nextParallel = normalizeParallelLimit(parallelRaw);
+        const projectParallel = hasProjectParallel ? normalizeParallelLimit(dialog.projectParallelLimit) : null;
+        const parallelChanged = hasProjectParallel
+          ? nextParallel !== projectParallel
+          : nextParallel !== normalizeParallelLimit(dialog.globalParallelLimit);
+        if (parallelChanged) projectPatch.parallelLimit = nextParallel;
+      }
+      const nextProfile = normalizeApiProfile(dialog.apiProfile);
+      const hasProjectProfile = dialog.projectApiProfile !== null && dialog.projectApiProfile !== undefined;
+      const projectProfile = hasProjectProfile ? normalizeApiProfile(dialog.projectApiProfile) : null;
+      const profileChanged = hasProjectProfile
+        ? nextProfile !== projectProfile
+        : nextProfile !== normalizeApiProfile(dialog.globalApiProfile);
+      // 项目作用域里的「跟随全局设置」= 删除这条覆盖：写入空串会被存储层归一化为
+      // 「未覆盖」，从而回到全局层选定的档案；空串在会话创建时表示跟随宿主激活档案，
+      // 不能当成项目覆盖保留下来。
+      if (profileChanged) projectPatch.apiProfile = nextProfile;
     }
     if (dialog.autoCleanupAfterFix !== baseline.autoCleanupAfterFix) {
-      patch.autoCleanupAfterFix = dialog.autoCleanupAfterFix;
+      globalPatch.autoCleanupAfterFix = dialog.autoCleanupAfterFix;
     }
     if (dialog.autoCleanupAction !== baseline.autoCleanupAction) {
-      patch.autoCleanupAction = dialog.autoCleanupAction;
+      globalPatch.autoCleanupAction = dialog.autoCleanupAction;
     }
     if (!sameCleanupSessionKinds(dialog.autoCleanupSessionKinds, baseline.autoCleanupSessionKinds)) {
-      patch.autoCleanupSessionKinds = normalizeCleanupSessionKinds(dialog.autoCleanupSessionKinds);
+      globalPatch.autoCleanupSessionKinds = normalizeCleanupSessionKinds(dialog.autoCleanupSessionKinds);
     }
     if (dialog.verifyAfterFix !== baseline.verifyAfterFix) {
-      patch.verifyAfterFix = dialog.verifyAfterFix;
+      globalPatch.verifyAfterFix = dialog.verifyAfterFix;
     }
     // 自动暂存开关：显式关闭同样要写回，patch=false 时归一化不保留该键，
     // 读取时按默认关闭处理。
     if (Boolean(dialog.autoStageAfterFix) !== Boolean(baseline.autoStageAfterFix)) {
-      patch.autoStageAfterFix = Boolean(dialog.autoStageAfterFix);
+      globalPatch.autoStageAfterFix = Boolean(dialog.autoStageAfterFix);
     }
     if (!sameSeverityScope(dialog.issueSeverities, baseline.issueSeverities)) {
-      patch.issueSeverities = dialog.issueSeverities;
+      globalPatch.issueSeverities = dialog.issueSeverities;
     }
     // 审查方式与默认值相同时也允许显式写回：用户可能是把已保存的方式改回默认。
     if (normalizeReviewMode(dialog.reviewMode) !== baseline.reviewMode) {
-      patch.reviewMode = normalizeReviewMode(dialog.reviewMode);
+      globalPatch.reviewMode = normalizeReviewMode(dialog.reviewMode);
     }
     // 只有用户确实改动了自动修复开关才算显式确认；保存其它设置不改动 opt-in。
     if (dialog.autoFixAfterReview !== baseline.autoFixAfterReview) {
-      patch.autoFixAfterReview = dialog.autoFixAfterReview;
+      globalPatch.autoFixAfterReview = dialog.autoFixAfterReview;
     }
-    if (!Object.keys(patch).length) {
+    const hasGlobalPatch = Object.keys(globalPatch).length > 0;
+    const hasProjectPatch = Object.keys(projectPatch).length > 0;
+    if (!hasGlobalPatch && !hasProjectPatch) {
       // 没有任何改动：不写盘，避免拿弹窗里的值制造一次无意义的存储写入。
       store.set({ dialog: null });
       setToast("success", t("fx.settings.unchanged"));
       return;
     }
-    const result = await setSettings(patch);
-    if (!result.ok) {
+    const showSaveFailure = (result) => {
       setDialogError(
         "settings",
         result.persisted === false && !result.error
@@ -7141,10 +7818,36 @@ function createEngine(api, options = {}) {
               error: String(result.error?.cause?.message || result.error?.message || result.error),
             }),
       );
-      return;
+    };
+    if (hasGlobalPatch) {
+      const result = await setSettings(globalPatch);
+      if (!result.ok) {
+        showSaveFailure(result);
+        return;
+      }
     }
+    // 项目覆盖放在全局之后提交：全局写盘失败时不留下半份项目覆盖，弹窗也保持打开便于重试。
+    if (hasProjectPatch) {
+      const result = await setSettings(projectPatch, { scope: "project" });
+      if (!result.ok) {
+        showSaveFailure(result);
+        return;
+      }
+    }
+    const projectName = String(dialog.projectName || "").trim();
     store.set({ dialog: null });
-    setToast("success", t("fx.settings.saved"));
+    // 项目作用域下只有执行字段写项目覆盖，自动化等非执行字段仍写全局默认：
+    // 提示里必须分别说明，否则用户会误以为这些改动只影响当前项目。
+    setToast(
+      "success",
+      scope === "project" && hasGlobalPatch
+        ? hasProjectPatch && projectName
+          ? t("fx.settings.savedScopeMixed", { project: projectName })
+          : t("fx.settings.savedGlobalOnly")
+        : hasProjectPatch && projectName
+          ? t("fx.settings.savedScope", { project: projectName })
+          : t("fx.settings.saved"),
+    );
   }
 
   function updateDialog(patch) {
@@ -7249,6 +7952,7 @@ function createEngine(api, options = {}) {
     openSettingsDialog,
     openPromptsDialog,
     setSettings,
+    clearProjectExecutionOverride,
     updateDialog,
     confirmCleanupAll,
     confirmDialog,
@@ -7258,6 +7962,7 @@ function createEngine(api, options = {}) {
     canRequestStructuredRetry,
     structuredRetryBlock,
     resumeActivityTracking,
+    relinkConversation,
     resumePendingAutoFix,
     stageRunManually,
     cleanupRunManually,

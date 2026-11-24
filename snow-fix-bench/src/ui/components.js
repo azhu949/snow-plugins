@@ -883,6 +883,42 @@ function ActivityCard({ activity, engine, api, t }) {
   const resumable = activity.phase === "detached" || activity.phase === "error";
   const [now, setNow] = useState(Date.now());
   const [settledAt, setSettledAt] = useState(() => settledEndOf(activity, running));
+  // 手动关联会话：宿主极少数情况下读不到新建会话，允许粘贴会话 id 重新挂接。
+  const [relinkOpen, setRelinkOpen] = useState(false);
+  const [relinkValue, setRelinkValue] = useState("");
+  const [relinkError, setRelinkError] = useState("");
+  const [relinkBusy, setRelinkBusy] = useState(false);
+  // 归属无法确认时先提示，用户再次提交即按确认处理，避免把其它项目的结论写进本项目台账。
+  const [relinkConfirm, setRelinkConfirm] = useState(false);
+  async function submitRelink(event) {
+    if (event) event.preventDefault();
+    if (relinkBusy) return;
+    setRelinkBusy(true);
+    setRelinkError("");
+    try {
+      const result = await engine.relinkConversation(relinkValue, {
+        confirmUnconfirmed: relinkConfirm,
+      });
+      if (result?.status === "linked") {
+        setRelinkOpen(false);
+        setRelinkValue("");
+        setRelinkConfirm(false);
+      } else if (result?.status === "unconfirmed") {
+        // 只有带可核对内容的 unconfirmed 才进入确认态；不可确认时按钮保持「关联」。
+        setRelinkConfirm(result?.confirmable === true);
+        setRelinkError(String(result?.message || "") || t("fx.relink.unconfirmed"));
+      } else {
+        setRelinkConfirm(false);
+        setRelinkError(String(result?.message || "") || t("fx.relink.failed"));
+      }
+    } catch (error) {
+      setRelinkConfirm(false);
+      setRelinkError(String(error?.message || error) || t("fx.relink.failed"));
+    } finally {
+      setRelinkBusy(false);
+    }
+  }
+
   // 相对更新时间在卡片存续期间都要前进：done/error/detached 后也保留每秒时钟，
   // 否则“最后更新 X 前”会永久停在相位切换的瞬间。
   // “已运行”停在结束时刻：挂载即为非运行态时用会话自身的最后进展时刻，
@@ -1010,6 +1046,21 @@ function ActivityCard({ activity, engine, api, t }) {
                   { key: "parse", className: "fx-btn small", onClick: () => void engine.retryParse() },
                   t("fx.activity.parseRetry"),
                 ),
+                // 会话 id 对不上（宿主读不到、创建回包缺 id）时的手动兜底：
+                // 粘贴宿主会话 id 即可换绑并继续跟踪，不必重新发起一轮。
+                h(
+                  "button",
+                  {
+                    key: "relink",
+                    className: "fx-btn small",
+                    title: t("fx.relink.hint"),
+                    onClick: () => {
+                      setRelinkError("");
+                      setRelinkOpen(true);
+                    },
+                  },
+                  t("fx.relink.open"),
+                ),
                 // 重新解析读的是同一份回复：AI 输出本身是坏 JSON 时只有让它重发才可能恢复；
                 // 超时 / 会话异常 / 续批创建失败没有可重发的结论，不显示该入口。
                 engine.canRequestStructuredRetry?.() === true
@@ -1035,6 +1086,54 @@ function ActivityCard({ activity, engine, api, t }) {
         ),
       ),
     ),
+    // 手动关联会话：只提交一个会话 id，校验与换绑都在引擎侧完成。
+    relinkOpen
+      ? h(
+          "form",
+          { className: "fx-relink", onSubmit: submitRelink },
+          h("label", { className: "fx-relink-label" }, t("fx.relink.title")),
+          h("input", {
+            className: "fx-relink-input",
+            type: "text",
+            value: relinkValue,
+            placeholder: t("fx.relink.placeholder"),
+            "aria-label": t("fx.relink.title"),
+            autoComplete: "off",
+            spellCheck: "false",
+            onInput: (event) => {
+              setRelinkValue(event.currentTarget.value);
+              setRelinkConfirm(false);
+            },
+          }),
+          h("div", { className: "fx-hint fx-relink-hint" }, t("fx.relink.hint")),
+          relinkError ? h("div", { className: "fx-error" }, relinkError) : null,
+          h(
+            "div",
+            { className: "fx-relink-actions" },
+            h(
+              "button",
+              { type: "submit", className: "fx-btn small primary", disabled: relinkBusy },
+              relinkBusy
+                ? t("fx.relink.confirming")
+                : relinkConfirm
+                  ? t("fx.relink.confirmUnconfirmed")
+                  : t("fx.relink.confirm"),
+            ),
+            h(
+              "button",
+              {
+                type: "button",
+                className: "fx-btn small ghost",
+                onClick: () => {
+                  setRelinkOpen(false);
+                  setRelinkError("");
+                },
+              },
+              t("fx.relink.cancel"),
+            ),
+          ),
+        )
+      : null,
   );
 }
 

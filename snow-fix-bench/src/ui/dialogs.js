@@ -1162,6 +1162,58 @@ function SettingsDialog({ dialog, engine, api, t }) {
   const cleanupAction = dialog.autoCleanupAction || "archive";
   const cleanupSessionKinds = normalizeCleanupSessionKinds(dialog.autoCleanupSessionKinds);
   const reviewMode = dialog.reviewMode || DEFAULT_REVIEW_MODE;
+  // 执行作用域：全局默认对所有项目生效，仅当前项目只覆盖 API 供应商与并行上限。
+  const scope = dialog.settingsScope === "project" ? "project" : "global";
+  const globalParallelLimit = dialog.globalParallelLimit ?? DEFAULT_PARALLEL_LIMIT;
+  const globalApiProfile = typeof dialog.globalApiProfile === "string" ? dialog.globalApiProfile : "";
+  // null 表示该项目没有覆盖该字段：表单展示全局值，保存时才决定是否写入覆盖。
+  const projectParallelLimit =
+    dialog.projectParallelLimit === null || dialog.projectParallelLimit === undefined
+      ? null
+      : dialog.projectParallelLimit;
+  const projectApiProfile =
+    dialog.projectApiProfile === null || dialog.projectApiProfile === undefined
+      ? null
+      : dialog.projectApiProfile;
+
+  // 档案显示名：优先宿主的 displayName，取不到时回退档案名；空值表示跟随宿主激活档案。
+  const profileLabel = (name) => {
+    const key = String(name || "").trim();
+    if (!key) return t("fx.settings.apiProfileFollow");
+    const found = (dialog.apiProfiles || []).find((item) => item.profileName === key);
+    return found?.displayName || key;
+  };
+
+  // 切换作用域时先暂存当前作用域的执行字段，再优先回填目标作用域的草稿：用户在某个
+  // 作用域里改了 API 供应商或并行上限还没保存就切走，切回时不能退回打开弹窗时的快照值。
+  // 只有目标作用域还没有草稿时，才用快照值初始化（项目未覆盖的字段展示全局值，避免看到空值）。
+  const switchScope = (nextScope) => {
+    if (nextScope === scope) return;
+    const drafts = dialog.scopeDrafts && typeof dialog.scopeDrafts === "object" ? dialog.scopeDrafts : {};
+    const draft = drafts[nextScope];
+    const toProject = nextScope === "project";
+    engine.updateDialog({
+      settingsScope: nextScope,
+      // 暂存与回填写在同一次 patch 里：updateDialog 是浅合并，分两次写会互相覆盖。
+      scopeDrafts: {
+        ...drafts,
+        [scope]: { parallelLimit: dialog.parallelLimit, apiProfile: dialog.apiProfile },
+      },
+      // 草稿保留原始表单值（含空串表示「跟随全局」），因此按类型判断而不是按真值判断。
+      parallelLimit:
+        draft && typeof draft.parallelLimit !== "undefined"
+          ? draft.parallelLimit
+          : toProject
+            ? projectParallelLimit ?? globalParallelLimit
+            : globalParallelLimit,
+      apiProfile:
+        draft && typeof draft.apiProfile === "string"
+          ? draft.apiProfile
+          : toProject
+            ? projectApiProfile ?? globalApiProfile
+            : globalApiProfile,
+    });
+  };
 
   // 名称行与常显说明：说明常驻可见，键盘、触屏与读屏用户无需悬停即可读到。
   const nameRow = (label, hint) =>
@@ -1208,6 +1260,111 @@ function SettingsDialog({ dialog, engine, api, t }) {
       "section",
       { className: "fx-settings-section" },
       h("div", { className: "fx-settings-section-title" }, t("fx.settings.groupExecution")),
+      // 项目执行覆盖读取失败：生效值已回退到全局默认，必须说明原因，
+      // 否则用户会以为项目独立设置仍然生效。
+      dialog.overrideUnavailable
+        ? h(
+            "div",
+            { className: "fx-warn" },
+            t("fx.settings.overrideUnavailable", {
+              error: dialog.overrideError || "-",
+              key: dialog.overrideErrorKey || "-",
+            }),
+          )
+        : null,
+      // 执行作用域：只有 API 供应商与并行上限可按项目覆盖，其它设置仍全局共享。
+      h(
+        "div",
+        { className: "fx-settings-scope" },
+        h(
+          "div",
+          { className: "fx-setting-head" },
+          h("span", { className: "fx-setting-name" }, t("fx.settings.scope")),
+          h(
+            "div",
+            {
+              className: "fx-segment",
+              role: "radiogroup",
+              "aria-label": t("fx.settings.scope"),
+            },
+            [
+              { id: "global", label: t("fx.settings.scopeGlobal") },
+              { id: "project", label: t("fx.settings.scopeProject") },
+            ].map((item) =>
+              h(
+                "label",
+                {
+                  className: `fx-segment-item ${scope === item.id ? "is-active" : ""}`,
+                  key: item.id,
+                },
+                h("input", {
+                  type: "radio",
+                  name: "fx-settings-scope",
+                  checked: scope === item.id,
+                  onChange: () => switchScope(item.id),
+                }),
+                h("span", null, item.label),
+              ),
+            ),
+          ),
+        ),
+        h("span", { className: "fx-hint" }, t("fx.settings.scopeHint")),
+        h(
+          "span",
+          { className: "fx-hint fx-settings-scope-effective" },
+          // 项目覆盖读取失败时生效值就是全局默认：在生效值处直接说明，
+          // 不能让用户按「当前生效」的常规文案误以为项目独立设置仍然有效。
+          dialog.overrideUnavailable
+            ? t("fx.settings.scopeEffectiveUnavailable", {
+                profile: profileLabel(dialog.effectiveApiProfile),
+                count: dialog.effectiveParallelLimit ?? globalParallelLimit,
+              })
+            : t("fx.settings.scopeEffective", {
+                profile: profileLabel(dialog.effectiveApiProfile),
+                count: dialog.effectiveParallelLimit ?? globalParallelLimit,
+              }),
+        ),
+        // 全局作用域下说明项目侧状态：已有覆盖只提示「改的是全局默认」，没有覆盖则说明沿用全局。
+        // 读取失败已由顶部告警说明原因，这里不再提示「尚未设置独立参数」以免与事实矛盾。
+        scope === "global" && !dialog.overrideUnavailable
+          ? h(
+              "span",
+              { className: "fx-hint" },
+              dialog.hasProjectOverride
+                ? t("fx.settings.scopeGlobalActive")
+                : t("fx.settings.scopeProjectNone"),
+            )
+          : null,
+        // 清除入口只在项目作用域且确有覆盖时出现：清除后回到完全跟随全局默认。
+        scope === "project" && dialog.hasProjectOverride
+          ? h(
+              "div",
+              { className: "fx-settings-scope-actions" },
+              h(
+                "button",
+                {
+                  type: "button",
+                  className: "fx-btn small",
+                  disabled: busy,
+                  onClick: async () => {
+                    setBusy(true);
+                    // 重试前清掉上一轮的失败说明，与保存按钮重试时的口径一致。
+                    engine.updateDialog({ error: "" });
+                    try {
+                      await engine.clearProjectExecutionOverride();
+                    } catch (error) {
+                      // 引擎出现未预期异常时也要在弹窗内留痕，避免点击毫无反馈。
+                      engine.updateDialog({ error: String(error?.message || error) });
+                    } finally {
+                      setBusy(false);
+                    }
+                  },
+                },
+                t("fx.settings.projectOverrideClear"),
+              ),
+            )
+          : null,
+      ),
       h(
         "div",
         { className: "fx-settings-card" },
@@ -1293,6 +1450,10 @@ function SettingsDialog({ dialog, engine, api, t }) {
       "section",
       { className: "fx-settings-section" },
       h("div", { className: "fx-settings-section-title" }, t("fx.settings.severityScope")),
+      // 该分组不接受项目覆盖：项目作用域下必须写明写入范围，避免误以为只影响本项目。
+      scope === "project"
+        ? h("div", { className: "fx-hint" }, t("fx.settings.groupGlobalNote"))
+        : null,
       // 修复范围说明常显在分组标题下方：不依赖悬停即可读取。
       h("div", { className: "fx-hint" }, t("fx.settings.severityScopeHint")),
       h(
@@ -1326,6 +1487,10 @@ function SettingsDialog({ dialog, engine, api, t }) {
       "section",
       { className: "fx-settings-section" },
       h("div", { className: "fx-settings-section-title" }, t("fx.settings.groupAutomation")),
+      // 自动化开关一律写全局默认：项目作用域下同样提示，避免误以为只改本项目。
+      scope === "project"
+        ? h("div", { className: "fx-hint" }, t("fx.settings.groupGlobalNote"))
+        : null,
       h(
         "div",
         { className: "fx-settings-card" },

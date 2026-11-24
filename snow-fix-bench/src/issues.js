@@ -464,6 +464,28 @@ function restoreFixingIssuesForConversations(issues, conversationIds) {
   );
 }
 
+// 换绑会话：把本批仍处于修复中的占位从旧会话改写到新会话。
+// 只认 status === fixing 且 fix.conversationId 命中 fromId 的条目，避免把已定论条目
+// 改成新会话归属；ids 非空时再按本批白名单收窄，避免误改其它会话的占位。
+// 返回 changes 供写盘失败时逐条回收各自的旧 id。
+function rebindFixingIssues(issues, ids, fromId, toId) {
+  const from = String(fromId || "");
+  const next = String(toId || "");
+  const list = Array.isArray(issues) ? issues : [];
+  if (!from || !next || from === next) return { issues: list, changes: [] };
+  const targets = new Set((Array.isArray(ids) ? ids : []).map(String).filter(Boolean));
+  const changes = [];
+  const rebased = list.map((issue) => {
+    if (issue?.status !== ISSUE_STATUS.fixing) return issue;
+    if (!issue.fix || typeof issue.fix !== "object") return issue;
+    if (String(issue.fix.conversationId || "") !== from) return issue;
+    if (targets.size && !targets.has(String(issue.id))) return issue;
+    changes.push({ issueId: issue.id, from });
+    return { ...issue, fix: { ...issue.fix, conversationId: next }, updatedAt: nowMs() };
+  });
+  return { issues: rebased, changes };
+}
+
 // 归档时记录来源状态：只允许可恢复的业务状态，避免把瞬态修复中写回。
 const ARCHIVABLE_FROM = new Set([ISSUE_STATUS.open, ISSUE_STATUS.fixed, ISSUE_STATUS.notFound]);
 
@@ -1151,6 +1173,7 @@ export {
   markIssuesFixing,
   restoreFixingIssues,
   restoreFixingIssuesForConversations,
+  rebindFixingIssues,
   archiveIssueRecord,
   restoreIssueRecord,
   removeIssues,
