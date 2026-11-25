@@ -262,7 +262,7 @@ var zh_CN_default = {
   "project.rescan": "重新扫描",
   "project.dockerfiles": "Dockerfile",
   "project.composeFiles": "Compose 文件",
-  "project.empty": "项目里没有找到 Dockerfile 或 compose 文件",
+  "project.empty": "这个项目还没有扫描到 Dockerfile 或 compose 文件",
   "project.emptyHint": "扫描不到的 Dockerfile 可以在「运行配置」弹窗里手动添加路径",
   "project.build": "构建",
   "project.building": "构建中…",
@@ -271,6 +271,7 @@ var zh_CN_default = {
   "project.buildRunStarted": "已开始构建并运行 {{tag}}",
   "project.config": "配置",
   "project.runConfigs": "运行配置",
+  "project.runConfigsHint": "每个 Dockerfile 一份配置，保存后在项目页一键构建运行",
   "project.configDockerfile": "Dockerfile",
   "project.buildArgsAdd": "添加参数",
   "project.removeArg": "移除该参数",
@@ -279,11 +280,12 @@ var zh_CN_default = {
   "project.configName": "配置名称",
   "project.configServer": "服务器",
   "project.serverLocal": "本机",
-  "project.serverHint": "构建与运行都在选中的服务器上执行，本插件不操作本机 Docker",
+  "project.serverHint": "构建和运行都在所选服务器上执行，本机不用装 Docker",
   "project.needServer": "请选择一台远程服务器：本插件只通过 SSH 操作远程 Docker",
   "project.sectionBuild": "构建",
   "project.sectionRun": "运行",
-  "project.modify": "修改",
+  "project.modifyOptions": "更多参数",
+  "project.modifyOptionsHint": "勾选后这些参数才会出现在下面",
   "project.option.platform": "目标平台",
   "project.option.buildArgs": "构建参数",
   "project.option.noCache": "不使用缓存",
@@ -359,6 +361,38 @@ var zh_CN_default = {
   "project.portInvalid": "端口必须是 1-65535 之间的数字",
   "project.mountHostInvalid": "绑定挂载的主机路径必须是服务器上的绝对路径（以 / 开头），例如 /data/app",
   "project.mountTargetInvalid": "绑定挂载的容器路径必须以 / 开头",
+  "project.envSecretHintShort": "敏感值会以 -e 参数进入远端命令行与进程表；私钥、证书建议改用只读挂载或 --env-file。",
+  "project.preBuildEnvEmptyHint": "前置构建在本机执行，这些值只写进本机子进程的环境块，不进入远端命令行，也不走 -e；例如 NODE_ENV=production。",
+  "project.preBuildEnvSecretHint": "这些值只写进本机构建子进程的环境块，不会出现在远端命令行与进程表里；环境块有长度上限，私钥、证书这类大段内容请改用文件挂载传入。",
+  "project.envCount": "{{count}} 项",
+  "project.envUsageBytes": "已用 {{used}} / {{max}} KB",
+  "project.envUsageChars": "合计 {{used}} / {{max}} 字符",
+  "project.envSummary": "{{count}} 项 · {{keys}}",
+  "project.envAddRow": "添加变量",
+  "project.envKeyPlaceholder": "名称，如 LANG",
+  "project.envValuePlaceholder": "值（可留空）",
+  "project.envKeyRule": "名称区分大小写，值可以留空",
+  "project.envChars": "{{count}} / {{max}} 字符",
+  "project.envDuplicate": "名称重复，运行时只有最后一条生效",
+  "project.envReveal": "显示值",
+  "project.envHide": "隐藏值",
+  "project.envUndo": "已移除 {{key}}",
+  "project.envUndoAction": "撤销",
+  "project.envEmptyTitle": "还没有环境变量",
+  "project.envEmptyHint": "运行容器时以 -e 传入，例如 LANG=C.UTF-8。把 .env 里的多行内容直接粘到名称框，可以一次导入多条。",
+  "project.envImport": "批量导入",
+  "project.envImportTitle": "粘贴环境变量",
+  "project.envImportAction": "导入",
+  "project.envImportHint": "每行一条 KEY=VALUE。支持 export 写法，也可以直接粘贴 docker run 命令里的 -e 部分；# 开头的行会被忽略。不带等号的 -e KEY 表示从环境继承，这里不导入；需要继承请写进运行选项。",
+  "project.envImportPlaceholder": "LANG=C.UTF-8\nTZ=Asia/Shanghai\nDB_PASSWORD=my-password",
+  "project.envImportCount": "识别到 {{count}} 条",
+  "project.envImportIgnored": "忽略 {{count}} 行",
+  "project.envImportIgnoredLines": "忽略 {{count}} 行：{{lines}}",
+  "project.envImportInherit": "{{count}} 条继承写法（-e KEY）未导入：{{names}}",
+  "project.envImportNone": "没有识别到有效变量。名称需以字母或下划线开头，只含字母、数字与下划线。",
+  "project.envImported": "已导入 {{count}} 条",
+  "project.envImportedUpdated": "已导入 {{count}} 条，覆盖 {{updated}} 条同名变量",
+  "project.envDiscardWarn": "还有未应用的修改，再按一次 Esc 放弃",
   "project.envInvalid": "环境变量名只能包含字母、数字与下划线，且不能以数字开头",
   "project.envValueTooLong": "环境变量 {{key}} 的值有 {{count}} 个字符，超过单值上限 {{max}}；请精简内容或改用文件挂载",
   "project.envTotalTooLarge": "环境变量的总值约 {{count}} KB，超过单份配置上限 {{max}} KB；请精简变量，或把大段内容放到服务器上的文件里",
@@ -366,14 +400,34 @@ var zh_CN_default = {
   "project.preBuildEnvTotalTooLarge": "前置构建环境变量的合计长度 {{count}} 个字符（含变量名与分隔符），超过合计上限 {{max}}；请精简变量，或改用文件挂载传入",
   "project.preBuildEnvTotalCount": "合计 {{count}} / {{max}} 字符（含变量名）",
   "project.dockerfileInvalid": "Dockerfile 路径必须是绝对路径，且文件名形如 Dockerfile、Dockerfile.dev",
+  "project.dockerfileConflict": "目标路径 {{path}} 已经是左栏里的另一份配置，继续保存会覆盖它的已保存配置与草稿；请改回原路径，或先切换到那一项处理完再保存",
   "project.configNoCache": "不使用缓存",
   "project.configPull": "构建前拉取最新基础镜像",
   "project.configLoading": "正在读取已保存的配置…",
-  "project.configApply": "应用",
-  "project.configSave": "保存配置",
+  "project.configApply": "保存",
+  "project.editorApply": "确定",
+  "project.configSave": "保存并关闭",
+  "project.configSaving": "保存中…",
+  "project.applyHint": "保存但不关闭，可以接着改下一份",
+  "project.saveCloseHint": "保存并关闭（Ctrl+Enter）",
+  "project.savedFlash": "已保存",
+  "project.unsavedNote": "有未保存的修改",
+  "project.unsavedBadge": "未保存",
+  "project.discardWarn": "有未保存的修改，再点一次关闭",
+  "project.saveOthersWarn": "已保存当前这份配置；另有 {{count}} 份配置还有未保存的修改，关闭会丢弃，再点一次「保存并关闭」确认",
+  "project.lockedHint": "读取完成前不能编辑",
+  "project.configLoadFailed": "已保存的配置没能读取出来",
+  "project.configLoadFailedHint": "读取失败期间保持锁定，避免空表单覆盖已存配置",
+  "project.configReload": "重新读取",
+  "project.configReloadHint": "再读一次已保存的配置",
+  "project.needTagInline": "镜像标记不能为空，例如 app:latest",
+  "project.listFilter": "筛选 Dockerfile",
+  "project.listEmptyFiltered": "没有匹配的 Dockerfile，清空筛选可看全部",
+  "project.emptyGuideTitle": "先选一个 Dockerfile",
+  "project.noFilesTitle": "还没有 Dockerfile",
   "project.configSaveBuild": "保存并构建",
   "project.configDelete": "删除配置",
-  "project.configDeleteConfirm": "再点一次删除",
+  "project.configDeleteConfirm": "再点一次确认删除",
   "project.configSaved": "运行配置已保存",
   "project.configDeleted": "运行配置已删除",
   "project.uploadNone": "不上传",
@@ -637,7 +691,7 @@ var zh_TW_default = {
   "project.rescan": "重新掃描",
   "project.dockerfiles": "Dockerfile",
   "project.composeFiles": "Compose 檔案",
-  "project.empty": "專案裡沒有找到 Dockerfile 或 compose 檔案",
+  "project.empty": "這個專案還沒有掃描到 Dockerfile 或 compose 檔案",
   "project.emptyHint": "掃描不到的 Dockerfile 可以在「執行設定」彈窗裡手動新增路徑",
   "project.build": "建置",
   "project.building": "建置中…",
@@ -646,6 +700,7 @@ var zh_TW_default = {
   "project.buildRunStarted": "已開始建置並執行 {{tag}}",
   "project.config": "設定",
   "project.runConfigs": "執行設定",
+  "project.runConfigsHint": "每個 Dockerfile 一份設定，儲存後可在專案頁一鍵建置執行",
   "project.configDockerfile": "Dockerfile",
   "project.buildArgsAdd": "新增參數",
   "project.removeArg": "移除該參數",
@@ -654,11 +709,12 @@ var zh_TW_default = {
   "project.configName": "設定名稱",
   "project.configServer": "伺服器",
   "project.serverLocal": "本機",
-  "project.serverHint": "建置與執行都在選取的伺服器上執行，本外掛不操作本機 Docker",
+  "project.serverHint": "建置和執行都在所選伺服器上執行，本機不用裝 Docker",
   "project.needServer": "請選擇一台遠端伺服器：本外掛只透過 SSH 操作遠端 Docker",
   "project.sectionBuild": "建置",
   "project.sectionRun": "執行",
-  "project.modify": "修改",
+  "project.modifyOptions": "更多參數",
+  "project.modifyOptionsHint": "勾選後這些參數才會出現在下面",
   "project.option.platform": "目標平台",
   "project.option.buildArgs": "建置參數",
   "project.option.noCache": "不使用快取",
@@ -734,6 +790,38 @@ var zh_TW_default = {
   "project.portInvalid": "連接埠必須是 1-65535 之間的數字",
   "project.mountHostInvalid": "綁定掛載的主機路徑必須是伺服器上的絕對路徑（以 / 開頭），例如 /data/app",
   "project.mountTargetInvalid": "綁定掛載的容器路徑必須以 / 開頭",
+  "project.envSecretHintShort": "敏感值會以 -e 參數進入遠端命令列與程序表；私鑰、憑證建議改用唯讀掛載或 --env-file。",
+  "project.preBuildEnvEmptyHint": "前置建置在本機執行，這些值只寫進本機子程序的環境區塊，不進入遠端命令列，也不走 -e；例如 NODE_ENV=production。",
+  "project.preBuildEnvSecretHint": "這些值只寫進本機建置子程序的環境區塊，不會出現在遠端命令列與程序表裡；環境區塊有長度上限，私鑰、憑證這類大段內容請改用檔案掛載傳入。",
+  "project.envCount": "{{count}} 項",
+  "project.envUsageBytes": "已用 {{used}} / {{max}} KB",
+  "project.envUsageChars": "合計 {{used}} / {{max}} 字元",
+  "project.envSummary": "{{count}} 項 · {{keys}}",
+  "project.envAddRow": "新增變數",
+  "project.envKeyPlaceholder": "名稱，如 LANG",
+  "project.envValuePlaceholder": "值（可留空）",
+  "project.envKeyRule": "名稱區分大小寫，值可以留空",
+  "project.envChars": "{{count}} / {{max}} 字元",
+  "project.envDuplicate": "名稱重複，執行時只有最後一條生效",
+  "project.envReveal": "顯示值",
+  "project.envHide": "隱藏值",
+  "project.envUndo": "已移除 {{key}}",
+  "project.envUndoAction": "復原",
+  "project.envEmptyTitle": "還沒有環境變數",
+  "project.envEmptyHint": "執行容器時以 -e 傳入，例如 LANG=C.UTF-8。把 .env 裡的多行內容直接貼到名稱框，可以一次匯入多條。",
+  "project.envImport": "批次匯入",
+  "project.envImportTitle": "貼上環境變數",
+  "project.envImportAction": "匯入",
+  "project.envImportHint": "每行一條 KEY=VALUE。支援 export 寫法，也可直接貼上 docker run 命令裡的 -e 部分；# 開頭的行會被忽略。不帶等號的 -e KEY 表示從環境繼承，這裡不匯入；需要繼承請寫進執行選項。",
+  "project.envImportPlaceholder": "LANG=C.UTF-8\nTZ=Asia/Shanghai\nDB_PASSWORD=my-password",
+  "project.envImportCount": "辨識到 {{count}} 條",
+  "project.envImportIgnored": "忽略 {{count}} 行",
+  "project.envImportIgnoredLines": "忽略 {{count}} 行：{{lines}}",
+  "project.envImportInherit": "{{count}} 條繼承寫法（-e KEY）未匯入：{{names}}",
+  "project.envImportNone": "沒有辨識到有效變數。名稱需以字母或底線開頭，只含字母、數字與底線。",
+  "project.envImported": "已匯入 {{count}} 條",
+  "project.envImportedUpdated": "已匯入 {{count}} 條，覆蓋 {{updated}} 條同名變數",
+  "project.envDiscardWarn": "還有未套用的修改，再按一次 Esc 放棄",
   "project.envInvalid": "環境變數名稱只能包含字母、數字與底線，且不能以數字開頭",
   "project.envValueTooLong": "環境變數 {{key}} 的值有 {{count}} 個字元，超過單值上限 {{max}}；請精簡內容或改用檔案掛載",
   "project.envTotalTooLarge": "環境變數的總值約 {{count}} KB，超過單份設定上限 {{max}} KB；請精簡變數，或把大段內容放到伺服器上的檔案裡",
@@ -741,14 +829,34 @@ var zh_TW_default = {
   "project.preBuildEnvTotalTooLarge": "前置建置環境變數的合計長度 {{count}} 個字元（含變數名稱與分隔符），超過合計上限 {{max}}；請精簡變數，或改用檔案掛載傳入",
   "project.preBuildEnvTotalCount": "合計 {{count}} / {{max}} 字元（含變數名稱）",
   "project.dockerfileInvalid": "Dockerfile 路徑必須是絕對路徑，且檔名形如 Dockerfile、Dockerfile.dev",
+  "project.dockerfileConflict": "目標路徑 {{path}} 已經是左欄裡的另一份設定，繼續儲存會覆蓋它的已儲存設定與草稿；請改回原路徑，或先切換到該項處理完再儲存",
   "project.configNoCache": "不使用快取",
   "project.configPull": "建置前拉取最新基礎映像",
   "project.configLoading": "正在讀取已儲存的設定…",
-  "project.configApply": "套用",
-  "project.configSave": "儲存設定",
+  "project.configApply": "儲存",
+  "project.editorApply": "確定",
+  "project.configSave": "儲存並關閉",
+  "project.configSaving": "儲存中…",
+  "project.applyHint": "儲存但不關閉，可接著改下一份",
+  "project.saveCloseHint": "儲存並關閉（Ctrl+Enter）",
+  "project.savedFlash": "已儲存",
+  "project.unsavedNote": "有未儲存的修改",
+  "project.unsavedBadge": "未儲存",
+  "project.discardWarn": "有未儲存的修改，再點一次關閉",
+  "project.saveOthersWarn": "已儲存目前這份設定；另有 {{count}} 份設定還有未儲存的修改，關閉會丟棄，再點一次「儲存並關閉」確認",
+  "project.lockedHint": "讀取完成前不能編輯",
+  "project.configLoadFailed": "已儲存的設定無法讀取",
+  "project.configLoadFailedHint": "讀取失敗期間保持鎖定，避免空白表單覆蓋已存設定",
+  "project.configReload": "重新讀取",
+  "project.configReloadHint": "再讀一次已儲存的設定",
+  "project.needTagInline": "映像標籤不能為空，例如 app:latest",
+  "project.listFilter": "篩選 Dockerfile",
+  "project.listEmptyFiltered": "沒有符合的 Dockerfile，清除篩選可看全部",
+  "project.emptyGuideTitle": "先選一個 Dockerfile",
+  "project.noFilesTitle": "還沒有 Dockerfile",
   "project.configSaveBuild": "儲存並建置",
   "project.configDelete": "刪除設定",
-  "project.configDeleteConfirm": "再點一次刪除",
+  "project.configDeleteConfirm": "再點一次確認刪除",
   "project.configSaved": "執行設定已儲存",
   "project.configDeleted": "執行設定已刪除",
   "project.uploadNone": "不上傳",
@@ -1013,7 +1121,7 @@ var en_default = {
   "project.rescan": "Rescan",
   "project.dockerfiles": "Dockerfiles",
   "project.composeFiles": "Compose files",
-  "project.empty": "No Dockerfile or compose file found in this project",
+  "project.empty": "No Dockerfile or compose file has been found in this project yet",
   "project.emptyHint": "Add the path of an unscanned Dockerfile inside the Run configurations dialog",
   "project.build": "Build",
   "project.building": "Building…",
@@ -1022,6 +1130,7 @@ var en_default = {
   "project.buildRunStarted": "Building and running {{tag}}",
   "project.config": "Configuration",
   "project.runConfigs": "Run configurations",
+  "project.runConfigsHint": "One config per Dockerfile; save it, then build and run from the project page",
   "project.configDockerfile": "Dockerfile",
   "project.buildArgsAdd": "Add argument",
   "project.removeArg": "Remove this argument",
@@ -1030,11 +1139,12 @@ var en_default = {
   "project.configName": "Name",
   "project.configServer": "Server",
   "project.serverLocal": "Local machine",
-  "project.serverHint": "Build and run execute on the selected server; this plugin never touches a local Docker",
+  "project.serverHint": "Builds and runs happen on the selected server, so no local Docker is needed",
   "project.needServer": "Choose a remote server: this plugin only works with remote Docker over SSH",
   "project.sectionBuild": "Build",
   "project.sectionRun": "Run",
-  "project.modify": "Modify",
+  "project.modifyOptions": "More options",
+  "project.modifyOptionsHint": "Checked options show up as fields below",
   "project.option.platform": "Target platform",
   "project.option.buildArgs": "Build arguments",
   "project.option.noCache": "Do not use cache",
@@ -1110,6 +1220,38 @@ var en_default = {
   "project.portInvalid": "Ports must be numbers between 1 and 65535",
   "project.mountHostInvalid": "The host path of a bind mount must be an absolute path on the server (starting with /), e.g. /data/app",
   "project.mountTargetInvalid": "The container path of a bind mount must start with /",
+  "project.envSecretHintShort": "Sensitive values reach the remote command line and process table via -e; for private keys and certificates prefer a read-only mount or --env-file.",
+  "project.preBuildEnvEmptyHint": "The pre-build step runs locally, so these values only go into the local child process environment block, never the remote command line or -e; e.g. NODE_ENV=production.",
+  "project.preBuildEnvSecretHint": "These values only go into the local pre-build child process environment block and never appear in the remote command line or process table; the environment block has a length limit, so pass private keys and certificates as mounted files.",
+  "project.envCount": "{{count}} item(s)",
+  "project.envUsageBytes": "{{used}} / {{max}} KB used",
+  "project.envUsageChars": "{{used}} / {{max}} chars total",
+  "project.envSummary": "{{count}} item(s) · {{keys}}",
+  "project.envAddRow": "Add variable",
+  "project.envKeyPlaceholder": "Name, e.g. LANG",
+  "project.envValuePlaceholder": "Value (optional)",
+  "project.envKeyRule": "Names are case-sensitive; values may be empty",
+  "project.envChars": "{{count}} / {{max}} chars",
+  "project.envDuplicate": "Duplicate name; only the last one takes effect at run time",
+  "project.envReveal": "Show value",
+  "project.envHide": "Hide value",
+  "project.envUndo": "Removed {{key}}",
+  "project.envUndoAction": "Undo",
+  "project.envEmptyTitle": "No environment variables yet",
+  "project.envEmptyHint": "Passed to the container with -e, for example LANG=C.UTF-8. Paste multiple .env lines into the name field to import them at once.",
+  "project.envImport": "Bulk import",
+  "project.envImportTitle": "Paste environment variables",
+  "project.envImportAction": "Import",
+  "project.envImportHint": "One KEY=VALUE per line. export prefixes and the -e part of a docker run command are accepted; lines starting with # are ignored. A bare -e KEY means inherit from the environment and is not imported here; put it in run options if you need it.",
+  "project.envImportPlaceholder": "LANG=C.UTF-8\nTZ=Asia/Shanghai\nDB_PASSWORD=my-password",
+  "project.envImportCount": "{{count}} line(s) recognized",
+  "project.envImportIgnored": "{{count}} line(s) ignored",
+  "project.envImportIgnoredLines": "{{count}} line(s) ignored: {{lines}}",
+  "project.envImportInherit": "{{count}} inherit form(s) (-e KEY) not imported: {{names}}",
+  "project.envImportNone": "No valid variable found. Names must start with a letter or underscore and contain only letters, digits and underscores.",
+  "project.envImported": "Imported {{count}} item(s)",
+  "project.envImportedUpdated": "Imported {{count}} item(s), overwrote {{updated}} existing name(s)",
+  "project.envDiscardWarn": "Unsaved changes; press Esc again to discard",
   "project.envInvalid": "Variable names may contain letters, digits and underscores, and must not start with a digit",
   "project.envValueTooLong": "The value of {{key}} is {{count}} characters, over the {{max}} character limit; trim it or pass it as a mounted file",
   "project.envTotalTooLarge": "Environment variables total about {{count}} KB, over the {{max}} KB limit per configuration; trim them or put large content in a file on the server",
@@ -1117,14 +1259,34 @@ var en_default = {
   "project.preBuildEnvTotalTooLarge": "Pre-build environment variables total {{count}} characters including names and separators, over the combined limit of {{max}}; trim them or pass them as a mounted file",
   "project.preBuildEnvTotalCount": "Total {{count}} / {{max}} characters including names",
   "project.dockerfileInvalid": "The Dockerfile path must be absolute and named like Dockerfile or Dockerfile.dev",
+  "project.dockerfileConflict": "Target path {{path}} already belongs to another configuration in the list; saving would overwrite its saved settings and draft. Restore the original path, or open that entry and finish it first",
   "project.configNoCache": "Do not use cache",
   "project.configPull": "Always pull newer base image",
   "project.configLoading": "Loading the saved configuration...",
-  "project.configApply": "Apply",
-  "project.configSave": "Save configuration",
+  "project.configApply": "Save",
+  "project.editorApply": "OK",
+  "project.configSave": "Save and close",
+  "project.configSaving": "Saving…",
+  "project.applyHint": "Save without closing so you can edit the next one",
+  "project.saveCloseHint": "Save and close (Ctrl+Enter)",
+  "project.savedFlash": "Saved",
+  "project.unsavedNote": "Unsaved changes",
+  "project.unsavedBadge": "Unsaved",
+  "project.discardWarn": "Unsaved changes; click close again to discard",
+  "project.saveOthersWarn": "Current config saved. {{count}} other config(s) still have unsaved changes that will be lost on close; click Save and close again to confirm",
+  "project.lockedHint": "Editing unlocks once loading finishes",
+  "project.configLoadFailed": "Could not read the saved configuration",
+  "project.configLoadFailedHint": "Editing stays locked after a failed read so an empty form cannot overwrite the saved configuration",
+  "project.configReload": "Reload",
+  "project.configReloadHint": "Read the saved configuration again",
+  "project.needTagInline": "Image tag is required, e.g. app:latest",
+  "project.listFilter": "Filter Dockerfiles",
+  "project.listEmptyFiltered": "No Dockerfile matches; clear the filter to see all",
+  "project.emptyGuideTitle": "Pick a Dockerfile first",
+  "project.noFilesTitle": "No Dockerfile yet",
   "project.configSaveBuild": "Save and build",
   "project.configDelete": "Delete configuration",
-  "project.configDeleteConfirm": "Click again to delete",
+  "project.configDeleteConfirm": "Click again to confirm",
   "project.configSaved": "Run configuration saved",
   "project.configDeleted": "Run configuration deleted",
   "project.uploadNone": "Do not upload",
@@ -1466,10 +1628,11 @@ function createRpc(api, { log = () => {
 }
 
 // src/panel/ui.jsx
-function Btn({ children, onClick, disabled, variant, size, title, type = "button" }) {
+function Btn({ children, onClick, disabled, variant, size, title, type = "button", ...rest }) {
   return /* @__PURE__ */ h(
     "button",
     {
+      ...rest,
       type,
       className: "dk-btn",
       "data-variant": variant,
@@ -2873,6 +3036,31 @@ var draftToConfig = (draft) => {
 
 // src/panel/configdialog.jsx
 var CONFIRM_MS = 4e3;
+var FOCUSABLE_SELECTOR = "button:not(:disabled), [href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex='-1'])";
+function trapTabKey(event, container) {
+  if (!container) return false;
+  const nodes = container.querySelectorAll(FOCUSABLE_SELECTOR);
+  if (!nodes.length) return false;
+  const first = nodes[0];
+  const last = nodes[nodes.length - 1];
+  const active = document.activeElement;
+  if (!container.contains(active)) {
+    event.preventDefault();
+    (event.shiftKey ? last : first).focus();
+    return true;
+  }
+  if (!event.shiftKey && active === last) {
+    event.preventDefault();
+    first.focus();
+    return true;
+  }
+  if (event.shiftKey && active === first) {
+    event.preventDefault();
+    last.focus();
+    return true;
+  }
+  return false;
+}
 var CloseIcon = () => /* @__PURE__ */ h("svg", { width: "11", height: "11", viewBox: "0 0 24 24", fill: "none", "aria-hidden": "true" }, /* @__PURE__ */ h("path", { d: "M6 6l12 12M18 6L6 18", stroke: "currentColor", strokeWidth: "2", strokeLinecap: "round" }));
 var FolderIcon = () => /* @__PURE__ */ h("svg", { width: "12", height: "12", viewBox: "0 0 24 24", fill: "none", "aria-hidden": "true" }, /* @__PURE__ */ h(
   "path",
@@ -2934,6 +3122,7 @@ function OptionMenu({ t, ids, selected, onToggle, disabled }) {
   const menuRef = React.useRef(null);
   const ITEM_HEIGHT = 26;
   const MENU_MAX = 260;
+  const count = ids.filter((id) => selected.includes(id)).length;
   const place = React.useCallback(() => {
     const rect = rootRef.current?.getBoundingClientRect();
     if (!rect) return;
@@ -2972,12 +3161,516 @@ function OptionMenu({ t, ids, selected, onToggle, disabled }) {
       window.removeEventListener("resize", place);
     };
   }, [open, place]);
-  return /* @__PURE__ */ h("div", { className: "dk-option-anchor", ref: rootRef }, /* @__PURE__ */ h(Btn, { size: "sm", variant: "ghost", disabled: disabled === true, onClick: () => setOpen((value) => !value) }, t("project.modify")), open && coords ? /* @__PURE__ */ h("div", { className: "dk-option-menu", ref: menuRef, style: coords, role: "menu" }, ids.map((id) => /* @__PURE__ */ h("label", { className: "dk-option-item", key: id }, /* @__PURE__ */ h("input", { type: "checkbox", checked: selected.includes(id), onChange: () => onToggle(id) }), /* @__PURE__ */ h("span", null, t(`project.option.${id}`))))) : null);
+  return /* @__PURE__ */ h(
+    "div",
+    {
+      className: "dk-option-anchor",
+      ref: rootRef,
+      onKeyDown: (event) => {
+        if (event.key === "Escape" && open) {
+          event.stopPropagation();
+          setOpen(false);
+        }
+      }
+    },
+    /* @__PURE__ */ h(
+      Btn,
+      {
+        size: "sm",
+        variant: "ghost",
+        disabled: disabled === true,
+        "aria-haspopup": "true",
+        "aria-expanded": open ? "true" : "false",
+        title: t("project.modifyOptionsHint"),
+        onClick: () => setOpen((value) => !value)
+      },
+      /* @__PURE__ */ h("span", null, t("project.modifyOptions")),
+      /* @__PURE__ */ h("span", { className: "dk-count-pill", "data-empty": count ? "0" : "1", "aria-hidden": "true" }, count)
+    ),
+    open && coords ? /* @__PURE__ */ h("div", { className: "dk-option-menu", ref: menuRef, style: coords, role: "menu" }, ids.map((id) => /* @__PURE__ */ h("label", { className: "dk-option-item", key: id }, /* @__PURE__ */ h("input", { type: "checkbox", checked: selected.includes(id), onChange: () => onToggle(id) }), /* @__PURE__ */ h("span", null, t(`project.option.${id}`))))) : null
+  );
 }
 var summarize = (rows, mapper) => {
   const parts = (rows || []).map(mapper).filter(Boolean);
   return parts.join(", ");
 };
+var ListIcon = () => /* @__PURE__ */ h("svg", { width: "12", height: "12", viewBox: "0 0 24 24", fill: "none", "aria-hidden": "true" }, /* @__PURE__ */ h("path", { d: "M8 7h12M8 12h12M8 17h12", stroke: "currentColor", strokeWidth: "1.8", strokeLinecap: "round" }), /* @__PURE__ */ h("circle", { cx: "4", cy: "7", r: "1.2", fill: "currentColor" }), /* @__PURE__ */ h("circle", { cx: "4", cy: "12", r: "1.2", fill: "currentColor" }), /* @__PURE__ */ h("circle", { cx: "4", cy: "17", r: "1.2", fill: "currentColor" }));
+var EyeIcon = () => /* @__PURE__ */ h("svg", { width: "12", height: "12", viewBox: "0 0 24 24", fill: "none", "aria-hidden": "true" }, /* @__PURE__ */ h(
+  "path",
+  {
+    d: "M2.6 12S6.1 5.6 12 5.6 21.4 12 21.4 12S17.9 18.4 12 18.4 2.6 12 2.6 12z",
+    stroke: "currentColor",
+    strokeWidth: "1.7",
+    strokeLinejoin: "round"
+  }
+), /* @__PURE__ */ h("circle", { cx: "12", cy: "12", r: "2.6", stroke: "currentColor", strokeWidth: "1.7" }));
+var EyeOffIcon = () => /* @__PURE__ */ h("svg", { width: "12", height: "12", viewBox: "0 0 24 24", fill: "none", "aria-hidden": "true" }, /* @__PURE__ */ h("path", { d: "M4 4l16 16", stroke: "currentColor", strokeWidth: "1.7", strokeLinecap: "round" }), /* @__PURE__ */ h(
+  "path",
+  {
+    d: "M10.6 10.7a2.6 2.6 0 003.6 3.6M7 7.1C4.3 8.9 2.6 12 2.6 12S6.1 18.4 12 18.4c1.4 0 2.7-.4 3.8-1",
+    stroke: "currentColor",
+    strokeWidth: "1.7",
+    strokeLinecap: "round",
+    strokeLinejoin: "round"
+  }
+), /* @__PURE__ */ h(
+  "path",
+  {
+    d: "M9.6 6c.8-.3 1.6-.4 2.4-.4 5.9 0 9.4 6.4 9.4 6.4a18 18 0 01-3 3.7",
+    stroke: "currentColor",
+    strokeWidth: "1.7",
+    strokeLinecap: "round",
+    strokeLinejoin: "round"
+  }
+));
+var looksSecret = (key) => /(?:^|_)(?:PASS|PASSWD|PASSWORD|PWD|SECRET|TOKEN|CREDENTIAL|PRIVATE|KEY)(?:_|$)/i.test(String(key || ""));
+var tokenizeCommand = (text) => {
+  const tokens = [];
+  let buf = "";
+  let quote = "";
+  let started = false;
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i];
+    if (quote) {
+      if (ch === quote) {
+        quote = "";
+        continue;
+      }
+      if (quote === '"' && ch === "\\" && i + 1 < text.length) {
+        const next = text[i + 1];
+        if (next === '"' || next === "\\") {
+          buf += next;
+          i += 1;
+          continue;
+        }
+      }
+      buf += ch;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      started = true;
+      continue;
+    }
+    if (/\s/.test(ch)) {
+      if (started) {
+        tokens.push(buf);
+        buf = "";
+        started = false;
+      }
+      continue;
+    }
+    buf += ch;
+    started = true;
+  }
+  if (quote) return null;
+  if (started) tokens.push(buf);
+  return tokens;
+};
+var ENV_FLAG = /^--?(?:env|e)$/i;
+var ENV_INLINE_FLAG = /^--?(?:env|e)=(.+)$/i;
+var ENV_LINE = /^(?:export\s+)?[A-Za-z_][A-Za-z0-9_]*\s*=/;
+var envValueOpenQuote = (line) => {
+  const text = String(line || "");
+  const eq = text.indexOf("=");
+  if (eq === -1) return "";
+  const value = text.slice(eq + 1).trimStart();
+  return value[0] === '"' || value[0] === "'" ? value[0] : "";
+};
+var startsEntry = (line) => {
+  const body = String(line || "").trim();
+  if (!body || body.startsWith("#")) return true;
+  return ENV_LINE.test(body) || /^--?(?:env|e)(?:\s|=|$)/i.test(body);
+};
+var parseEnvLines = (text) => {
+  const rows = [];
+  const skipped = [];
+  const inherited = [];
+  const pushRow = (assignment, stripQuotes) => {
+    const eq = assignment.indexOf("=");
+    const key = (eq === -1 ? assignment : assignment.slice(0, eq)).trim();
+    let value = eq === -1 ? "" : assignment.slice(eq + 1);
+    if (stripQuotes) {
+      const quoted = value.trim();
+      if (quoted.length > 1 && (quoted[0] === '"' || quoted[0] === "'") && quoted.endsWith(quoted[0])) {
+        value = quoted.slice(1, -1);
+      }
+    }
+    if (!BUILD_ARG_KEY.test(key)) {
+      skipped.push(assignment.trim());
+      return false;
+    }
+    if (eq === -1) {
+      inherited.push(key);
+      return false;
+    }
+    rows.push({ key, value });
+    return true;
+  };
+  const lines = String(text || "").split(/\r?\n/);
+  for (let at = 0; at < lines.length; at += 1) {
+    const line = lines[at].trim();
+    if (!line || line.startsWith("#")) continue;
+    let block = line;
+    let tokens;
+    if (ENV_LINE.test(line) && !envValueOpenQuote(line)) {
+      tokens = [];
+    } else {
+      tokens = tokenizeCommand(block);
+      while (!tokens && at + 1 < lines.length && !startsEntry(lines[at + 1])) {
+        at += 1;
+        block += `
+${lines[at]}`;
+        tokens = tokenizeCommand(block);
+      }
+    }
+    if (!tokens) {
+      skipped.push(block);
+      continue;
+    }
+    if (ENV_LINE.test(block)) {
+      pushRow(block.replace(/^export\s+/i, "").trim(), true);
+      continue;
+    }
+    const before = skipped.length;
+    const beforeInherited = inherited.length;
+    let produced = false;
+    for (let i = 0; i < tokens.length; i += 1) {
+      const token = tokens[i];
+      const inline = token.match(ENV_INLINE_FLAG);
+      if (inline) {
+        if (pushRow(inline[1], false)) produced = true;
+        continue;
+      }
+      if (!ENV_FLAG.test(token)) continue;
+      const next = tokens[i + 1];
+      if (next === void 0 || ENV_FLAG.test(next) || ENV_INLINE_FLAG.test(next)) {
+        skipped.push(token);
+        continue;
+      }
+      i += 1;
+      if (pushRow(next, false)) produced = true;
+    }
+    if (!produced && skipped.length === before && inherited.length === beforeInherited) skipped.push(block);
+  }
+  return { rows, skipped, inherited };
+};
+var describeSkipped = (items) => {
+  const list = (items || []).map((item) => {
+    const flat = String(item || "").replace(/\s*\n\s*/g, " ").trim();
+    if (!flat) return "";
+    return flat.length > 40 ? `${flat.slice(0, 40)}…` : flat;
+  }).filter(Boolean);
+  const head = list.slice(0, 2).join(" / ");
+  return list.length > 2 ? `${head} …` : head;
+};
+var mergeEnvRows = (base, incoming) => {
+  const next = (base || []).map((row) => ({ ...row }));
+  const indexByKey = /* @__PURE__ */ new Map();
+  next.forEach((row, at) => {
+    const key = String(row.key || "").trim();
+    if (key) indexByKey.set(key, at);
+  });
+  let added = 0;
+  let updated = 0;
+  for (const item of incoming) {
+    const at = indexByKey.get(item.key);
+    if (at === void 0) {
+      indexByKey.set(item.key, next.length);
+      next.push({ ...item });
+      added += 1;
+    } else {
+      next[at] = { ...next[at], key: item.key, value: item.value };
+      updated += 1;
+    }
+  }
+  return { next, added, updated };
+};
+function EnvValueField({ t, value, valueMax, masked, onUpdate, onEnter, bindRef }) {
+  const React = getReact();
+  const count = normalizeEnvValue(value).length;
+  const lines = Math.min(4, Math.max(1, String(value).split("\n").length));
+  return /* @__PURE__ */ h("div", { className: "dk-env-value" }, /* @__PURE__ */ h(
+    "textarea",
+    {
+      ref: bindRef,
+      className: masked ? "dk-input dk-env-input dk-env-masked" : "dk-input dk-env-input",
+      rows: 1,
+      wrap: "off",
+      spellCheck: false,
+      "aria-label": t("project.keyValue"),
+      placeholder: t("project.envValuePlaceholder"),
+      value,
+      style: { height: `${lines * 18 + 16}px` },
+      onChange: (event) => onUpdate(event.target.value),
+      onKeyDown: (event) => {
+        if (event.nativeEvent && event.nativeEvent.isComposing) return;
+        if (event.key === "Enter" && !event.shiftKey && !event.ctrlKey && !event.metaKey && !String(value).includes("\n")) {
+          event.preventDefault();
+          onEnter();
+        }
+      }
+    }
+  ), count > valueMax * 0.6 ? /* @__PURE__ */ h("span", { className: "dk-env-count", "data-over": count > valueMax ? "1" : "0" }, t("project.envChars", { count, max: valueMax })) : null);
+}
+function EnvListEditor({
+  t,
+  rows,
+  onChange,
+  valueMax = ENV_VALUE_MAX,
+  totalMax = ENV_TOTAL_MAX,
+  totalUnit = "bytes",
+  emptyHintKey = "project.envEmptyHint",
+  hintKey = "project.envSecretHintShort"
+}) {
+  const React = getReact();
+  const [importOpen, setImportOpen] = React.useState(false);
+  const [importText, setImportText] = React.useState("");
+  const [hidden, setHidden] = React.useState(() => /* @__PURE__ */ new Set());
+  const [undo, setUndo] = React.useState(null);
+  const [flash, setFlash] = React.useState("");
+  const [focusRow, setFocusRow] = React.useState(-1);
+  const keyRefs = React.useRef([]);
+  const valueRefs = React.useRef([]);
+  const undoTimer = React.useRef(null);
+  const flashTimer = React.useRef(null);
+  React.useEffect(
+    () => () => {
+      if (undoTimer.current) clearTimeout(undoTimer.current);
+      if (flashTimer.current) clearTimeout(flashTimer.current);
+    },
+    []
+  );
+  React.useEffect(() => {
+    if (focusRow < 0) return;
+    keyRefs.current[focusRow]?.focus();
+    setFocusRow(-1);
+  }, [focusRow, rows.length]);
+  const say = (text) => {
+    setFlash(text);
+    if (flashTimer.current) clearTimeout(flashTimer.current);
+    flashTimer.current = setTimeout(() => setFlash(""), 5e3);
+  };
+  const patchRow = (index, next) => {
+    onChange(rows.map((row, at) => at === index ? { ...row, ...next } : row));
+  };
+  const toggleHidden = (name) => {
+    setHidden((prev) => {
+      const next = new Set(prev);
+      if (next.has(name)) next.delete(name);
+      else next.add(name);
+      return next;
+    });
+  };
+  const addRow = (after = rows.length - 1) => {
+    const at = Math.min(after + 1, rows.length);
+    const next = [...rows];
+    next.splice(at, 0, { key: "", value: "" });
+    onChange(next);
+    setFocusRow(at);
+    setUndo(null);
+  };
+  const removeRow = (index) => {
+    const removed = rows[index];
+    onChange(rows.filter((_, at) => at !== index));
+    setUndo({ row: removed, index });
+    if (undoTimer.current) clearTimeout(undoTimer.current);
+    undoTimer.current = setTimeout(() => setUndo(null), 6e3);
+  };
+  const undoRemove = () => {
+    if (!undo) return;
+    const next = [...rows];
+    next.splice(Math.min(undo.index, next.length), 0, undo.row);
+    onChange(next);
+    setUndo(null);
+  };
+  const inheritNote = (names) => {
+    const head = names.slice(0, 5).join(", ");
+    return t("project.envImportInherit", {
+      count: names.length,
+      names: names.length > 5 ? `${head}…` : head
+    });
+  };
+  const importRows = (raw) => {
+    const parsed = parseEnvLines(raw);
+    if (!parsed.rows.length) {
+      const notes2 = [t("project.envImportNone")];
+      if (parsed.skipped.length)
+        notes2.push(
+          t("project.envImportIgnoredLines", {
+            count: parsed.skipped.length,
+            lines: describeSkipped(parsed.skipped)
+          })
+        );
+      if (parsed.inherited.length) notes2.push(inheritNote(parsed.inherited));
+      say(notes2.join(" · "));
+      return false;
+    }
+    const merged = mergeEnvRows(rows, parsed.rows);
+    onChange(merged.next);
+    const head = merged.updated ? t("project.envImportedUpdated", { count: merged.added + merged.updated, updated: merged.updated }) : t("project.envImported", { count: merged.added });
+    const notes = [head];
+    if (parsed.skipped.length)
+      notes.push(
+        t("project.envImportIgnoredLines", {
+          count: parsed.skipped.length,
+          lines: describeSkipped(parsed.skipped)
+        })
+      );
+    if (parsed.inherited.length) notes.push(inheritNote(parsed.inherited));
+    say(notes.join(" · "));
+    return true;
+  };
+  const preview = parseEnvLines(importText);
+  const keyCounts = {};
+  rows.forEach((row) => {
+    const key = String(row.key || "").trim();
+    if (key) keyCounts[key] = (keyCounts[key] || 0) + 1;
+  });
+  const used = rows.reduce((sum, row) => {
+    const key = String(row.key || "").trim();
+    const value = normalizeEnvValue(row.value);
+    return totalUnit === "bytes" ? sum + utf8Bytes(key) + utf8Bytes(value) : sum + key.length + value.length + 1;
+  }, 0);
+  const usedText = totalUnit === "bytes" ? Math.round(used / 1024 * 10) / 10 : used;
+  return /* @__PURE__ */ h("div", { className: "dk-env" }, /* @__PURE__ */ h("div", { className: "dk-env-toolbar" }, /* @__PURE__ */ h("span", null, t("project.envCount", { count: rows.length })), /* @__PURE__ */ h("span", { className: "dk-env-sep", "aria-hidden": "true" }, "·"), /* @__PURE__ */ h("span", { className: "dk-env-usage", "data-over": used > totalMax ? "1" : "0" }, totalUnit === "bytes" ? t("project.envUsageBytes", { used: usedText, max: totalMax / 1024 }) : t("project.envUsageChars", { used: usedText, max: totalMax })), flash ? /* @__PURE__ */ h("span", { className: "dk-env-flash", role: "status" }, flash) : null, /* @__PURE__ */ h("span", { className: "dk-head-spacer" }), /* @__PURE__ */ h(
+    Btn,
+    {
+      size: "sm",
+      variant: "ghost",
+      onClick: () => {
+        setImportOpen((open) => !open);
+        setImportText("");
+      }
+    },
+    t("project.envImport")
+  )), importOpen ? /* @__PURE__ */ h("div", { className: "dk-env-import" }, /* @__PURE__ */ h(
+    "textarea",
+    {
+      className: "dk-input dk-textarea",
+      rows: 4,
+      spellCheck: false,
+      autoFocus: true,
+      value: importText,
+      placeholder: t("project.envImportPlaceholder"),
+      "aria-label": t("project.envImportTitle"),
+      onChange: (event) => setImportText(event.target.value),
+      onKeyDown: (event) => {
+        if (event.key === "Escape") {
+          event.stopPropagation();
+          setImportOpen(false);
+        }
+        if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+          event.preventDefault();
+          if (importRows(importText)) {
+            setImportText("");
+            setImportOpen(false);
+          }
+        }
+      }
+    }
+  ), /* @__PURE__ */ h("div", { className: "dk-env-import-foot" }, /* @__PURE__ */ h("span", { className: "dk-note" }, preview.rows.length || preview.inherited.length ? [
+    preview.rows.length ? t("project.envImportCount", { count: preview.rows.length }) : "",
+    preview.skipped.length ? t("project.envImportIgnoredLines", {
+      count: preview.skipped.length,
+      lines: describeSkipped(preview.skipped)
+    }) : "",
+    preview.inherited.length ? inheritNote(preview.inherited) : ""
+  ].filter(Boolean).join(" · ") : t("project.envImportHint")), /* @__PURE__ */ h("span", { className: "dk-head-spacer" }), /* @__PURE__ */ h(Btn, { size: "sm", variant: "ghost", onClick: () => setImportOpen(false) }, t("project.configCancel")), /* @__PURE__ */ h(
+    Btn,
+    {
+      size: "sm",
+      variant: "primary",
+      disabled: preview.rows.length === 0,
+      onClick: () => {
+        if (!importRows(importText)) return;
+        setImportText("");
+        setImportOpen(false);
+      }
+    },
+    t("project.envImportAction")
+  )), /* @__PURE__ */ h("div", { className: "dk-note" }, t("project.envImportHint"))) : null, rows.length === 0 && !importOpen ? /* @__PURE__ */ h("div", { className: "dk-env-empty" }, /* @__PURE__ */ h("div", { className: "dk-env-empty-title" }, t("project.envEmptyTitle")), /* @__PURE__ */ h("div", { className: "dk-note" }, t(emptyHintKey)), /* @__PURE__ */ h("div", { className: "dk-env-empty-actions" }, /* @__PURE__ */ h(Btn, { size: "sm", variant: "primary", onClick: () => addRow() }, `+ ${t("project.envAddRow")}`), /* @__PURE__ */ h(Btn, { size: "sm", variant: "ghost", onClick: () => setImportOpen(true) }, t("project.envImport")))) : null, rows.length ? /* @__PURE__ */ h("div", { className: "dk-env-head", "aria-hidden": "true" }, /* @__PURE__ */ h("span", null, t("project.keyName")), /* @__PURE__ */ h("span", null, t("project.keyValue"))) : null, /* @__PURE__ */ h("div", { className: "dk-env-list" }, rows.map((row, index) => {
+    const keyText = String(row.key || "").trim();
+    const invalid = keyText.length > 0 && !BUILD_ARG_KEY.test(keyText);
+    const duplicate = keyText.length > 0 && keyCounts[keyText] > 1;
+    const secret = looksSecret(keyText);
+    const masked = secret && hidden.has(keyText);
+    return /* @__PURE__ */ h("div", { className: "dk-env-row", key: `env-${index}` }, /* @__PURE__ */ h(
+      "input",
+      {
+        ref: (node) => {
+          keyRefs.current[index] = node;
+        },
+        className: "dk-input dk-env-key",
+        "data-invalid": invalid ? "1" : "0",
+        value: row.key,
+        title: row.key || void 0,
+        placeholder: t("project.envKeyPlaceholder"),
+        spellCheck: false,
+        autoComplete: "off",
+        "aria-label": t("project.keyName"),
+        "aria-invalid": invalid ? "true" : void 0,
+        onChange: (event) => patchRow(index, { key: event.target.value }),
+        onKeyDown: (event) => {
+          if (event.nativeEvent && event.nativeEvent.isComposing) return;
+          if (event.key === "Enter") {
+            event.preventDefault();
+            valueRefs.current[index]?.focus();
+          } else if (event.key === "Backspace" && !row.key && !row.value) {
+            event.preventDefault();
+            removeRow(index);
+          }
+        },
+        onPaste: (event) => {
+          const text = event.clipboardData?.getData("text") || "";
+          if (text.includes("\n") && text.includes("=")) {
+            event.preventDefault();
+            if (!importRows(text)) {
+              setImportText(text);
+              setImportOpen(true);
+            }
+          }
+        }
+      }
+    ), /* @__PURE__ */ h(
+      EnvValueField,
+      {
+        t,
+        value: row.value,
+        valueMax,
+        masked,
+        bindRef: (node) => {
+          valueRefs.current[index] = node;
+        },
+        onUpdate: (value) => patchRow(index, { value }),
+        onEnter: () => addRow(index)
+      }
+    ), secret ? /* @__PURE__ */ h(
+      "button",
+      {
+        type: "button",
+        className: "dk-icon-btn dk-icon-btn-lg",
+        title: masked ? t("project.envReveal") : t("project.envHide"),
+        "aria-label": `${masked ? t("project.envReveal") : t("project.envHide")}: ${keyText}`,
+        onClick: () => toggleHidden(keyText)
+      },
+      masked ? /* @__PURE__ */ h(EyeIcon, null) : /* @__PURE__ */ h(EyeOffIcon, null)
+    ) : (
+      // 非口令变量不显示眼睛按钮，但保留空列，保证每一行的删除按钮都对齐
+      /* @__PURE__ */ h("span", { className: "dk-env-slot", "aria-hidden": "true" })
+    ), /* @__PURE__ */ h(
+      "button",
+      {
+        type: "button",
+        className: "dk-icon-btn dk-icon-btn-lg",
+        title: t("project.removeRow"),
+        "aria-label": keyText ? `${t("project.removeRow")}: ${keyText}` : t("project.removeRow"),
+        onClick: () => removeRow(index)
+      },
+      /* @__PURE__ */ h(CloseIcon, null)
+    ), invalid || duplicate ? /* @__PURE__ */ h("div", { className: "dk-env-hint", "data-kind": invalid ? "error" : "warn" }, invalid ? t("project.envInvalid") : t("project.envDuplicate")) : null);
+  })), rows.length ? /* @__PURE__ */ h("div", { className: "dk-env-foot" }, /* @__PURE__ */ h(Btn, { size: "sm", variant: "ghost", onClick: () => addRow() }, `+ ${t("project.envAddRow")}`), /* @__PURE__ */ h("span", { className: "dk-head-spacer" }), /* @__PURE__ */ h("span", { className: "dk-note" }, t("project.envKeyRule"))) : null, undo ? /* @__PURE__ */ h("div", { className: "dk-env-undo", role: "status" }, /* @__PURE__ */ h("span", null, t("project.envUndo", { key: undo.row?.key || t("project.keyName") })), /* @__PURE__ */ h(Btn, { size: "sm", variant: "ghost", onClick: undoRemove }, t("project.envUndoAction"))) : null, rows.length ? /* @__PURE__ */ h("div", { className: "dk-note" }, t(hintKey)) : null);
+}
 function ConfigDialog({
   t,
   files,
@@ -3001,11 +3694,24 @@ function ConfigDialog({
   const [confirmRemove, setConfirmRemove] = React.useState(false);
   const [add, setAdd] = React.useState({ open: false, path: "", error: "" });
   const [editor, setEditor] = React.useState(null);
+  const [escWarn, setEscWarn] = React.useState(false);
   const [scripts, setScripts] = React.useState({ loading: false, list: [], missing: false, error: "", path: "" });
   const [scriptCustom, setScriptCustom] = React.useState(false);
   const [loadingPath, setLoadingPath] = React.useState("");
+  const [loadFailedPath, setLoadFailedPath] = React.useState("");
+  const [loadAttempt, setLoadAttempt] = React.useState(0);
   const loadSeq = React.useRef(0);
   const maskRef = React.useRef(null);
+  const modalRef = React.useRef(null);
+  const subdialogRef = React.useRef(null);
+  const nameRef = React.useRef(null);
+  const errorRef = React.useRef(null);
+  const restoreFocusRef = React.useRef(null);
+  const baselineRef = React.useRef({});
+  const [closeWarn, setCloseWarn] = React.useState(false);
+  const [othersWarn, setOthersWarn] = React.useState(0);
+  const [savedFlash, setSavedFlash] = React.useState("");
+  const [filter, setFilter] = React.useState("");
   React.useEffect(() => {
     const node = maskRef.current;
     if (!node) return void 0;
@@ -3078,6 +3784,7 @@ function ConfigDialog({
     const seq = ++loadSeq.current;
     const path = selected;
     setLoadingPath(path);
+    setLoadFailedPath("");
     let cancelled = false;
     (async () => {
       try {
@@ -3089,11 +3796,14 @@ function ConfigDialog({
           name: baseName(path),
           depth: 0
         };
-        setDrafts(
-          (prev) => prev[path] ? prev : { ...prev, [path]: draftFromConfig(file, data?.config || null, projectName) }
-        );
+        const loaded = draftFromConfig(file, data?.config || null, projectName);
+        baselineRef.current[path] = JSON.stringify(loaded);
+        setDrafts((prev) => prev[path] ? prev : { ...prev, [path]: loaded });
       } catch (cause) {
-        if (!cancelled && seq === loadSeq.current) setError(String(cause?.message || cause));
+        if (!cancelled && seq === loadSeq.current) {
+          setLoadFailedPath(path);
+          setError(String(cause?.message || cause));
+        }
       } finally {
         if (!cancelled && seq === loadSeq.current) setLoadingPath("");
       }
@@ -3101,7 +3811,7 @@ function ConfigDialog({
     return () => {
       cancelled = true;
     };
-  }, [selected, drafts, files, projectName, onLoadConfig]);
+  }, [selected, drafts, files, projectName, onLoadConfig, loadAttempt]);
   React.useEffect(() => {
     if (!files.length) {
       setSelected("");
@@ -3118,10 +3828,135 @@ function ConfigDialog({
     const timer = setTimeout(() => setConfirmRemove(false), CONFIRM_MS);
     return () => clearTimeout(timer);
   }, [confirmRemove]);
+  React.useEffect(() => {
+    if (!escWarn) return void 0;
+    const timer = setTimeout(() => setEscWarn(false), 3500);
+    return () => clearTimeout(timer);
+  }, [escWarn]);
+  React.useEffect(() => {
+    if (!closeWarn) return void 0;
+    const timer = setTimeout(() => setCloseWarn(false), CONFIRM_MS);
+    return () => clearTimeout(timer);
+  }, [closeWarn]);
+  React.useEffect(() => {
+    if (!othersWarn) return void 0;
+    const timer = setTimeout(() => setOthersWarn(0), CONFIRM_MS);
+    return () => clearTimeout(timer);
+  }, [othersWarn]);
+  React.useEffect(() => {
+    if (!savedFlash) return void 0;
+    const timer = setTimeout(() => setSavedFlash(""), 2400);
+    return () => clearTimeout(timer);
+  }, [savedFlash]);
+  React.useEffect(() => {
+    restoreFocusRef.current = document.activeElement;
+    const timer = setTimeout(() => {
+      const root = modalRef.current;
+      const name = nameRef.current;
+      const node = (name && !name.disabled ? name : null) || root?.querySelector(".dk-config-item[data-active='1']") || root?.querySelector("button:not(:disabled), input:not(:disabled)");
+      if (node && typeof node.focus === "function") node.focus();
+    }, 30);
+    return () => {
+      clearTimeout(timer);
+      const back = restoreFocusRef.current;
+      if (back && typeof back.focus === "function" && document.contains(back)) back.focus();
+    };
+  }, []);
+  React.useEffect(() => {
+    if (!editor) return;
+    const node = subdialogRef.current;
+    if (!node) return;
+    const body = node.querySelector(".dk-subdialog-body") || node;
+    const target = body.querySelector(FOCUSABLE_SELECTOR) || node;
+    if (target && typeof target.focus === "function") target.focus();
+  }, [editor?.field, editor?.kind]);
   const current = files.find((file) => file.path === selected) || null;
   const draft = selected && drafts[selected] || emptyDraft();
   const configReady = Boolean(selected && drafts[selected]);
   const locked = Boolean(selected && onLoadConfig) && !configReady;
+  const loadFailed = Boolean(selected && onLoadConfig) && !configReady && loadFailedPath === selected;
+  const loadingSelected = Boolean(selected) && loadingPath === selected;
+  const loadingConfig = locked && !loadFailed;
+  const isPending = (path) => {
+    const base = baselineRef.current[path];
+    return Boolean(base && drafts[path]) && JSON.stringify(drafts[path]) !== base;
+  };
+  const dirty = Object.keys(drafts).some((path) => isPending(path));
+  React.useEffect(() => {
+    if (othersWarn && !dirty) setOthersWarn(0);
+  }, [othersWarn, dirty]);
+  const containerNameValue = String(draft.containerName || "").trim();
+  const containerNameInvalid = Boolean(containerNameValue) && !CONTAINER_NAME.test(containerNameValue);
+  const tagMissing = configReady && !String(draft.tag || "").trim();
+  const requestClose = () => {
+    if (dirty && !closeWarn) {
+      setCloseWarn(true);
+      return;
+    }
+    onClose();
+  };
+  const revealError = () => {
+    if (typeof requestAnimationFrame !== "function") return;
+    requestAnimationFrame(() => errorRef.current?.scrollIntoView({ block: "nearest" }));
+  };
+  const onModalKeyDown = (event) => {
+    if (event.key === "Escape") {
+      if (editor) {
+        event.stopPropagation();
+        return;
+      }
+      event.stopPropagation();
+      requestClose();
+      return;
+    }
+    if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+      event.preventDefault();
+      if (configReady && !busy) void commit("save");
+      return;
+    }
+    if ((event.key === "s" || event.key === "S") && (event.ctrlKey || event.metaKey)) {
+      event.preventDefault();
+      if (configReady && !busy) void commit("apply");
+      return;
+    }
+    if (event.key !== "Tab") return;
+    if (editor) return;
+    trapTabKey(event, modalRef.current);
+  };
+  const preBuildDirty = (left, right) => {
+    const base = emptyPreBuild();
+    const normalize = (source) => {
+      const merged = { ...base, ...source || {} };
+      merged.env = (merged.env || []).map((row) => ({
+        key: String(row?.key ?? ""),
+        value: String(row?.value ?? "")
+      }));
+      return merged;
+    };
+    const a = normalize(left);
+    const b = normalize(right);
+    return Object.keys(base).some((key) => JSON.stringify(a[key]) !== JSON.stringify(b[key]));
+  };
+  const editorDirty = Boolean(editor) && (() => {
+    if (editor.kind === "list") {
+      return JSON.stringify(editor.rows) !== JSON.stringify(draft[editor.field] || []);
+    }
+    if (editor.kind === "text") {
+      return String(editor.value || "") !== String(draft[editor.field] || "");
+    }
+    if (editor.kind === "form") {
+      return preBuildDirty(editor.value, draft[editor.field]);
+    }
+    return false;
+  })();
+  const requestCloseEditor = () => {
+    if (editorDirty && !escWarn) {
+      setEscWarn(true);
+      return;
+    }
+    setEscWarn(false);
+    setEditor(null);
+  };
   const serverOptions = [
     ...draft.serverId ? [] : [{ value: "", label: t("target.choose") }],
     ...servers.map((item) => ({
@@ -3184,11 +4019,22 @@ function ConfigDialog({
     setError("");
     setConfirmRemove(false);
     setEditor(null);
+    setCloseWarn(false);
+    setOthersWarn(0);
+    setSavedFlash("");
+  };
+  const retryLoad = () => {
+    if (!selected) return;
+    setLoadFailedPath("");
+    setError("");
+    setLoadAttempt((count) => count + 1);
   };
   const openTextEditor = (field, title, placeholder) => {
+    setEscWarn(false);
     setEditor({ kind: "text", field, title, value: String(draft[field] || ""), placeholder: placeholder || "" });
   };
   const openListEditor = (field, title) => {
+    setEscWarn(false);
     setEditor({ kind: "list", field, title, rows: (draft[field] || []).map((row) => ({ ...row })) });
   };
   const openPreBuildEditor = () => {
@@ -3196,6 +4042,7 @@ function ConfigDialog({
     value.env = (draft.preBuild?.env || []).map((item) => ({ ...item }));
     setScripts({ loading: false, list: [], missing: false, error: "", path: "" });
     setScriptCustom(false);
+    setEscWarn(false);
     setEditor({ kind: "form", field: "preBuild", title: t("project.preBuild"), value });
     if (value.tool === "npm") void loadScripts(value);
   };
@@ -3243,28 +4090,12 @@ function ConfigDialog({
     setEditor({ ...editor, value });
     if (tool === "npm") void loadScripts(value);
   };
-  const patchPreBuildEnv = (index, next) => {
-    setEditor((prev) => {
-      if (!prev) return prev;
-      const env = (prev.value.env || []).map((row, at) => at === index ? { ...row, ...next } : row);
-      return { ...prev, value: { ...prev.value, env } };
-    });
-  };
-  const addPreBuildEnv = () => {
-    setEditor(
-      (prev) => prev ? { ...prev, value: { ...prev.value, env: [...prev.value.env || [], { key: "", value: "" }] } } : prev
-    );
-  };
-  const removePreBuildEnv = (index) => {
-    setEditor(
-      (prev) => prev ? { ...prev, value: { ...prev.value, env: (prev.value.env || []).filter((_, at) => at !== index) } } : prev
-    );
-  };
   const applyEditor = () => {
     if (!editor) return;
     if (editor.kind === "text") patch({ [editor.field]: editor.value });
     else if (editor.kind === "list") patch({ [editor.field]: editor.rows });
     else patch({ [editor.field]: editor.value });
+    setEscWarn(false);
     setEditor(null);
   };
   const commit = async (mode) => {
@@ -3272,13 +4103,26 @@ function ConfigDialog({
     const converted = draftToConfig(draft);
     if (converted.error) {
       setError(t(converted.error, converted.params));
+      setSavedFlash("");
+      revealError();
+      return;
+    }
+    const previousPath = selected;
+    const nextPath = toPosix(draft.dockerfile.trim());
+    const targetOccupied = nextPath !== previousPath && (Boolean(drafts[nextPath]) || Boolean((runConfigSummaries || {})[nextPath]));
+    if (targetOccupied) {
+      setError(t("project.dockerfileConflict", { path: nextPath }));
+      setSavedFlash("");
+      revealError();
+      return;
+    }
+    if (mode === "save" && othersWarn && !isPending(selected)) {
+      onClose();
       return;
     }
     setBusy(mode);
     setError("");
     try {
-      const previousPath = selected;
-      const nextPath = toPosix(draft.dockerfile.trim());
       await onSave(nextPath, converted.config, previousPath);
       if (nextPath !== previousPath) {
         setDrafts((prev) => {
@@ -3286,14 +4130,32 @@ function ConfigDialog({
           const moved = next[previousPath] || draft;
           delete next[previousPath];
           next[nextPath] = { ...moved, dockerfile: nextPath };
+          baselineRef.current[nextPath] = JSON.stringify(next[nextPath]);
+          delete baselineRef.current[previousPath];
           return next;
         });
         setSelected(nextPath);
         setEditor(null);
+      } else {
+        baselineRef.current[nextPath] = JSON.stringify(draft);
       }
-      if (mode === "save") onClose();
+      if (mode === "save") {
+        const others = Object.keys(drafts).filter(
+          (path) => path !== previousPath && path !== nextPath && isPending(path)
+        ).length;
+        if (others) {
+          setOthersWarn(others);
+          setSavedFlash("");
+          return;
+        }
+        onClose();
+      } else {
+        setOthersWarn(0);
+        setSavedFlash(t("project.savedFlash"));
+      }
     } catch (cause) {
       setError(String(cause?.message || cause));
+      revealError();
     } finally {
       setBusy("");
     }
@@ -3310,9 +4172,12 @@ function ConfigDialog({
     try {
       await onRemove(selected);
       const target = files.find((file) => file.path === selected);
+      const reset = target ? draftFromConfig(target, null, projectName) : null;
+      if (reset) baselineRef.current[selected] = JSON.stringify(reset);
+      else delete baselineRef.current[selected];
       setDrafts((prev) => {
         const next = { ...prev };
-        if (target) next[selected] = draftFromConfig(target, null, projectName);
+        if (reset) next[selected] = reset;
         else delete next[selected];
         return next;
       });
@@ -3341,22 +4206,34 @@ function ConfigDialog({
       setBusy("");
     }
   };
-  const valueRow = (label, summary, onEdit, disabled) => /* @__PURE__ */ h("div", { className: "dk-field" }, /* @__PURE__ */ h("span", { className: "dk-meta" }, label), /* @__PURE__ */ h("span", { className: "dk-value" }, /* @__PURE__ */ h("span", { className: "dk-value-text", title: summary }, summary || t("project.notSet")), /* @__PURE__ */ h(
+  const valueRow = (label, summary, onEdit, disabled, icon) => /* @__PURE__ */ h("div", { className: "dk-field" }, /* @__PURE__ */ h("span", { className: "dk-meta" }, label), /* @__PURE__ */ h(
     "button",
     {
       type: "button",
-      className: "dk-icon-btn",
-      title: t("project.editValue"),
+      className: "dk-value dk-value-btn",
+      title: summary || t("project.notSet"),
+      "aria-label": `${t("project.editValue")}: ${label}`,
       disabled: disabled === true,
       onClick: onEdit
     },
-    /* @__PURE__ */ h(FolderIcon, null)
-  )));
+    /* @__PURE__ */ h("span", { className: "dk-value-text", "data-empty": summary ? "0" : "1" }, summary || t("project.notSet")),
+    /* @__PURE__ */ h("span", { className: "dk-icon-btn dk-icon-btn-lg", "aria-hidden": "true" }, icon || /* @__PURE__ */ h(FolderIcon, null))
+  ));
   const listConfig = editor && editor.kind === "list" ? LIST_FIELDS[editor.field] : null;
-  const preBuildEnvChars = (editor?.value?.env || []).reduce(
-    (sum, item) => sum + String(item.key || "").length + normalizeEnvValue(item.value).length + 1,
-    0
-  );
+  const filterKeyword = filter.trim().toLowerCase();
+  const showFileFilter = files.length > 4 || filterKeyword !== "";
+  const visibleFiles = (() => {
+    if (!filterKeyword) return files;
+    return files.filter(
+      (file) => `${file.relative} ${file.path} ${drafts[file.path]?.name || ""} ${runConfigSummaries[file.path]?.name || ""}`.toLowerCase().includes(filterKeyword)
+    );
+  })();
+  const envSummary = (rows) => {
+    const keys = (rows || []).map((item) => String(item.key || "").trim()).filter(Boolean);
+    if (!keys.length) return "";
+    const head = keys.slice(0, 3).join(", ");
+    return t("project.envSummary", { count: keys.length, keys: keys.length > 3 ? `${head}…` : head });
+  };
   return /* @__PURE__ */ h(
     "div",
     {
@@ -3364,171 +4241,290 @@ function ConfigDialog({
       ref: maskRef,
       role: "presentation",
       onMouseDown: (event) => {
-        if (event.target === event.currentTarget) onClose();
+        if (event.target === event.currentTarget) requestClose();
       }
     },
-    /* @__PURE__ */ h("div", { className: "dk-modal", role: "dialog", "aria-modal": "true", "aria-label": t("project.runConfigs") }, /* @__PURE__ */ h("div", { className: "dk-modal-head" }, /* @__PURE__ */ h("span", { className: "dk-modal-title" }, t("project.runConfigs")), /* @__PURE__ */ h("button", { type: "button", className: "dk-icon-btn", title: t("project.configCancel"), onClick: onClose }, /* @__PURE__ */ h(CloseIcon, null))), /* @__PURE__ */ h("div", { className: "dk-modal-body" }, /* @__PURE__ */ h("div", { className: "dk-modal-side" }, /* @__PURE__ */ h("div", { className: "dk-config-list" }, files.map((file) => {
-      const saved = runConfigSummaries[file.path] || null;
-      const label = drafts[file.path]?.name || saved?.name || file.relative;
-      return /* @__PURE__ */ h(
+    /* @__PURE__ */ h(
+      "div",
+      {
+        className: "dk-modal",
+        ref: modalRef,
+        role: "dialog",
+        "aria-modal": "true",
+        "aria-labelledby": "dk-runconfig-title",
+        onKeyDown: onModalKeyDown
+      },
+      /* @__PURE__ */ h("div", { className: "dk-modal-head" }, /* @__PURE__ */ h("span", { className: "dk-modal-title", id: "dk-runconfig-title" }, t("project.runConfigs")), /* @__PURE__ */ h("span", { className: "dk-modal-head-note", title: t("project.runConfigsHint") }, t("project.runConfigsHint")), /* @__PURE__ */ h(
         "button",
         {
-          key: file.path,
           type: "button",
-          className: "dk-config-item",
-          "data-active": file.path === selected ? "1" : "0",
-          title: file.path,
-          onClick: () => selectFile(file.path)
+          className: "dk-icon-btn dk-icon-btn-lg",
+          title: t("project.configCancel"),
+          "aria-label": t("project.configCancel"),
+          onClick: requestClose
         },
-        /* @__PURE__ */ h("span", { className: "dk-config-item-name" }, label),
-        /* @__PURE__ */ h("span", { className: "dk-config-item-path" }, file.missing ? `${t("project.missing")} · ` : "", file.relative)
-      );
-    }), files.length === 0 ? /* @__PURE__ */ h("div", { className: "dk-meta" }, t("project.empty")) : null), /* @__PURE__ */ h("div", { className: "dk-config-add" }, add.open ? /* @__PURE__ */ h("div", { className: "dk-form" }, /* @__PURE__ */ h(
-      "input",
-      {
-        className: "dk-input",
-        value: add.path,
-        placeholder: t("project.addDockerfileHint"),
-        onChange: (event) => setAdd((prev) => ({ ...prev, path: event.target.value, error: "" })),
-        onKeyDown: (event) => {
-          if (event.key === "Enter") void submitAdd();
+        /* @__PURE__ */ h(CloseIcon, null)
+      )),
+      /* @__PURE__ */ h("div", { className: "dk-modal-body" }, /* @__PURE__ */ h("div", { className: "dk-modal-side" }, showFileFilter ? /* @__PURE__ */ h("div", { className: "dk-config-search" }, /* @__PURE__ */ h(
+        "input",
+        {
+          className: "dk-input",
+          value: filter,
+          placeholder: t("project.listFilter"),
+          "aria-label": t("project.listFilter"),
+          spellCheck: false,
+          onChange: (event) => setFilter(event.target.value)
         }
-      }
-    ), /* @__PURE__ */ h("div", { className: "dk-actionbar" }, /* @__PURE__ */ h(Btn, { size: "sm", variant: "primary", disabled: busy === "add" || !add.path.trim(), onClick: () => void submitAdd() }, t("project.add")), /* @__PURE__ */ h(Btn, { size: "sm", variant: "ghost", onClick: () => setAdd({ open: false, path: "", error: "" }) }, t("project.configCancel"))), add.error ? /* @__PURE__ */ h("div", { className: "dk-inline-error" }, add.error) : null) : /* @__PURE__ */ h(Btn, { size: "sm", variant: "ghost", onClick: () => setAdd({ open: true, path: "", error: "" }) }, `+ ${t("project.addDockerfile")}`))), /* @__PURE__ */ h("div", { className: "dk-modal-main" }, loadingPath === selected ? /* @__PURE__ */ h("div", { className: "dk-note" }, t("project.configLoading")) : null, current ? /* @__PURE__ */ h("div", { className: "dk-form" }, /* @__PURE__ */ h("label", { className: "dk-field" }, /* @__PURE__ */ h("span", { className: "dk-meta" }, t("project.configName")), /* @__PURE__ */ h(
-      "input",
-      {
-        className: "dk-input",
-        value: draft.name,
-        placeholder: current.relative,
-        disabled: locked,
-        onChange: (event) => patch({ name: event.target.value })
-      }
-    )), /* @__PURE__ */ h("div", { className: "dk-field dk-field-block" }, /* @__PURE__ */ h("span", { className: "dk-meta" }, t("project.configServer")), /* @__PURE__ */ h("span", { className: "dk-value dk-value-stack" }, /* @__PURE__ */ h(
-      DkSelect,
-      {
-        value: draft.serverId,
-        options: serverOptions,
-        onChange: (value) => patch({ serverId: value }),
-        ariaLabel: t("project.configServer"),
-        disabled: locked,
-        size: "sm"
-      }
-    ), /* @__PURE__ */ h("span", { className: "dk-note" }, t("project.serverHint")))), /* @__PURE__ */ h("div", { className: "dk-section" }, /* @__PURE__ */ h("div", { className: "dk-section-head" }, /* @__PURE__ */ h("span", null, t("project.sectionBuild")), /* @__PURE__ */ h("span", { className: "dk-head-spacer" }), /* @__PURE__ */ h(
-      OptionMenu,
-      {
-        t,
-        ids: BUILD_OPTION_IDS,
-        selected: draft.options,
-        onToggle: toggleOption,
-        disabled: locked
-      }
-    )), valueRow(
-      t("project.configDockerfile"),
-      draft.dockerfile,
-      () => openTextEditor("dockerfile", t("project.configDockerfile"), current.path),
-      locked
-    ), valueRow(
-      t("project.configContextFolder"),
-      draft.context,
-      () => openTextEditor("context", t("project.configContextFolder"), t("project.configContextHint")),
-      locked
-    ), /* @__PURE__ */ h("label", { className: "dk-field" }, /* @__PURE__ */ h("span", { className: "dk-meta" }, t("project.configTag")), /* @__PURE__ */ h(
-      "input",
-      {
-        className: "dk-input",
-        value: draft.tag,
-        placeholder: "app:latest",
-        disabled: locked,
-        onChange: (event) => patch({ tag: event.target.value })
-      }
-    )), has("platform") ? valueRow(
-      t("project.option.platform"),
-      draft.platform,
-      () => openTextEditor("platform", t("project.option.platform"), "linux/amd64"),
-      locked
-    ) : null, has("buildArgs") ? valueRow(
-      t("project.option.buildArgs"),
-      summarize(draft.buildArgs, (arg) => arg.key ? `${arg.key}=${arg.value}` : ""),
-      () => openListEditor("buildArgs", t("project.option.buildArgs")),
-      locked
-    ) : null, has("noCache") || has("pull") ? /* @__PURE__ */ h("div", { className: "dk-field" }, /* @__PURE__ */ h("span", { className: "dk-meta" }, t("project.sectionSwitch")), /* @__PURE__ */ h("span", { className: "dk-checks" }, has("noCache") ? /* @__PURE__ */ h("label", null, /* @__PURE__ */ h(
-      "input",
-      {
-        type: "checkbox",
-        checked: draft.noCache,
-        disabled: locked,
-        onChange: (event) => patch({ noCache: event.target.checked })
-      }
-    ), /* @__PURE__ */ h("span", null, t("project.configNoCache"))) : null, has("pull") ? /* @__PURE__ */ h("label", null, /* @__PURE__ */ h(
-      "input",
-      {
-        type: "checkbox",
-        checked: draft.pull,
-        disabled: locked,
-        onChange: (event) => patch({ pull: event.target.checked })
-      }
-    ), /* @__PURE__ */ h("span", null, t("project.configPull"))) : null)) : null), /* @__PURE__ */ h("div", { className: "dk-section" }, /* @__PURE__ */ h("div", { className: "dk-section-head" }, /* @__PURE__ */ h("span", null, t("project.sectionRun")), /* @__PURE__ */ h("span", { className: "dk-head-spacer" }), /* @__PURE__ */ h(OptionMenu, { t, ids: RUN_OPTION_IDS, selected: draft.options, onToggle: toggleOption, disabled: locked })), /* @__PURE__ */ h("label", { className: "dk-field" }, /* @__PURE__ */ h("span", { className: "dk-meta" }, t("project.configContainerName")), /* @__PURE__ */ h(
-      "input",
-      {
-        className: "dk-input",
-        value: draft.containerName,
-        placeholder: t("project.configContainerNameHint"),
-        disabled: locked,
-        onChange: (event) => patch({ containerName: event.target.value })
-      }
-    )), has("ports") ? valueRow(
-      t("project.option.ports"),
-      summarize(
-        draft.ports,
-        (port) => port.host || port.container ? `${port.host || "?"}:${port.container || "?"}` : ""
-      ),
-      () => openListEditor("ports", t("project.option.ports")),
-      locked
-    ) : null, has("mounts") ? valueRow(
-      t("project.option.mounts"),
-      summarize(
-        draft.mounts,
-        (mount) => mount.host || mount.container ? `${mount.host || "?"} -> ${mount.container || "?"}${mount.readOnly ? " (ro)" : ""}` : ""
-      ),
-      () => openListEditor("mounts", t("project.option.mounts")),
-      locked
-    ) : null, has("env") ? valueRow(
-      t("project.option.env"),
-      // 摘要只显示键名：值可能是私钥，不在折叠行与 tooltip 里铺明文。
-      summarize(draft.env, (item) => item.key ? `${item.key}=***` : ""),
-      () => openListEditor("env", t("project.option.env")),
-      locked
-    ) : null, has("runOptions") ? valueRow(
-      t("project.option.runOptions"),
-      draft.runOptions,
-      () => openTextEditor("runOptions", t("project.option.runOptions"), t("project.runOptionsHint")),
-      locked
-    ) : null), /* @__PURE__ */ h("div", { className: "dk-section" }, /* @__PURE__ */ h("div", { className: "dk-section-head" }, /* @__PURE__ */ h("span", null, t("project.preBuild")), /* @__PURE__ */ h("span", { className: "dk-head-spacer" })), valueRow(
-      t("project.preBuildTool"),
-      // 未选工具时明确写「不执行」，避免看成没配置。
-      preBuildSummary(draft.preBuild) || t("project.toolNone"),
-      openPreBuildEditor,
-      locked
-    )), error ? /* @__PURE__ */ h("div", { className: "dk-inline-error" }, error) : null) : /* @__PURE__ */ h("div", { className: "dk-meta" }, t("project.emptyHint")))), /* @__PURE__ */ h("div", { className: "dk-modal-foot" }, /* @__PURE__ */ h(Btn, { size: "sm", variant: "danger", disabled: !current || Boolean(busy), onClick: () => void remove() }, confirmRemove ? t("project.configDeleteConfirm") : t("project.configDelete")), /* @__PURE__ */ h("span", { className: "dk-head-spacer" }), /* @__PURE__ */ h(Btn, { size: "sm", variant: "ghost", onClick: onClose }, t("project.configCancel")), /* @__PURE__ */ h(Btn, { size: "sm", disabled: !current || Boolean(busy) || !configReady, onClick: () => void commit("apply") }, t("project.configApply")), /* @__PURE__ */ h(Btn, { size: "sm", disabled: !current || Boolean(busy) || !configReady, onClick: () => void commit("save") }, t("project.configSave")))),
+      )) : null, /* @__PURE__ */ h("div", { className: "dk-config-list" }, visibleFiles.map((file) => {
+        const saved = runConfigSummaries[file.path] || null;
+        const label = drafts[file.path]?.name || saved?.name || file.relative;
+        return /* @__PURE__ */ h(
+          "button",
+          {
+            key: file.path,
+            type: "button",
+            className: "dk-config-item",
+            "data-active": file.path === selected ? "1" : "0",
+            "data-missing": file.missing ? "1" : "0",
+            "aria-current": file.path === selected ? "true" : void 0,
+            title: file.path,
+            onClick: () => selectFile(file.path)
+          },
+          /* @__PURE__ */ h("span", { className: "dk-config-item-head" }, isPending(file.path) ? /* @__PURE__ */ h(
+            "span",
+            {
+              className: "dk-config-item-dot",
+              title: t("project.unsavedBadge"),
+              "aria-hidden": "true"
+            }
+          ) : null, /* @__PURE__ */ h("span", { className: "dk-config-item-name" }, label), saved ? /* @__PURE__ */ h("span", { className: "dk-config-item-badge", "data-tone": "ok" }, t("project.configured")) : null),
+          /* @__PURE__ */ h("span", { className: "dk-config-item-path" }, file.missing ? `${t("project.missing")} · ` : "", file.relative)
+        );
+      }), files.length === 0 ? /* @__PURE__ */ h("div", { className: "dk-config-empty" }, /* @__PURE__ */ h("div", { className: "dk-config-empty-title" }, t("project.noFilesTitle")), /* @__PURE__ */ h("div", { className: "dk-note" }, t("project.empty"))) : null, files.length > 0 && visibleFiles.length === 0 ? /* @__PURE__ */ h("div", { className: "dk-note", role: "status" }, t("project.listEmptyFiltered")) : null), /* @__PURE__ */ h("div", { className: "dk-config-add" }, add.open ? /* @__PURE__ */ h("div", { className: "dk-form" }, /* @__PURE__ */ h(
+        "input",
+        {
+          className: "dk-input",
+          value: add.path,
+          placeholder: t("project.addDockerfileHint"),
+          "aria-label": t("project.addDockerfile"),
+          autoFocus: true,
+          spellCheck: false,
+          onChange: (event) => setAdd((prev) => ({ ...prev, path: event.target.value, error: "" })),
+          onKeyDown: (event) => {
+            if (event.key === "Enter") void submitAdd();
+          }
+        }
+      ), /* @__PURE__ */ h("div", { className: "dk-actionbar" }, /* @__PURE__ */ h(Btn, { size: "sm", variant: "primary", disabled: busy === "add" || !add.path.trim(), onClick: () => void submitAdd() }, t("project.add")), /* @__PURE__ */ h(Btn, { size: "sm", variant: "ghost", onClick: () => setAdd({ open: false, path: "", error: "" }) }, t("project.configCancel"))), add.error ? /* @__PURE__ */ h("div", { className: "dk-inline-error", role: "alert" }, add.error) : null) : /* @__PURE__ */ h(Btn, { size: "sm", variant: "ghost", onClick: () => setAdd({ open: true, path: "", error: "" }) }, `+ ${t("project.addDockerfile")}`))), /* @__PURE__ */ h("div", { className: "dk-modal-main" }, loadFailed ? /* @__PURE__ */ h("div", { className: "dk-statusbar", "data-tone": "error", role: "status" }, /* @__PURE__ */ h("span", null, t("project.configLoadFailed")), /* @__PURE__ */ h("span", { className: "dk-note" }, t("project.configLoadFailedHint")), /* @__PURE__ */ h(Btn, { size: "sm", variant: "ghost", title: t("project.configReloadHint"), onClick: retryLoad }, t("project.configReload"))) : loadingConfig ? /* @__PURE__ */ h("div", { className: "dk-statusbar", role: "status" }, loadingSelected ? /* @__PURE__ */ h("span", { className: "dk-skeleton-dot", "aria-hidden": "true" }) : null, /* @__PURE__ */ h("span", null, t("project.configLoading")), /* @__PURE__ */ h("span", { className: "dk-note" }, t("project.lockedHint"))) : null, current ? /* @__PURE__ */ h("div", { className: "dk-form", "data-locked": locked ? "1" : "0" }, /* @__PURE__ */ h("label", { className: "dk-field" }, /* @__PURE__ */ h("span", { className: "dk-meta" }, t("project.configName")), /* @__PURE__ */ h(
+        "input",
+        {
+          ref: nameRef,
+          className: "dk-input",
+          value: draft.name,
+          placeholder: current.relative,
+          "aria-label": t("project.configName"),
+          spellCheck: false,
+          disabled: locked,
+          onChange: (event) => patch({ name: event.target.value })
+        }
+      )), /* @__PURE__ */ h("div", { className: "dk-field dk-field-block" }, /* @__PURE__ */ h("span", { className: "dk-meta" }, t("project.configServer")), /* @__PURE__ */ h("span", { className: "dk-value dk-value-stack" }, /* @__PURE__ */ h(
+        DkSelect,
+        {
+          value: draft.serverId,
+          options: serverOptions,
+          onChange: (value) => patch({ serverId: value }),
+          ariaLabel: t("project.configServer"),
+          disabled: locked,
+          size: "sm"
+        }
+      ), /* @__PURE__ */ h("span", { className: "dk-note" }, t("project.serverHint")))), /* @__PURE__ */ h("div", { className: "dk-section" }, /* @__PURE__ */ h("div", { className: "dk-section-head" }, /* @__PURE__ */ h("span", null, t("project.sectionBuild")), /* @__PURE__ */ h("span", { className: "dk-head-spacer" }), /* @__PURE__ */ h(
+        OptionMenu,
+        {
+          t,
+          ids: BUILD_OPTION_IDS,
+          selected: draft.options,
+          onToggle: toggleOption,
+          disabled: locked
+        }
+      )), valueRow(
+        t("project.configDockerfile"),
+        draft.dockerfile,
+        () => openTextEditor("dockerfile", t("project.configDockerfile"), current.path),
+        locked
+      ), valueRow(
+        t("project.configContextFolder"),
+        draft.context,
+        () => openTextEditor("context", t("project.configContextFolder"), t("project.configContextHint")),
+        locked
+      ), /* @__PURE__ */ h("label", { className: "dk-field", "data-invalid": tagMissing ? "1" : "0", "data-hint": tagMissing ? "1" : "0" }, /* @__PURE__ */ h("span", { className: "dk-meta" }, t("project.configTag")), /* @__PURE__ */ h(
+        "input",
+        {
+          className: "dk-input",
+          value: draft.tag,
+          placeholder: "app:latest",
+          "aria-label": t("project.configTag"),
+          "aria-invalid": tagMissing ? "true" : void 0,
+          spellCheck: false,
+          disabled: locked,
+          onChange: (event) => patch({ tag: event.target.value })
+        }
+      ), tagMissing ? /* @__PURE__ */ h("span", { className: "dk-field-hint dk-inline-error" }, t("project.needTagInline")) : null), has("platform") ? valueRow(
+        t("project.option.platform"),
+        draft.platform,
+        () => openTextEditor("platform", t("project.option.platform"), "linux/amd64"),
+        locked
+      ) : null, has("buildArgs") ? valueRow(
+        t("project.option.buildArgs"),
+        summarize(draft.buildArgs, (arg) => arg.key ? `${arg.key}=${arg.value}` : ""),
+        () => openListEditor("buildArgs", t("project.option.buildArgs")),
+        locked,
+        /* @__PURE__ */ h(ListIcon, null)
+      ) : null, has("noCache") || has("pull") ? /* @__PURE__ */ h("div", { className: "dk-field" }, /* @__PURE__ */ h("span", { className: "dk-meta" }, t("project.sectionSwitch")), /* @__PURE__ */ h("span", { className: "dk-checks" }, has("noCache") ? /* @__PURE__ */ h("label", null, /* @__PURE__ */ h(
+        "input",
+        {
+          type: "checkbox",
+          checked: draft.noCache,
+          disabled: locked,
+          onChange: (event) => patch({ noCache: event.target.checked })
+        }
+      ), /* @__PURE__ */ h("span", null, t("project.configNoCache"))) : null, has("pull") ? /* @__PURE__ */ h("label", null, /* @__PURE__ */ h(
+        "input",
+        {
+          type: "checkbox",
+          checked: draft.pull,
+          disabled: locked,
+          onChange: (event) => patch({ pull: event.target.checked })
+        }
+      ), /* @__PURE__ */ h("span", null, t("project.configPull"))) : null)) : null), /* @__PURE__ */ h("div", { className: "dk-section" }, /* @__PURE__ */ h("div", { className: "dk-section-head" }, /* @__PURE__ */ h("span", null, t("project.sectionRun")), /* @__PURE__ */ h("span", { className: "dk-head-spacer" }), /* @__PURE__ */ h(OptionMenu, { t, ids: RUN_OPTION_IDS, selected: draft.options, onToggle: toggleOption, disabled: locked })), /* @__PURE__ */ h("label", { className: "dk-field", "data-invalid": containerNameInvalid ? "1" : "0", "data-hint": containerNameInvalid ? "1" : "0" }, /* @__PURE__ */ h("span", { className: "dk-meta" }, t("project.configContainerName")), /* @__PURE__ */ h(
+        "input",
+        {
+          className: "dk-input",
+          value: draft.containerName,
+          placeholder: t("project.configContainerNameHint"),
+          "aria-label": t("project.configContainerName"),
+          "aria-invalid": containerNameInvalid ? "true" : void 0,
+          spellCheck: false,
+          disabled: locked,
+          onChange: (event) => patch({ containerName: event.target.value })
+        }
+      ), containerNameInvalid ? /* @__PURE__ */ h("span", { className: "dk-field-hint dk-inline-error" }, t("project.containerNameInvalid")) : null), has("ports") ? valueRow(
+        t("project.option.ports"),
+        summarize(
+          draft.ports,
+          (port) => port.host || port.container ? `${port.host || "?"}:${port.container || "?"}` : ""
+        ),
+        () => openListEditor("ports", t("project.option.ports")),
+        locked,
+        /* @__PURE__ */ h(ListIcon, null)
+      ) : null, has("mounts") ? valueRow(
+        t("project.option.mounts"),
+        summarize(
+          draft.mounts,
+          (mount) => mount.host || mount.container ? `${mount.host || "?"} -> ${mount.container || "?"}${mount.readOnly ? " (ro)" : ""}` : ""
+        ),
+        () => openListEditor("mounts", t("project.option.mounts")),
+        locked,
+        /* @__PURE__ */ h(ListIcon, null)
+      ) : null, has("env") ? valueRow(
+        t("project.option.env"),
+        // 摘要只列名称与数量：值可能是口令，不在折叠行与 tooltip 里铺明文。
+        envSummary(draft.env),
+        () => openListEditor("env", t("project.option.env")),
+        locked,
+        /* @__PURE__ */ h(ListIcon, null)
+      ) : null, has("runOptions") ? valueRow(
+        t("project.option.runOptions"),
+        draft.runOptions,
+        () => openTextEditor("runOptions", t("project.option.runOptions"), t("project.runOptionsHint")),
+        locked
+      ) : null), /* @__PURE__ */ h("div", { className: "dk-section" }, /* @__PURE__ */ h("div", { className: "dk-section-head" }, /* @__PURE__ */ h("span", null, t("project.preBuild")), /* @__PURE__ */ h("span", { className: "dk-head-spacer" })), valueRow(
+        t("project.preBuildTool"),
+        // 未选工具时明确写「不执行」，避免看成没配置。
+        preBuildSummary(draft.preBuild) || t("project.toolNone"),
+        openPreBuildEditor,
+        locked
+      )), error ? /* @__PURE__ */ h("div", { className: "dk-inline-error dk-error-inline", role: "alert", ref: errorRef }, error) : null) : (
+        /* [UX优化]: 没有可编辑对象时给一个明确的下一步，而不是只留一句说明。 */
+        /* @__PURE__ */ h("div", { className: "dk-modal-empty" }, /* @__PURE__ */ h("div", { className: "dk-modal-empty-title" }, t("project.emptyGuideTitle")), /* @__PURE__ */ h("div", { className: "dk-note" }, t("project.emptyHint")), /* @__PURE__ */ h(
+          Btn,
+          {
+            size: "sm",
+            variant: "primary",
+            onClick: () => setAdd({ open: true, path: "", error: "" })
+          },
+          `+ ${t("project.addDockerfile")}`
+        ))
+      ))),
+      /* @__PURE__ */ h("div", { className: "dk-modal-foot" }, /* @__PURE__ */ h(
+        Btn,
+        {
+          size: "sm",
+          variant: "danger",
+          disabled: !current || Boolean(busy),
+          "aria-live": "polite",
+          onClick: () => void remove()
+        },
+        confirmRemove ? t("project.configDeleteConfirm") : t("project.configDelete")
+      ), /* @__PURE__ */ h("span", { className: "dk-head-spacer" }), closeWarn ? /* @__PURE__ */ h("span", { className: "dk-foot-note", "data-tone": "warn", role: "status" }, t("project.discardWarn")) : othersWarn ? /* @__PURE__ */ h("span", { className: "dk-foot-note", "data-tone": "warn", role: "status" }, t("project.saveOthersWarn", { count: othersWarn })) : savedFlash ? /* @__PURE__ */ h("span", { className: "dk-foot-note", "data-tone": "ok", role: "status" }, savedFlash) : dirty ? /* @__PURE__ */ h("span", { className: "dk-foot-note", role: "status" }, t("project.unsavedNote")) : null, /* @__PURE__ */ h(Btn, { size: "sm", variant: "ghost", onClick: requestClose }, t("project.configCancel")), /* @__PURE__ */ h(
+        Btn,
+        {
+          size: "sm",
+          disabled: !current || Boolean(busy) || !configReady,
+          title: t("project.applyHint"),
+          onClick: () => void commit("apply")
+        },
+        busy === "apply" ? t("project.configSaving") : t("project.configApply")
+      ), /* @__PURE__ */ h(
+        Btn,
+        {
+          size: "sm",
+          variant: "primary",
+          disabled: !current || Boolean(busy) || !configReady,
+          title: t("project.saveCloseHint"),
+          onClick: () => void commit("save")
+        },
+        busy === "save" ? t("project.configSaving") : t("project.configSave")
+      ))
+    ),
     editor ? /* @__PURE__ */ h(
       "div",
       {
         className: "dk-submask",
         role: "presentation",
         onMouseDown: (event) => {
-          if (event.target === event.currentTarget) setEditor(null);
+          if (event.target === event.currentTarget) requestCloseEditor();
         }
       },
       /* @__PURE__ */ h(
         "div",
         {
           className: "dk-subdialog",
+          ref: subdialogRef,
           role: "dialog",
           "aria-modal": "true",
           "aria-label": editor.title,
-          "data-wide": editor.kind === "form" ? "1" : "0"
+          tabIndex: -1,
+          "data-wide": editor.kind === "form" || editor.field === "env" ? "1" : "0",
+          onKeyDown: (event) => {
+            if (event.key === "Tab") {
+              trapTabKey(event, subdialogRef.current);
+              return;
+            }
+            if (event.key !== "Escape") return;
+            event.stopPropagation();
+            requestCloseEditor();
+          }
         },
-        /* @__PURE__ */ h("div", { className: "dk-subdialog-head" }, /* @__PURE__ */ h("span", { className: "dk-modal-title" }, editor.title), /* @__PURE__ */ h("button", { type: "button", className: "dk-icon-btn", title: t("project.configCancel"), onClick: () => setEditor(null) }, /* @__PURE__ */ h(CloseIcon, null))),
+        /* @__PURE__ */ h("div", { className: "dk-subdialog-head" }, /* @__PURE__ */ h("span", { className: "dk-modal-title" }, editor.title), /* @__PURE__ */ h(
+          "button",
+          {
+            type: "button",
+            className: "dk-icon-btn dk-icon-btn-lg",
+            title: t("project.configCancel"),
+            "aria-label": t("project.configCancel"),
+            onClick: requestCloseEditor
+          },
+          /* @__PURE__ */ h(CloseIcon, null)
+        )),
         /* @__PURE__ */ h("div", { className: "dk-subdialog-body" }, editor.kind === "text" ? /* @__PURE__ */ h(
           "input",
           {
@@ -3541,7 +4537,14 @@ function ConfigDialog({
               if (event.key === "Enter") applyEditor();
             }
           }
-        ) : null, editor.kind === "list" ? /* @__PURE__ */ h("div", { className: "dk-rows" }, editor.rows.map((row, index) => /* @__PURE__ */ h("div", { className: "dk-row-inputs", key: `row-${index}` }, listConfig.columns.map(
+        ) : null, editor.kind === "list" && editor.field === "env" ? /* @__PURE__ */ h(
+          EnvListEditor,
+          {
+            t,
+            rows: editor.rows,
+            onChange: (next) => setEditor((prev) => prev ? { ...prev, rows: next } : prev)
+          }
+        ) : null, editor.kind === "list" && editor.field !== "env" ? /* @__PURE__ */ h("div", { className: "dk-rows" }, editor.rows.map((row, index) => /* @__PURE__ */ h("div", { className: "dk-row-inputs", key: `row-${index}` }, listConfig.columns.map(
           (column) => column.type === "check" ? /* @__PURE__ */ h("label", { className: "dk-inline-check", key: column.key, title: t(column.labelKey) }, /* @__PURE__ */ h(
             "input",
             {
@@ -3609,7 +4612,7 @@ function ConfigDialog({
             onClick: () => setEditor((prev) => ({ ...prev, rows: [...prev.rows, listConfig.empty()] }))
           },
           `+ ${t("project.addRow")}`
-        )), editor.field === "env" ? /* @__PURE__ */ h("div", { className: "dk-note" }, t("project.envSecretHint")) : null) : null, editor.kind === "form" ? /* @__PURE__ */ h("div", { className: "dk-form" }, /* @__PURE__ */ h("div", { className: "dk-field" }, /* @__PURE__ */ h("span", { className: "dk-meta" }, t("project.preBuildTool")), /* @__PURE__ */ h("span", { className: "dk-value" }, /* @__PURE__ */ h(
+        ))) : null, editor.kind === "form" ? /* @__PURE__ */ h("div", { className: "dk-form" }, /* @__PURE__ */ h("div", { className: "dk-field" }, /* @__PURE__ */ h("span", { className: "dk-meta" }, t("project.preBuildTool")), /* @__PURE__ */ h("span", { className: "dk-value" }, /* @__PURE__ */ h(
           DkSelect,
           {
             value: editor.value.tool,
@@ -3742,44 +4745,19 @@ function ConfigDialog({
             placeholder: t("project.mavenJvmHint"),
             onChange: (event) => patchEditorValue({ jvmOptions: event.target.value })
           }
-        )) : null, editor.value.tool ? /* @__PURE__ */ h("div", { className: "dk-field dk-field-block" }, /* @__PURE__ */ h("span", { className: "dk-meta" }, t("project.preBuildEnv")), /* @__PURE__ */ h("div", { className: "dk-rows" }, (editor.value.env || []).map((row, index) => /* @__PURE__ */ h("div", { className: "dk-row-inputs", key: `env-${index}` }, /* @__PURE__ */ h(
-          "input",
+        )) : null, editor.value.tool ? /* @__PURE__ */ h("div", { className: "dk-field dk-field-block" }, /* @__PURE__ */ h("span", { className: "dk-meta" }, t("project.preBuildEnv")), /* @__PURE__ */ h(
+          EnvListEditor,
           {
-            className: "dk-input",
-            value: row.key,
-            placeholder: t("project.keyName"),
-            onChange: (event) => patchPreBuildEnv(index, { key: event.target.value })
+            t,
+            rows: editor.value.env || [],
+            onChange: (next) => patchEditorValue({ env: next }),
+            valueMax: PRE_BUILD_ENV_VALUE_MAX,
+            totalMax: PRE_BUILD_ENV_TOTAL_MAX,
+            totalUnit: "chars",
+            emptyHintKey: "project.preBuildEnvEmptyHint",
+            hintKey: "project.preBuildEnvSecretHint"
           }
-        ), /* @__PURE__ */ h("div", { className: "dk-multiline" }, /* @__PURE__ */ h(
-          "textarea",
-          {
-            className: "dk-input dk-textarea",
-            rows: 2,
-            spellCheck: false,
-            value: row.value,
-            placeholder: t("project.keyValue"),
-            onChange: (event) => patchPreBuildEnv(index, { value: event.target.value })
-          }
-        ), /* @__PURE__ */ h(
-          "span",
-          {
-            className: "dk-env-count",
-            "data-over": normalizeEnvValue(row.value).length > PRE_BUILD_ENV_VALUE_MAX ? "1" : "0"
-          },
-          `${normalizeEnvValue(row.value).length} / ${PRE_BUILD_ENV_VALUE_MAX}`
-        )), /* @__PURE__ */ h(
-          "button",
-          {
-            type: "button",
-            className: "dk-icon-btn",
-            title: t("project.removeRow"),
-            onClick: () => removePreBuildEnv(index)
-          },
-          /* @__PURE__ */ h(CloseIcon, null)
-        ))), /* @__PURE__ */ h("div", null, /* @__PURE__ */ h(Btn, { size: "sm", variant: "ghost", onClick: addPreBuildEnv }, `+ ${t("project.addRow")}`), /* @__PURE__ */ h("span", { className: "dk-env-count", "data-over": preBuildEnvChars > PRE_BUILD_ENV_TOTAL_MAX ? "1" : "0" }, t("project.preBuildEnvTotalCount", {
-          count: preBuildEnvChars,
-          max: PRE_BUILD_ENV_TOTAL_MAX
-        }))))) : null, editor.value.tool ? /* @__PURE__ */ h("div", { className: "dk-field" }, /* @__PURE__ */ h("span", { className: "dk-meta" }, t("project.preBuildCwd")), /* @__PURE__ */ h(
+        )) : null, editor.value.tool ? /* @__PURE__ */ h("div", { className: "dk-field" }, /* @__PURE__ */ h("span", { className: "dk-meta" }, t("project.preBuildCwd")), /* @__PURE__ */ h(
           "input",
           {
             className: "dk-input",
@@ -3788,7 +4766,7 @@ function ConfigDialog({
             onChange: (event) => patchEditorValue({ cwd: event.target.value })
           }
         )) : null, !editor.value.tool ? /* @__PURE__ */ h("div", { className: "dk-note" }, t("project.preBuildHint")) : null) : null),
-        /* @__PURE__ */ h("div", { className: "dk-subdialog-foot" }, /* @__PURE__ */ h("span", { className: "dk-head-spacer" }), /* @__PURE__ */ h(Btn, { size: "sm", variant: "ghost", onClick: () => setEditor(null) }, t("project.configCancel")), /* @__PURE__ */ h(Btn, { size: "sm", variant: "primary", onClick: applyEditor }, t("project.configApply")))
+        /* @__PURE__ */ h("div", { className: "dk-subdialog-foot" }, escWarn ? /* @__PURE__ */ h("span", { className: "dk-env-escwarn" }, t("project.envDiscardWarn")) : null, /* @__PURE__ */ h("span", { className: "dk-head-spacer" }), /* @__PURE__ */ h(Btn, { size: "sm", variant: "ghost", onClick: requestCloseEditor }, t("project.configCancel")), /* @__PURE__ */ h(Btn, { size: "sm", variant: "primary", onClick: applyEditor }, t("project.editorApply")))
       )
     ) : null
   );

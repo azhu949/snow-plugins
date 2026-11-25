@@ -541,7 +541,9 @@
 .dk-subdialog .dk-field > .dk-input,
 .dk-subdialog .dk-field > .dk-value,
 .dk-subdialog .dk-field > .dk-checks {
-  flex: 1 1 auto;
+  /* flex-basis 取 0 而不是 auto：值很长时（环境变量摘要、Maven 命令）
+     auto 会按内容宽度参与换行判断，把整行挤到标签下面。 */
+  flex: 1 1 0;
   min-width: 0;
 }
 
@@ -646,6 +648,7 @@
   min-width: 116px;
   max-width: 190px;
   min-height: 0;
+  /* 只画一条分隔线，不加底色：色块和弹窗底色永远对不齐 */
   border-right: 1px solid var(--dk-border);
 }
 
@@ -802,6 +805,218 @@
   color: var(--dk-danger);
 }
 
+/* ---------------- 环境变量编辑器 ----------------
+   一行一条：名称短输入框 + "=" + 值（默认单行，多行内容才增高）。
+   短值不再被 4 行文本框撑出大片空白，一屏能看到十几条。 */
+
+.dk-env {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+/* 构建前步骤里的 env 与左侧标签并排，占满剩余宽度 */
+.dk-field-block > .dk-env {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.dk-env-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10.5px;
+  color: var(--dk-sub);
+}
+
+.dk-env-sep {
+  color: var(--dk-border);
+}
+
+.dk-env-usage[data-over="1"] {
+  color: var(--dk-danger);
+  font-weight: 600;
+}
+
+.dk-env-flash {
+  color: var(--dk-success);
+}
+
+.dk-env-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+/* 列头与数据行同一套栅格：名称列、值列、两个固定 26px 的按钮列。
+   按钮列写成固定宽度，非口令行也占位，删除按钮才能上下对齐。 */
+.dk-env-head,
+.dk-env-row {
+  display: grid;
+  grid-template-columns: minmax(150px, 34%) minmax(0, 1fr) 26px 26px;
+  gap: 6px;
+  align-items: start;
+}
+
+.dk-env-head {
+  grid-template-columns: minmax(150px, 34%) minmax(0, 1fr);
+  padding: 0 2px;
+  color: var(--dk-sub);
+  font-size: 10px;
+}
+
+.dk-env-key {
+  min-width: 0;
+  height: 34px;
+  padding: 0 8px;
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+  font-size: 11px;
+}
+
+/* 名称不合法时当场标红，不用等到点保存才看到一条整体报错 */
+.dk-env-key[data-invalid="1"] {
+  border-color: var(--dk-danger);
+}
+
+.dk-env-slot {
+  display: block;
+}
+
+/* 行高 34px：眼睛 / 删除按钮 26px，居中落在行内 */
+.dk-env-row > .dk-icon-btn {
+  margin-top: 4px;
+}
+
+.dk-env-value {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+/* 值框与名称框同高同圆角；高度由行数在行内联样式里给出，超出部分纵向滚动 */
+.dk-env-value .dk-env-input {
+  height: 34px;
+  min-height: 34px;
+  padding: 7px 8px;
+  line-height: 18px;
+  overflow-x: auto;
+  overflow-y: auto;
+  resize: none;
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+  font-size: 11px;
+}
+
+/* [UX优化]: 隐藏横向滚动条——它原本贴着底边，会压住文字的最后一行；
+   滚动能力保留（滚轮 / 方向键 / 拖选），视觉上不再切掉内容。
+   多行值超出可见高度时同样靠滚轮纵向滚动，滚动条本身不占位。 */
+.dk-env-value .dk-env-input {
+  scrollbar-width: none;
+}
+
+.dk-env-value .dk-env-input::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
+
+/* 口令类变量点「隐藏值」后打点显示：值本身不变，只是别让旁人一眼看全 */
+.dk-env-masked {
+  -webkit-text-security: disc;
+}
+
+.dk-env-value .dk-env-count {
+  align-self: flex-end;
+}
+
+.dk-env-hint {
+  grid-column: 1 / -1;
+  padding-left: 2px;
+  color: var(--dk-danger);
+  font-size: 10px;
+  line-height: 1.4;
+}
+
+.dk-env-hint[data-kind="warn"] {
+  color: var(--dk-warn);
+}
+
+.dk-env-foot {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* 空状态：说明这里能做什么，并给出两个具体动作 */
+.dk-env-empty {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px dashed var(--dk-border);
+  border-radius: 8px;
+  background: var(--dk-elevated);
+}
+
+.dk-env-empty-title {
+  font-size: 11.5px;
+  font-weight: 600;
+}
+
+.dk-env-empty-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 2px;
+}
+
+/* 批量导入面板 */
+.dk-env-import {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid var(--dk-border);
+  border-radius: 8px;
+  background: var(--dk-elevated);
+}
+
+.dk-env-import .dk-textarea {
+  min-height: 84px;
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+  font-size: 11px;
+}
+
+.dk-env-import-foot {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* 删除后的撤销条：替代每次删除都弹确认框 */
+.dk-env-undo {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 6px;
+  border: 1px solid var(--dk-border);
+  border-radius: 6px;
+  background: var(--dk-elevated);
+  font-size: 10.5px;
+}
+
+.dk-env-escwarn {
+  color: var(--dk-warn);
+  font-size: 10.5px;
+}
+
+/* 触摸与鼠标都够得着的点击区域（默认 22px 偏小）。
+   必须叠上 .dk-icon-btn 提高特异性：基类在本文件后面定义，单类名会被它的 24px 覆盖。 */
+.dk-icon-btn.dk-icon-btn-lg {
+  width: 26px;
+  height: 26px;
+}
+
 .dk-inline-check {
   flex: none;
   display: inline-flex;
@@ -918,8 +1133,8 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 22px;
-  height: 22px;
+  width: 24px;
+  height: 24px;
   padding: 0;
   border: 1px solid var(--dk-border);
   border-radius: 6px;
@@ -1568,5 +1783,309 @@
 @media (prefers-reduced-motion: reduce) {
   .dk-spinner {
     animation-duration: 2s;
+  }
+
+  .dk-skeleton-dot {
+    animation: none;
+    opacity: 0.6;
+  }
+}
+
+/* ---------------- 运行配置弹窗：信息层级与状态反馈 ---------------- */
+
+/* 标题旁的一句说明：与标题同一行，窄窗口自动省略，不额外占高度 */
+.dk-modal-head > .dk-modal-title {
+  flex: 0 1 auto;
+}
+
+.dk-modal-head-note {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--dk-sub);
+  font-size: 10.5px;
+  font-weight: 400;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* 字段默认单行：值再长也只省略，不会掉到标签下面 */
+.dk-modal .dk-field,
+.dk-subdialog .dk-field {
+  flex-wrap: nowrap;
+}
+
+/* 只有需要内联提示的字段才折行，让提示独占第二行 */
+.dk-modal .dk-field[data-hint="1"],
+.dk-subdialog .dk-field[data-hint="1"] {
+  flex-wrap: wrap;
+}
+
+.dk-field-hint {
+  /* 值列宽度（100% 减去标签列 96px 与间隙 8px），左缘与输入框对齐 */
+  flex: 0 0 calc(100% - 104px);
+  margin-left: 104px;
+  font-size: 10.5px;
+  line-height: 1.4;
+}
+
+.dk-modal .dk-field[data-invalid="1"] > .dk-input {
+  border-color: color-mix(in srgb, var(--dk-danger) 60%, transparent);
+}
+
+.dk-error-inline {
+  margin-top: 2px;
+}
+
+/* 左栏筛选：Dockerfile 较多时才出现 */
+.dk-config-search {
+  flex: none;
+  padding: 6px 6px 0;
+}
+
+.dk-config-search .dk-input {
+  height: 24px;
+  font-size: 11px;
+}
+
+.dk-config-item-head {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  width: 100%;
+  min-width: 0;
+}
+
+.dk-config-item-head .dk-config-item-name {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* 该项有未保存修改：名称前一个警示点，切走再切回也看得见 */
+.dk-config-item-dot {
+  flex: none;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--dk-warn);
+}
+
+/* 「已配置」徽标：一眼看出哪几份已经存过，不用逐项点开 */
+.dk-config-item-badge {
+  flex: none;
+  padding: 0 4px;
+  border-radius: 4px;
+  font-size: 9.5px;
+  line-height: 14px;
+  font-weight: 500;
+  color: var(--dk-sub);
+  background: var(--dk-hover);
+}
+
+.dk-config-item-badge[data-tone="ok"] {
+  color: var(--dk-success);
+  background: color-mix(in srgb, var(--dk-success) 14%, transparent);
+}
+
+/* 文件已不存在：只把路径行标成警示色，整项保持可读 */
+.dk-config-item[data-missing="1"] .dk-config-item-path {
+  color: var(--dk-warn);
+}
+
+.dk-config-empty,
+.dk-modal-empty {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 8px;
+}
+
+.dk-modal-empty {
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  text-align: center;
+}
+
+.dk-config-empty-title,
+.dk-modal-empty-title {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+/* 载入提示条：解释「为什么现在点不动」 */
+.dk-statusbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+  padding: 5px 8px;
+  border-radius: 6px;
+  background: var(--dk-hover);
+  font-size: 11px;
+}
+
+/* 读取失败：与「正在读取」区分，不显示脉动点，右侧留出重试按钮 */
+.dk-statusbar[data-tone="error"] {
+  color: var(--dk-danger);
+  background: color-mix(in srgb, var(--dk-danger) 10%, transparent);
+}
+
+.dk-statusbar[data-tone="error"] .dk-btn {
+  margin-left: auto;
+}
+
+.dk-skeleton-dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--dk-sub);
+  animation: dk-skeleton-pulse 1.1s ease-in-out infinite;
+}
+
+@keyframes dk-skeleton-pulse {
+  0%,
+  100% {
+    opacity: 0.25;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+.dk-form[data-locked="1"] {
+  opacity: 0.62;
+}
+
+/* 值行整体可点：整行都是编辑入口，不必瞄准 26px 的图标 */
+.dk-value-btn {
+  /* 不写 width：宽度交给字段行的 flex 分配，写死 100% 会把字段挤到换行 */
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+.dk-value-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.dk-value-btn .dk-value-text {
+  height: 26px;
+  padding: 0 8px;
+  border: 1px solid var(--dk-border);
+  border-radius: 6px;
+}
+
+.dk-value-btn:hover:not(:disabled) .dk-value-text {
+  border-color: color-mix(in srgb, var(--dk-fg) 30%, transparent);
+  color: var(--dk-fg);
+}
+
+.dk-value-btn:hover:not(:disabled) .dk-icon-btn {
+  color: var(--dk-fg);
+  background: var(--dk-hover);
+}
+
+.dk-value-btn:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--dk-fg) 45%, transparent);
+  outline-offset: 1px;
+}
+
+/* 「更多参数」按钮上的启用计数 */
+.dk-count-pill {
+  min-width: 14px;
+  padding: 0 4px;
+  border-radius: 6px;
+  color: var(--dk-fg);
+  background: var(--dk-active);
+  font-size: 9.5px;
+  line-height: 14px;
+  text-align: center;
+}
+
+.dk-count-pill[data-empty="1"] {
+  color: var(--dk-sub);
+  background: transparent;
+}
+
+/* 底栏状态：未保存 / 已保存 / 待确认，三态共用一行文案 */
+.dk-foot-note {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--dk-sub);
+  font-size: 10.5px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.dk-foot-note[data-tone="warn"] {
+  color: var(--dk-warn);
+}
+
+.dk-foot-note[data-tone="ok"] {
+  color: var(--dk-success);
+}
+
+/* 窄窗口：左栏改为顶部横条，标签列收窄，弹窗不挤成一团 */
+@media (max-width: 660px) {
+  .dk-modal-mask {
+    padding: 12px;
+  }
+
+  .dk-modal {
+    height: min(100%, calc(100vh - 32px));
+  }
+
+  .dk-modal-body {
+    flex-direction: column;
+  }
+
+  .dk-modal-side {
+    flex: none;
+    min-width: 0;
+    max-width: none;
+    max-height: 32%;
+    border-right: 0;
+    border-bottom: 1px solid var(--dk-border);
+  }
+
+  .dk-config-list {
+    flex-direction: row;
+    gap: 4px;
+    overflow-x: auto;
+    overflow-y: hidden;
+  }
+
+  .dk-config-item {
+    flex: none;
+    width: auto;
+    min-width: 132px;
+  }
+
+  .dk-config-item-head {
+    width: auto;
+  }
+
+  .dk-modal .dk-field > .dk-meta {
+    width: 76px;
+    font-size: 10px;
+  }
+
+  .dk-field-hint {
+    flex-basis: calc(100% - 84px);
+    margin-left: 84px;
+  }
+
+  .dk-config-empty,
+  .dk-modal-empty {
+    align-items: flex-start;
+    text-align: left;
   }
 }

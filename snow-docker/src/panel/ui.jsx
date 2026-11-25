@@ -1,9 +1,11 @@
 // 通用原子组件：按钮、状态徽标、加载、空状态、字段行、错误盒。
 import { h } from "./react.js";
 
-export function Btn({ children, onClick, disabled, variant, size, title, type = "button" }) {
+export function Btn({ children, onClick, disabled, variant, size, title, type = "button", ...rest }) {
+  // [UX优化]: 透传 aria-* / data-* 等属性，按钮才能声明展开态、忙碌态，读屏与样式都能跟上。
   return (
     <button
+      {...rest}
       type={type}
       className="dk-btn"
       data-variant={variant}
